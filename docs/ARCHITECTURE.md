@@ -21,6 +21,8 @@ automated agents). The README stays short; details live here.
 - **Bit-perfect** output for audiophile use when enabled (no unnecessary DSP).
 - **Hardware / endpoint volume** — adjust the sound device or sink, not only in-app
   soft gain.
+- **Media keys** — play/pause, skip, volume, mute from keyboard and OS (see
+  [Media keys](#media-keys-requirement)).
 - Eventually integrate **streaming** (Tidal, Qobuz) via unofficial APIs.
 - Present sources as **one searchable library** (see [Unified catalog](#unified-catalog)).
 - **Simple** Libadwaita GUI; native GNOME look (not Qt on Linux).
@@ -107,6 +109,39 @@ will work for Qt signals later).
 
 `python3 -m venv .venv --system-site-packages`
 
+### Minimized player (compact controller)
+
+The main window should support a **minimized** layout so users can keep Tunes open
+without dedicating screen space to browsing and artwork.
+
+| Mode | What the user sees |
+|------|---------------------|
+| **Expanded** (default) | Full library UI — lists, search, artwork, transport bar, volume, etc. |
+| **Minimized** | A small **compact controller** only: **play/pause**, **previous**, **next** (skip). |
+
+**Behavior:**
+
+- Minimize/restore is a **UI layout toggle** on the main window (e.g. header-bar
+  control or keyboard shortcut). It is not “quit” — playback and queue continue
+  unchanged via **PlayerService**.
+- The compact controller stays **always on top of the music session**: same
+  `PlayerService` API (`play`, `pause`, `skip_next`, `skip_previous`); no duplicate
+  playback state in the widget.
+- Optional later: show **current track title** (single line, ellipsized) or album art
+  thumbnail in minimized mode — not required for v0.1.
+- Window geometry: minimized mode uses a **small fixed or minimum size** (roughly
+  transport-bar height × narrow width); restoring expanded mode returns the previous
+  size and layout.
+- **MPRIS** and background playback behave the same in both modes; minimized mode is
+  for users who want a tiny on-screen remote while working elsewhere.
+
+**Implementation notes (when UI lands):**
+
+- Keep expanded/minimized state in `ui/gtk/` (e.g. `Adw.Application` or window
+  settings); persist preference in config if users expect it across sessions.
+- Same transport controls as the full **transport bar** — one component, two layouts
+  (reuse buttons/signals rather than a second control path to core).
+
 ---
 
 ## Sound / playback separation
@@ -175,7 +210,7 @@ Implement bit-perfect as an explicit **settings profile** applied when construct
 
 Volume must **not** rely only on in-app soft gain wired into the player.
 
-**Goal:** the UI slider (and MPRIS volume, keyboard keys) adjusts **endpoint volume**
+**Goal:** the UI slider (and MPRIS volume, media keys) adjusts **endpoint volume**
 — the selected **output sink**, **ALSA mixer control**, or **DAC hardware volume**
  exposed by the stack — so listening level changes without Tunes modifying PCM when
  bit-perfect mode is active.
@@ -202,6 +237,42 @@ Linux implementations (platform/linux/audio.py):
 
 **UI:** show when volume is **device** vs **software** (e.g. badge or subtitle in
 preferences) so users know bit-perfect status is intact.
+
+### Media keys (requirement)
+
+Tunes must respond to **hardware media keys** and OS-level media controls — the same
+actions as the transport bar and volume slider, without requiring the window to be
+focused.
+
+| Input | Action | Routes through |
+|-------|--------|----------------|
+| Play / Pause (toggle) | `PlayerService.play()` / `pause()` | core playback |
+| Next / Previous | `skip_next` / `skip_previous` | core queue |
+| Volume up / down | step endpoint volume | **VolumeController** |
+| Mute (if exposed) | mute or restore endpoint | **VolumeController** |
+| Stop (if exposed) | pause (keep queue position) | core playback |
+
+**Linux / GNOME (primary):**
+
+- **MPRIS** (`platform/linux/mpris.py`) is the main integration: GNOME Shell, Bluetooth
+  headsets, lock screen, and other clients send play/pause/next/prev/volume over D-Bus
+  when Tunes is a registered media player. Implement MPRIS on top of **PlayerService**
+  and **VolumeController**, not GTK or mpv directly.
+- **GTK media keys** (`Gtk.EventControllerKey` on the application): handle
+  `XF86AudioPlay`, `XF86AudioPause`, `XF86AudioNext`, `XF86AudioPrev`,
+  `XF86AudioStop`, `XF86AudioRaiseVolume`, `XF86AudioLowerVolume`,
+  `XF86AudioMute` when the app has keyboard focus — same service calls as MPRIS.
+- Background / unfocused control relies on **MPRIS**; do not duplicate global shortcut
+  hacks in the UI layer.
+
+**Volume keys:** use **VolumeController** (endpoint/sink volume), not mpv soft volume,
+so behavior matches the slider and bit-perfect rules (see [Volume control](#volume-control-requirement)).
+
+**Other platforms (later):** macOS media keys / Now Playing; Windows global media keys
+— implement in `platform/` with the same **PlayerService** / **VolumeController** API.
+
+Works in **minimized** mode, while browsing the library, and when the window is in the
+background (via MPRIS on Linux).
 
 ### Events (core → UI)
 
@@ -275,7 +346,7 @@ instead of mpv). **AGPL** is unnecessary for a desktop app.
 ## Roadmap (ordered)
 
 1. Local folder scan + SQLite library index.
-2. `PlaybackEngine` + `MpvEngine` + queue; GTK transport bar.
+2. `PlaybackEngine` + `MpvEngine` + queue; GTK transport bar (expanded + minimized compact controller); **MPRIS + media keys**.
 3. **Bit-perfect profile + `VolumeController` (PipeWire/ALSA endpoint volume).**
 4. DEB package with declared depends (`python3-gi`, `gir1.2-adw-1`, `mpv`, …).
 5. One streaming backend (Tidal or Qobuz).
@@ -294,3 +365,5 @@ instead of mpv). **AGPL** is unnecessary for a desktop app.
 - Assume a normal venv sees `gi` without `--system-site-packages`.
 - Route the main volume slider through **mpv soft volume** while bit-perfect is enabled.
 - Enable ReplayGain or resampling silently in bit-perfect mode.
+- Handle media keys only in focused GTK windows without **MPRIS** (breaks GNOME /
+  headset / lock-screen control when unfocused).
