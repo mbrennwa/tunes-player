@@ -149,6 +149,7 @@ class PlayerService:
                     removed=message[2],
                     skipped=message[3],
                     errors=message[4],
+                    art_indexed=message[5] if len(message) > 5 else 0,
                 )
                 if self._scan_on_finished is not None:
                     self._scan_on_finished(result)
@@ -188,12 +189,6 @@ class PlayerService:
         self._emit("library_updated")
 
     def get_playback_state(self) -> PlaybackState:
-        engine = self._engine
-        if engine is not None and self._current_track is not None:
-            duration = engine.get_duration()
-            if duration is not None:
-                self._duration_sec = duration
-            self._is_playing = engine.is_playing()
         return PlaybackState(
             current_track=self._current_track,
             is_playing=self._is_playing,
@@ -500,19 +495,14 @@ class PlayerService:
         self._position_synced_at = time.monotonic()
 
     def _playback_position(self) -> float:
-        if not self._is_playing or self._position_synced_at is None:
-            return self._position_sec
-        elapsed = time.monotonic() - self._position_synced_at
-        position = self._position_sec + elapsed
-        if self._duration_sec is not None and self._duration_sec > 0:
-            return min(position, self._duration_sec)
-        return position
+        return self._position_sec
 
     def _apply_engine_position(self, position_sec: float, *, allow_backward: bool = False) -> None:
         position = max(0.0, position_sec)
         if not allow_backward:
-            if self._is_playing and self._position_synced_at is not None:
-                if position < self._playback_position() - 0.08:
+            if self._is_playing:
+                # mpv time-pos flickers at track start; never snap backward while playing.
+                if position < self._position_sec:
                     return
             elif position < self._position_sec:
                 return

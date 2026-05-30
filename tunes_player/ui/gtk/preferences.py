@@ -211,10 +211,15 @@ class PreferencesWindow(Adw.PreferencesWindow):
 
     def _update_scan_finished(self, result: ScanResult) -> None:
         self._scan_button.set_sensitive(True)
-        self._scan_row.set_subtitle(
-            f"Done — indexed {result.indexed}, skipped {result.skipped}, "
-            f"removed {result.removed}, errors {result.errors}",
-        )
+        parts = [
+            f"indexed {result.indexed}",
+            f"skipped {result.skipped}",
+            f"removed {result.removed}",
+            f"errors {result.errors}",
+        ]
+        if result.art_indexed:
+            parts.insert(1, f"art {result.art_indexed}")
+        self._scan_row.set_subtitle(f"Done — {', '.join(parts)}")
         GLib.idle_add(self._defer_library_notify)
 
     def _defer_library_notify(self) -> bool:

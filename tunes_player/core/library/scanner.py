@@ -11,6 +11,11 @@ from pathlib import Path
 
 from tunes_player.core.config import AppConfig
 from tunes_player.core.library import ids
+from tunes_player.core.library.art_cache import (
+    backfill_missing_album_art,
+    index_album_art_for_file,
+    prune_orphan_album_art,
+)
 from tunes_player.core.library.db import connect
 from tunes_player.core.library.formats import codec_for_path, has_tier1_extension, is_tier1_path
 
@@ -23,6 +28,7 @@ class ScanResult:
     removed: int
     skipped: int
     errors: int
+    art_indexed: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +57,7 @@ class LibraryScanner:
 
     def __init__(self, *, db_path: Path, config: AppConfig) -> None:
         self._db_path = db_path
+        self._data_dir = db_path.parent
         self._config = config
 
     def scan(self, *, progress: ProgressCallback | None = None) -> ScanResult:
@@ -118,6 +125,13 @@ class LibraryScanner:
 
                 file_id = self._insert_file(connection, parsed)
                 self._insert_track(connection, parsed, file_id)
+                index_album_art_for_file(
+                    connection,
+                    data_dir=self._data_dir,
+                    path=Path(parsed.path),
+                    album_artist=parsed.album_artist,
+                    album=parsed.album,
+                )
                 indexed += 1
 
                 if indexed % self._BATCH_SIZE == 0:
@@ -125,6 +139,8 @@ class LibraryScanner:
                     connection.execute("BEGIN")
 
             removed = self._remove_missing_files(connection, seen_paths)
+            art_indexed = backfill_missing_album_art(connection, data_dir=self._data_dir)
+            prune_orphan_album_art(connection, data_dir=self._data_dir)
             connection.commit()
         except Exception:
             connection.rollback()
@@ -132,7 +148,13 @@ class LibraryScanner:
         finally:
             connection.close()
 
-        return ScanResult(indexed=indexed, removed=removed, skipped=skipped, errors=errors)
+        return ScanResult(
+            indexed=indexed,
+            removed=removed,
+            skipped=skipped,
+            errors=errors,
+            art_indexed=art_indexed,
+        )
 
     def _collect_candidates(self, *, progress: ProgressCallback | None = None) -> list[Path]:
         paths: list[Path] = []

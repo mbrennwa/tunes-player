@@ -56,15 +56,9 @@ class LibraryStore:
             ORDER BY album_artist COLLATE NOCASE, album COLLATE NOCASE
             """,
         ).fetchall()
+        art_by_album = self._art_uri_map([row["album_id"] for row in rows])
         return [
-            Album(
-                id=row["album_id"],
-                title=row["album"] or "Unknown Album",
-                artist_name=row["album_artist"] or "Unknown Artist",
-                source=Source.LOCAL,
-                year=row["year"],
-                track_count=int(row["track_count"]),
-            )
+            self._row_to_album(row, art_uri=art_by_album.get(row["album_id"]))
             for row in rows
         ]
 
@@ -94,21 +88,15 @@ class LibraryStore:
         ).fetchone()
         if row is None:
             return None
-        return Album(
-            id=row["album_id"],
-            title=row["album"] or "Unknown Album",
-            artist_name=row["album_artist"] or "Unknown Artist",
-            source=Source.LOCAL,
-            year=row["year"],
-            track_count=int(row["track_count"]),
-        )
+        return self._row_to_album(row, art_uri=self._art_uri_for_album(album_id))
 
     def get_album_tracks(self, album_id: str) -> list[Track]:
         rows = self._connection.execute(
             """
-            SELECT t.id, t.title, t.artist, t.album, t.album_artist, f.duration_sec
+            SELECT t.id, t.title, t.artist, t.album, t.album_artist, f.duration_sec, aa.art_uri
             FROM tracks t
             JOIN files f ON f.id = t.file_id
+            LEFT JOIN album_art aa ON aa.album_id = t.album_id
             WHERE t.album_id = ?
             ORDER BY t.disc_number NULLS LAST, t.track_number NULLS LAST, t.title COLLATE NOCASE
             """,
@@ -141,21 +129,21 @@ class LibraryStore:
             """,
             (artist.name,),
         ).fetchall()
+        art_by_album = self._art_uri_map([row["album_id"] for row in rows])
         return [
-            Album(
-                id=row["album_id"],
-                title=row["album"] or "Unknown Album",
-                artist_name=row["album_artist"] or "Unknown Artist",
-                source=Source.LOCAL,
-                year=row["year"],
-                track_count=int(row["track_count"]),
-            )
+            self._row_to_album(row, art_uri=art_by_album.get(row["album_id"]))
             for row in rows
         ]
 
     def get_track(self, track_id: str) -> Track | None:
         row = self._connection.execute(
-            "SELECT id, title, artist, album, album_artist FROM tracks WHERE id = ?",
+            """
+            SELECT t.id, t.title, t.artist, t.album, t.album_artist, f.duration_sec, aa.art_uri
+            FROM tracks t
+            JOIN files f ON f.id = t.file_id
+            LEFT JOIN album_art aa ON aa.album_id = t.album_id
+            WHERE t.id = ?
+            """,
             (track_id,),
         ).fetchone()
         if row is None:
@@ -217,9 +205,10 @@ class LibraryStore:
         ).fetchall()
         track_rows = self._connection.execute(
             """
-            SELECT t.id, t.title, t.artist, t.album, t.album_artist, f.duration_sec
+            SELECT t.id, t.title, t.artist, t.album, t.album_artist, f.duration_sec, aa.art_uri
             FROM tracks t
             JOIN files f ON f.id = t.file_id
+            LEFT JOIN album_art aa ON aa.album_id = t.album_id
             WHERE t.title LIKE ? COLLATE NOCASE
                OR t.artist LIKE ? COLLATE NOCASE
                OR t.album LIKE ? COLLATE NOCASE
@@ -228,15 +217,9 @@ class LibraryStore:
             """,
             (needle, needle, needle),
         ).fetchall()
+        art_by_album = self._art_uri_map([row["album_id"] for row in album_rows])
         albums = [
-            Album(
-                id=row["album_id"],
-                title=row["album"] or "Unknown Album",
-                artist_name=row["album_artist"] or "Unknown Artist",
-                source=Source.LOCAL,
-                year=row["year"],
-                track_count=int(row["track_count"]),
-            )
+            self._row_to_album(row, art_uri=art_by_album.get(row["album_id"]))
             for row in album_rows
         ]
         tracks = [self._row_to_track(row) for row in track_rows]
@@ -257,9 +240,39 @@ class LibraryStore:
             return f"MP3 · {metadata.channels or 2}ch"
         return f"{codec} · {metadata.channels or 2}ch"
 
+    def _art_uri_for_album(self, album_id: str) -> str | None:
+        row = self._connection.execute(
+            "SELECT art_uri FROM album_art WHERE album_id = ?",
+            (album_id,),
+        ).fetchone()
+        return None if row is None else str(row["art_uri"])
+
+    def _art_uri_map(self, album_ids: list[str]) -> dict[str, str]:
+        if not album_ids:
+            return {}
+        placeholders = ",".join("?" * len(album_ids))
+        rows = self._connection.execute(
+            f"SELECT album_id, art_uri FROM album_art WHERE album_id IN ({placeholders})",
+            album_ids,
+        ).fetchall()
+        return {str(row["album_id"]): str(row["art_uri"]) for row in rows}
+
+    @staticmethod
+    def _row_to_album(row: sqlite3.Row, *, art_uri: str | None = None) -> Album:
+        return Album(
+            id=row["album_id"],
+            title=row["album"] or "Unknown Album",
+            artist_name=row["album_artist"] or "Unknown Artist",
+            source=Source.LOCAL,
+            year=row["year"],
+            track_count=int(row["track_count"]),
+            art_uri=art_uri,
+        )
+
     @staticmethod
     def _row_to_track(row: sqlite3.Row) -> Track:
         duration = row["duration_sec"] if "duration_sec" in row.keys() else None
+        art_uri = row["art_uri"] if "art_uri" in row.keys() and row["art_uri"] else None
         return Track(
             id=row["id"],
             title=row["title"] or "Unknown Title",
@@ -267,4 +280,5 @@ class LibraryStore:
             album_title=row["album"],
             source=Source.LOCAL,
             duration_sec=duration,
+            art_uri=art_uri,
         )

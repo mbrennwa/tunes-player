@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -40,9 +40,25 @@ CREATE TABLE IF NOT EXISTS tracks (
     year INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS album_art (
+    album_id TEXT PRIMARY KEY,
+    art_uri TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tracks_album_id ON tracks(album_id);
 CREATE INDEX IF NOT EXISTS idx_tracks_album_artist ON tracks(album_artist);
 CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
+"""
+
+_MIGRATION_V2 = """
+CREATE TABLE IF NOT EXISTS album_art (
+    album_id TEXT PRIMARY KEY,
+    art_uri TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 """
 
 
@@ -66,5 +82,15 @@ def _migrate(connection: sqlite3.Connection) -> None:
         connection.execute(
             "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
+        )
+        connection.commit()
+        return
+
+    version = int(row["value"])
+    if version < 2:
+        connection.executescript(_MIGRATION_V2)
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            ("2",),
         )
         connection.commit()

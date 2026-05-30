@@ -13,6 +13,7 @@ from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.models import Album, Artist
 from tunes_player.core.services import PlayerService
+from tunes_player.ui.gtk.art import ArtLoader
 from tunes_player.ui.gtk.util import format_duration
 
 
@@ -23,6 +24,7 @@ class AlbumGridView(Gtk.ScrolledWindow):
         albums: list[Album],
         on_album_activated: Callable[[str], None],
         empty_message: str | None = None,
+        art_loader: ArtLoader | None = None,
     ) -> None:
         super().__init__(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         self.add_css_class("view")
@@ -51,7 +53,7 @@ class AlbumGridView(Gtk.ScrolledWindow):
         flow.set_margin_end(18)
         self.set_child(flow)
 
-        self._populate_albums(flow, albums, on_album_activated)
+        self._populate_albums(flow, albums, on_album_activated, art_loader=art_loader)
 
     @staticmethod
     def _populate_albums(
@@ -59,12 +61,13 @@ class AlbumGridView(Gtk.ScrolledWindow):
         albums: list[Album],
         on_album_activated: Callable[[str], None],
         *,
+        art_loader: ArtLoader | None = None,
         start: int = 0,
         batch_size: int = 24,
     ) -> None:
         end = min(start + batch_size, len(albums))
         for album in albums[start:end]:
-            card = _album_card(album)
+            card = _album_card(album, art_loader=art_loader)
             card.connect("clicked", lambda _btn, album_id=album.id: on_album_activated(album_id))
             flow.append(card)
 
@@ -74,6 +77,7 @@ class AlbumGridView(Gtk.ScrolledWindow):
                 flow,
                 albums,
                 on_album_activated,
+                art_loader,
                 start=end,
                 batch_size=batch_size,
             )
@@ -140,6 +144,7 @@ class AlbumDetailView(Gtk.Box):
         *,
         service: PlayerService,
         album: Album,
+        art_loader: ArtLoader | None = None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
         self.add_css_class("view")
@@ -154,6 +159,8 @@ class AlbumDetailView(Gtk.Box):
         art = Gtk.Image.new_from_icon_name("audio-x-generic-symbolic")
         art.set_pixel_size(160)
         art.add_css_class("card")
+        if art_loader is not None:
+            art_loader.set_image(art, album.art_uri, pixel_size=160)
         header.append(art)
 
         meta = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, vexpand=True)
@@ -208,6 +215,7 @@ class SearchResultsView(Gtk.ScrolledWindow):
         service: PlayerService,
         query: str,
         on_album_activated: Callable[[str], None],
+        art_loader: ArtLoader | None = None,
     ) -> None:
         super().__init__(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         self.add_css_class("view")
@@ -235,7 +243,7 @@ class SearchResultsView(Gtk.ScrolledWindow):
             album_flow.set_row_spacing(12)
             box.append(album_flow)
             for album in results.albums:
-                card = _album_card(album, small=True)
+                card = _album_card(album, small=True, art_loader=art_loader)
                 card.connect(
                     "clicked",
                     lambda _btn, album_id=album.id: on_album_activated(album_id),
@@ -325,7 +333,12 @@ def _section_label(text: str) -> Gtk.Label:
     return label
 
 
-def _album_card(album: Album, *, small: bool = False) -> Gtk.Button:
+def _album_card(
+    album: Album,
+    *,
+    small: bool = False,
+    art_loader: ArtLoader | None = None,
+) -> Gtk.Button:
     button = Gtk.Button()
     button.add_css_class("card")
     button.add_css_class("album-card")
@@ -338,7 +351,10 @@ def _album_card(album: Album, *, small: bool = False) -> Gtk.Button:
     button.set_child(box)
 
     art = Gtk.Image.new_from_icon_name("audio-x-generic-symbolic")
-    art.set_pixel_size(96 if not small else 72)
+    pixel_size = 96 if not small else 72
+    art.set_pixel_size(pixel_size)
+    if art_loader is not None:
+        art_loader.set_image(art, album.art_uri, pixel_size=pixel_size)
     box.append(art)
 
     title = Gtk.Label(label=album.title, wrap=True, justify=Gtk.Justification.CENTER, max_width_chars=18)

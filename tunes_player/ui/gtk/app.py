@@ -12,6 +12,7 @@ from gi.repository import Adw, GLib, Gtk  # noqa: E402
 from tunes_player.core.config import ConfigManager
 from tunes_player.core.services import PlayerService
 from tunes_player.platform.linux.audio import create_volume_controller
+from tunes_player.ui.gtk.art import ArtLoader
 from tunes_player.ui.gtk.now_playing import NowPlayingBar, attach_media_keys
 from tunes_player.ui.gtk.preferences import PreferencesWindow
 from tunes_player.ui.gtk.views import (
@@ -30,6 +31,7 @@ class TunesWindow(Adw.ApplicationWindow):
     def __init__(self, *, application: Adw.Application, service: PlayerService) -> None:
         super().__init__(application=application, title="Tunes")
         self._service = service
+        self._art_loader = ArtLoader(service.config.data_dir)
         self._minimized = False
         self._search_active = False
         self._preferences: PreferencesWindow | None = None
@@ -39,6 +41,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._now_playing = NowPlayingBar(
             service=service,
             on_restore=lambda: self._set_minimized(False),
+            art_loader=self._art_loader,
         )
         self._now_playing.set_queue_handler(self._open_queue_sheet)
 
@@ -168,6 +171,7 @@ class TunesWindow(Adw.ApplicationWindow):
             albums=albums,
             on_album_activated=self._open_album,
             empty_message=empty_message,
+            art_loader=self._art_loader,
         )
         self._replace_root_page(
             self._albums_nav,
@@ -197,7 +201,11 @@ class TunesWindow(Adw.ApplicationWindow):
         album = self._service.get_album(album_id)
         if album is None:
             return
-        detail = AlbumDetailView(service=self._service, album=album)
+        detail = AlbumDetailView(
+            service=self._service,
+            album=album,
+            art_loader=self._art_loader,
+        )
         page = Adw.NavigationPage(title=album.title, child=detail, tag=album_id)
 
         visible = self._content_stack.get_visible_child_name()
@@ -221,6 +229,7 @@ class TunesWindow(Adw.ApplicationWindow):
         view = AlbumGridView(
             albums=albums,
             on_album_activated=self._open_album,
+            art_loader=self._art_loader,
         )
         page = Adw.NavigationPage(title=title, child=view, tag=artist_id)
         if self._artists_nav.get_visible_page() is not None and self._artists_nav.get_visible_page().get_tag() != "artists-root":
@@ -272,6 +281,7 @@ class TunesWindow(Adw.ApplicationWindow):
             service=self._service,
             query=text,
             on_album_activated=self._open_album,
+            art_loader=self._art_loader,
         )
         self._search_host.append(view)
 

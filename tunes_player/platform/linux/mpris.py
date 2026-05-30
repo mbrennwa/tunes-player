@@ -12,6 +12,7 @@ gi.require_version("GLib", "2.0")
 
 from gi.repository import Gio, GLib  # noqa: E402
 
+from tunes_player.core.art import resolve_art_url  # noqa: E402
 from tunes_player.core.backends.local import resolve_local_track  # noqa: E402
 from tunes_player.core.services import PlaybackState, PlayerService  # noqa: E402
 
@@ -517,6 +518,12 @@ class MprisService:
         source = resolve_local_track(self._service.store, track.id)
         if source is not None:
             metadata["xesam:url"] = GLib.Variant("s", source.uri)
+        art_url = resolve_art_url(
+            track.art_uri,
+            data_dir=self._service.config.data_dir,
+        )
+        if art_url is not None:
+            metadata["mpris:artUrl"] = GLib.Variant("s", art_url)
         return metadata
 
 

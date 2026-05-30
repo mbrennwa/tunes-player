@@ -31,7 +31,9 @@ def run_library_scan(
         queue.put(("error", str(exc)))
         return
 
-    queue.put(("done", result.indexed, result.removed, result.skipped, result.errors))
+    queue.put(
+        ("done", result.indexed, result.removed, result.skipped, result.errors, result.art_indexed),
+    )
 
 
 def create_scan_process(
