@@ -31,6 +31,7 @@ automated agents). The README stays short; details live here.
 
 - Streaming auth and playback.
 - Unified cross-source deduplication (beyond basic federated search).
+- **Playlists** (create, edit, browse) — see [Main window layout](#main-window-layout-minimal).
 - macOS / Windows UI.
 - Flatpak (may come later).
 - Local formats beyond [Tier 1](#local-audio-formats-v01) (e.g. Opus, WavPack, APE, DSD, cue sheets).
@@ -141,6 +142,46 @@ without dedicating screen space to browsing and artwork.
   settings); persist preference in config if users expect it across sessions.
 - Same transport controls as the full **transport bar** — one component, two layouts
   (reuse buttons/signals rather than a second control path to core).
+
+### Main window layout (minimal)
+
+Reference players: **GNOME Music** (Libadwaita split view + bottom bar), **iTunes /
+Apple Music** (sidebar library + album detail), **Roon** (persistent Now Playing bar,
+queue overlay — not multi-zone or DSP UI). Tunes stays **library-first**, **GNOME-native**,
+and simpler than Roon.
+
+**Structure:** one window, three zones — *browse in the middle, control at the bottom*.
+
+```text
+┌ Header: search · settings · minimize ─────────────────────────┐
+├ Sidebar ──┬ Main pane (single navigation stack) ──────────────┤
+│ Albums    │  Album grid · artist discography · album detail    │
+│ Artists   │  (cover + track list) · search results             │
+│ Queue →   │                                                   │
+│           │  Queue opens as sheet/overlay, not a third column  │
+├───────────┴───────────────────────────────────────────────────┤
+│ Now Playing bar: art · title · transport · volume · queue   │
+└───────────────────────────────────────────────────────────────┘
+```
+
+**Sidebar (v0.1):** **Albums**, **Artists**, **Queue** (opens play queue sheet). Use
+`AdwNavigationSplitView` + `AdwSidebar`; collapse to navigation list on narrow widths.
+
+**Main pane:** stack navigation — browse grid → album/artist detail; header search
+replaces pane with results while active.
+
+**Now Playing bar:** always visible in expanded mode; shared widget with [minimized
+mode](#minimized-player-compact-controller). Optional subtitle for audiophile context
+(format, sample rate, bit-perfect / device-volume indicator). Click bar (not buttons)
+may open a larger Now Playing sheet later — not required for v0.1.
+
+**Playlists — later, low priority:** not in v0.1 sidebar. Primary use case is album/
+artist browsing and the **play queue**; playlists are deferred for users who want them,
+not a driver for early UI work. When added: sidebar entry, CRUD in core, same main-pane
+patterns as albums. Unified cross-source playlists remain [catalog phase D](#unified-catalog).
+
+**Deferred after v0.1 UI skeleton:** folder browse (Roon-style), full-screen Now Playing,
+lyrics, streaming source badges in browse views.
 
 ---
 
@@ -353,6 +394,7 @@ instead of mpv). **AGPL** is unnecessary for a desktop app.
 6. Federated catalog search (phase A).
 7. Heuristic dedup / prefer-local.
 8. Optional Qt UI for macOS.
+9. Playlists UI (if needed for other users; not required for core browsing workflow).
 
 ---
 
