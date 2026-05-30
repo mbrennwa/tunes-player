@@ -33,15 +33,26 @@ later without rewriting playback or library logic.
 Runtime (typical Debian/Ubuntu packages):
 
 - Python 3.11+
-- GTK 4 and Libadwaita (`gir1.2-adw-1`, `gir1.2-gtk-4.0`, PyGObject)
+- PyGObject and typelibs: `python3-gi`, `python3-gi-cairo`, `gir1.2-gtk-4.0`, `gir1.2-adw-1`
 - [mpv](https://mpv.io/) with libmpv (playback engine, planned)
 
+PyGObject is provided by the system on GNOME; a normal venv cannot see it unless you use
+`--system-site-packages` (recommended below) or install PyGObject into the venv yourself.
+
 ## Install from source
+
+System dependencies (Debian/Ubuntu):
+
+```bash
+sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1
+```
+
+Clone and install into a venv that can use system `gi`:
 
 ```bash
 git clone https://github.com/mbrennwa/tunes-player.git
 cd tunes-player
-python3 -m venv .venv
+python3 -m venv .venv --system-site-packages
 source .venv/bin/activate
 pip install -e .
 tunes-player
