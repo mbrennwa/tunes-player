@@ -517,6 +517,38 @@ Trackable open items. Ordered milestones are in [Roadmap](#roadmap-ordered) abov
   Builds on `VolumeController.subscribe()` and MPRIS/D-Bus. See
   [External control interface](#external-control-interface-requirement).
 
+### Bit-perfect playback (mpv output profile)
+
+mpv remains the right engine (decode, seek, formats, streaming, cross-platform).
+Bit-perfect is an **output policy** on top of mpv — not a reason to replace it.
+Today only the mpv-side half is done (volume 100%, ReplayGain off, device/sink
+volume when `_effective_bit_perfect()` is true). PCM may still be resampled or
+mixed by PipeWire/Pulse before the DAC.
+
+**Done:**
+
+- [x] mpv soft gain disabled when bit-perfect is effective (`volume=100`, no ReplayGain).
+- [x] Volume slider routes to **VolumeController** (PipeWire/Pulse sink), not mpv gain.
+- [x] UI indicates bit-perfect vs software-volume fallback.
+
+**Still needed for proper bit-perfect:**
+
+- [ ] **Output path** — when bit-perfect is on, prefer direct ALSA (or a PipeWire
+  pro-audio / exclusive node) instead of the default mixed/resampling sink path.
+- [ ] **Exclusive / hog mode** — where supported, take exclusive device access so
+  nothing else resamples or mixes on that output.
+- [ ] **Rate and format matching** — configure mpv/AO so output matches source sample
+  rate, bit depth, and channel layout (no silent resampling).
+- [ ] **Device selection** — let users pick a specific ALSA `hw:` (or equivalent)
+  device, not only a Pulse/PipeWire sink name.
+- [ ] **Profile wiring** — apply the above in `engines/mpv.py` + `platform/linux/audio.py`
+  when constructing `MpvEngine` (see [Bit-perfect playback](#bit-perfect-playback-requirement));
+  keep PipeWire-first path for non-bit-perfect / device-volume use.
+- [ ] **UI honesty** — show which output path is active (e.g. sink vs direct ALSA,
+  exclusive on/off) so users know bit-perfect status is intact.
+- [ ] **Platform parity (later)** — WASAPI exclusive (Windows), CoreAudio hog mode
+  (macOS); same `PlaybackEngine` profile idea, different platform backends.
+
 ---
 
 ## Pitfalls (do not)
