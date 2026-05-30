@@ -33,7 +33,8 @@ tunes_player/
 The **core** is UI- and engine-agnostic so other frontends (e.g. Qt on macOS) and a
 shared **mpv** backend can be added without rewriting library or playback logic.
 
-**Full design notes (handoff for contributors/agents):** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+**Architecture, roadmap, and TODO (handoff for contributors/agents):**
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 ## Requirements (Linux)
 

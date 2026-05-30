@@ -1,7 +1,8 @@
-# Tunes — architecture and product notes
+# Tunes — architecture, roadmap, and TODO
 
-This document captures design decisions from project planning (for contributors and
-automated agents). The README stays short; details live here.
+This document is the single place for design decisions, ordered milestones, and open
+work items (for contributors and automated agents). The README stays short; details
+live here.
 
 ## Product
 
@@ -211,7 +212,7 @@ accounts do **not** belong under **Library → Music folders** (local scan paths
 - **Now Playing:** optional source badge on the bar (deferred).
 - **Playlists:** cross-source playlists remain catalog phase D — not v0.1.
 
-Implement the **Sources** page with the first streaming backend (roadmap step 5), not
+Implement the **Sources** page with the first streaming backend (roadmap step 7), not
 with local folder scanning.
 
 ---
@@ -395,6 +396,30 @@ so behavior matches the slider and bit-perfect rules (see [Volume control](#volu
 Works in **minimized** mode, while browsing the library, and when the window is in the
 background (via MPRIS on Linux).
 
+### External control interface (requirement)
+
+Tunes must expose a **control interface for external tools** — scripts, desktop
+integrations, hardware utilities, and other apps — not only accept commands from the
+Tunes UI.
+
+**Primary example:** when the user changes volume on the **playback device or DAC**
+(hardware knob, PipeWire/ALSA mixer, UPnP renderer volume, etc.), the new level must
+**sync back into Tunes** — UI slider, MPRIS `Volume` property, and any other in-app
+volume display stay consistent without the user touching the app.
+
+**Architecture:**
+
+- **Outbound (external → Tunes):** existing **MPRIS** surface on Linux; same
+  **PlayerService** / **VolumeController** API as the GTK UI (see [Media keys](#media-keys-requirement)).
+- **Inbound (device/stack → Tunes):** **VolumeController** change notifications
+  (`subscribe(level_changed)` — see [Volume control](#volume-control-requirement));
+  propagate to **PlayerService** events so UI and MPRIS update.
+- Other platforms: equivalent D-Bus, IPC, or OS hooks in `platform/` with the same
+  core service boundary — no GTK or mpv in the integration layer.
+
+Do not require the Tunes window to be focused; external volume changes must be
+observable while browsing or in minimized mode.
+
 ### Events (core → UI)
 
 Examples: `TrackStarted`, `PositionChanged`, `TrackFinished`, `PlaybackError`.
@@ -469,14 +494,28 @@ instead of mpv). **AGPL** is unnecessary for a desktop app.
 1. Local folder scan + SQLite library index.
 2. `PlaybackEngine` + `MpvEngine` + queue; GTK transport bar (expanded + minimized compact controller); **MPRIS + media keys**.
 3. **Local output (priority):** bit-perfect profile + output device selection + **`VolumeController`** (PipeWire / ALSA endpoint volume). See [Output endpoints](#output-endpoints-planned--not-implemented-yet).
-4. DEB package with declared depends (`python3-gi`, `gir1.2-adw-1`, `mpv`, …).
-5. **UPnP / DLNA Media Renderer** output — SSDP discovery, push `PlayableSource` URI, transport/volume sync; Settings lists renderers alongside local sinks. Not started until step 3 lands.
-6. One streaming backend (Tidal or Qobuz).
-7. Federated catalog search (phase A).
-8. Heuristic dedup / prefer-local.
-9. Optional Qt UI for macOS.
-10. Playlists UI (if needed for other users; not required for core browsing workflow).
-11. **(Optional)** AES67 / Dante (or Ravenna) LAN output — pro-audio adapter; only if there is clear demand; does not precede local + UPnP.
+4. **External control interface** — bidirectional sync with external tools; inbound volume from device/DAC/stack → Tunes UI + MPRIS. See [External control interface](#external-control-interface-requirement).
+5. DEB package with declared depends (`python3-gi`, `gir1.2-adw-1`, `mpv`, …).
+6. **UPnP / DLNA Media Renderer** output — SSDP discovery, push `PlayableSource` URI, transport/volume sync; Settings lists renderers alongside local sinks. Not started until step 3 lands.
+7. One streaming backend (Tidal or Qobuz).
+8. Federated catalog search (phase A).
+9. Heuristic dedup / prefer-local.
+10. Optional Qt UI for macOS.
+11. Playlists UI (if needed for other users; not required for core browsing workflow).
+12. **(Optional)** AES67 / Dante (or Ravenna) LAN output — pro-audio adapter; only if there is clear demand; does not precede local + UPnP.
+
+---
+
+## TODO
+
+Trackable open items. Ordered milestones are in [Roadmap](#roadmap-ordered) above.
+
+### Control / integration
+
+- [ ] **External control interface** — expose a control surface for external tools;
+  sync device/DAC/stack volume changes back into Tunes (UI, MPRIS, related state).
+  Builds on `VolumeController.subscribe()` and MPRIS/D-Bus. See
+  [External control interface](#external-control-interface-requirement).
 
 ---
 

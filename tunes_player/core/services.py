@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import multiprocessing
+import time
 from dataclasses import dataclass
 from queue import Empty, Queue
 from typing import Callable
@@ -68,6 +69,7 @@ class PlayerService:
         self._current_track: Track | None = None
         self._quality_hint = ""
         self._position_sec = 0.0
+        self._position_synced_at: float | None = None
         self._duration_sec: float | None = None
         self._engine: PlaybackEngine | None = None
         self._engine_error: str | None = None
@@ -188,7 +190,6 @@ class PlayerService:
     def get_playback_state(self) -> PlaybackState:
         engine = self._engine
         if engine is not None and self._current_track is not None:
-            self._position_sec = engine.get_position()
             duration = engine.get_duration()
             if duration is not None:
                 self._duration_sec = duration
@@ -202,7 +203,7 @@ class PlayerService:
             quality_hint=self._quality_hint,
             bit_perfect=self._effective_bit_perfect(),
             device_volume=self._device_volume,
-            position_sec=self._position_sec,
+            position_sec=self._playback_position(),
             duration_sec=self._duration_sec,
         )
 
@@ -307,8 +308,9 @@ class PlayerService:
         engine = self._engine
         if engine is None or self._current_track is None:
             return
-        engine.seek(position_sec)
-        self._sync_from_engine()
+        target = max(0.0, position_sec)
+        engine.seek(target)
+        self._reset_playback_position(target)
         self._emit("position_changed")
 
     def set_volume(self, level: float, *, notify: bool = True) -> None:
@@ -484,27 +486,57 @@ class PlayerService:
         if not resume:
             engine.pause()
         self._sync_from_engine()
-        self._emit("playback_changed", "queue_changed", "position_changed")
+        self._emit("playback_changed", "queue_changed")
 
     def _set_current_track(self, track: Track) -> None:
         self._current_track = track
         metadata = self._store.get_file_metadata(track.id)
         self._quality_hint = LibraryStore.quality_hint(metadata)
-        if metadata is not None and metadata.duration_sec is not None:
-            self._duration_sec = metadata.duration_sec
-        else:
-            self._duration_sec = track.duration_sec
-        self._position_sec = 0.0
+        self._duration_sec = None
+        self._reset_playback_position(0.0)
 
-    def _sync_from_engine(self) -> None:
+    def _reset_playback_position(self, position_sec: float) -> None:
+        self._position_sec = max(0.0, position_sec)
+        self._position_synced_at = time.monotonic()
+
+    def _playback_position(self) -> float:
+        if not self._is_playing or self._position_synced_at is None:
+            return self._position_sec
+        elapsed = time.monotonic() - self._position_synced_at
+        position = self._position_sec + elapsed
+        if self._duration_sec is not None and self._duration_sec > 0:
+            return min(position, self._duration_sec)
+        return position
+
+    def _apply_engine_position(self, position_sec: float, *, allow_backward: bool = False) -> None:
+        position = max(0.0, position_sec)
+        if not allow_backward:
+            if self._is_playing and self._position_synced_at is not None:
+                if position < self._playback_position() - 0.08:
+                    return
+            elif position < self._position_sec:
+                return
+        self._position_sec = position
+        self._position_synced_at = time.monotonic()
+
+    def _sync_playback_position_from_engine(self) -> None:
         engine = self._engine
         if engine is None:
             return
-        self._position_sec = engine.get_position()
+        self._apply_engine_position(engine.get_position())
+
+    def _sync_duration_from_engine(self) -> None:
+        engine = self._engine
+        if engine is None:
+            return
         duration = engine.get_duration()
         if duration is not None:
             self._duration_sec = duration
         self._is_playing = engine.is_playing()
+
+    def _sync_from_engine(self) -> None:
+        self._sync_playback_position_from_engine()
+        self._sync_duration_from_engine()
 
     def _on_engine_event(self, event: EngineEvent) -> None:
         self._engine_events.put(event)
@@ -517,15 +549,20 @@ class PlayerService:
             if self._fallback_to_software_volume():
                 self._emit("playback_changed", "volume_changed")
                 return
-            self._sync_from_engine()
+            self._sync_duration_from_engine()
+            self._sync_playback_position_from_engine()
             self._emit("playback_error", "playback_changed")
             return
-        self._sync_from_engine()
         if event == "position_changed":
+            self._sync_playback_position_from_engine()
+            self._sync_duration_from_engine()
             self._emit("position_changed")
         elif event == "duration_changed":
-            self._emit("position_changed", "playback_changed")
+            self._sync_duration_from_engine()
+            self._emit("playback_changed")
         elif event == "playing_changed":
+            self._sync_duration_from_engine()
+            self._sync_playback_position_from_engine()
             self._emit("playback_changed")
 
     def _emit(self, *events: str) -> None:

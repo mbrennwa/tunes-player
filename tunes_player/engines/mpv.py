@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 EngineCallback = Callable[[EngineEvent], None]
 
-_POSITION_INTERVAL_SEC = 0.25
+_POSITION_INTERVAL_SEC = 0.1
 
 
 def create_mpv_engine(
@@ -104,13 +104,13 @@ class MpvEngine:
         self._loaded_uri = uri
         self._position_sec = max(0.0, start_sec)
         self._duration_sec = None
+        self._last_position_emit = 0.0
         self._player.play(uri)
         if start_sec > 0:
             self._player.time_pos = start_sec
         self._player.pause = False
         self._playing = True
         self._emit("duration_changed")
-        self._emit("position_changed")
         self._emit("playing_changed")
 
     def play(self) -> None:
@@ -127,7 +127,9 @@ class MpvEngine:
         pos = self._player.time_pos
         self._playing = False
         if pos is not None:
-            self._position_sec = float(pos)
+            new_pos = float(pos)
+            if new_pos >= self._position_sec:
+                self._position_sec = new_pos
         self._emit("playing_changed")
         self._emit("position_changed")
 
@@ -172,7 +174,9 @@ class MpvEngine:
     def get_position(self) -> float:
         pos = self._player.time_pos
         if pos is not None:
-            self._position_sec = float(pos)
+            new_pos = float(pos)
+            if new_pos >= self._position_sec:
+                self._position_sec = new_pos
         return self._position_sec
 
     def get_duration(self) -> float | None:
@@ -200,9 +204,12 @@ class MpvEngine:
 
         @player.property_observer("time-pos")
         def _on_time_pos(_name: str, value: float | None) -> None:
-            if value is None:
+            if value is None or value < 0:
                 return
-            self._position_sec = float(value)
+            new_pos = float(value)
+            if new_pos < self._position_sec:
+                return
+            self._position_sec = new_pos
             now = time.monotonic()
             if now - self._last_position_emit >= _POSITION_INTERVAL_SEC:
                 self._last_position_emit = now

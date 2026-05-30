@@ -147,7 +147,7 @@ class NowPlayingBar(Gtk.Box):
                 Gtk.Orientation.HORIZONTAL,
                 0.0,
                 1.0,
-                0.1,
+                0.01,
             )
             self._progress.set_hexpand(True)
             self._progress.set_draw_value(False)
@@ -174,8 +174,12 @@ class NowPlayingBar(Gtk.Box):
         self._seek_duration: float | None = None
         self._pending_seek: float | None = None
         self._seek_apply_id: int | None = None
+        self._progress_duration: float | None = None
+        self._progress_track_id: str | None = None
         service.subscribe(self._on_service_event)
         self._sync_from_service()
+        if self._progress is not None:
+            GLib.timeout_add(33, self._tick_progress_display)
 
     def set_queue_handler(self, handler: Callable[[], None]) -> None:
         self._queue_handler = handler
@@ -355,8 +359,50 @@ class NowPlayingBar(Gtk.Box):
         )
         self._play_btn.set_icon_name(icon)
         self._play_btn.set_tooltip_text("Pause" if state.is_playing else "Play")
-        self._sync_progress(track, state.position_sec, state.duration_sec)
+        if not state.is_playing:
+            duration = state.duration_sec
+            if duration is not None and duration > 0:
+                self._set_progress_position(state.position_sec, duration)
         return False
+
+    def _tick_progress_display(self) -> bool:
+        if self._seeking or self._progress is None:
+            return True
+        state = self._service.get_playback_state()
+        track = state.current_track
+        if track is None or not state.is_playing:
+            return True
+        duration = state.duration_sec
+        if duration is None or duration <= 0:
+            return True
+        self._set_progress_position(state.position_sec, duration)
+        return True
+
+    def _set_progress_position(
+        self,
+        position_sec: float,
+        duration_sec: float,
+        *,
+        track_id: str | None = None,
+    ) -> None:
+        if self._progress is None:
+            return
+        if track_id is None:
+            track = self._service.get_playback_state().current_track
+            track_id = track.id if track is not None else None
+        if track_id != self._progress_track_id:
+            self._progress_track_id = track_id
+            self._progress_duration = None
+        if self._progress_duration != duration_sec:
+            self._progress_duration = duration_sec
+            self._progress.handler_block_by_func(self._on_seek_value_changed)
+            self._progress.set_range(0.0, duration_sec)
+            self._progress.handler_unblock_by_func(self._on_seek_value_changed)
+        clamped = max(0.0, min(position_sec, duration_sec))
+        self._progress.handler_block_by_func(self._on_seek_value_changed)
+        self._progress.set_value(clamped)
+        self._progress.handler_unblock_by_func(self._on_seek_value_changed)
+        self._update_seek_labels(clamped, duration_sec)
 
     def _sync_progress(
         self,
@@ -367,6 +413,8 @@ class NowPlayingBar(Gtk.Box):
         if self._progress is None:
             return
         if track is None or duration_sec is None or duration_sec <= 0:
+            self._progress_duration = None
+            self._progress_track_id = None
             self._progress.set_sensitive(False)
             self._progress.set_range(0.0, 1.0)
             self._progress.set_value(0.0)
@@ -377,13 +425,9 @@ class NowPlayingBar(Gtk.Box):
             return
 
         if not self._seeking:
-            self._progress.handler_block_by_func(self._on_seek_value_changed)
-            self._progress.set_range(0.0, duration_sec)
-            self._progress.set_value(max(0.0, min(position_sec, duration_sec)))
-            self._progress.handler_unblock_by_func(self._on_seek_value_changed)
+            track_id = track.id if hasattr(track, "id") else None
+            self._set_progress_position(position_sec, duration_sec, track_id=track_id)
         self._progress.set_sensitive(True)
-        if not self._seeking:
-            self._update_seek_labels(position_sec, duration_sec)
 
 
 def attach_media_keys(window: Gtk.Widget, service: PlayerService) -> None:
