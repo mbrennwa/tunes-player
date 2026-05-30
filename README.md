@@ -10,7 +10,7 @@ Package and command name: **tunes-player**.
 
 Early development. v0.1 targets:
 
-- Local music library (scan, browse, search, play)
+- Local music library (scan, browse, search, play) — **FLAC, WAV, AIFF, ALAC, MP3, AAC, Ogg Vorbis**
 - Simple Libadwaita GUI on Linux
 - Bit-perfect local playback; volume on output device/sink (not in-app soft gain only)
 - DEB packaging for Debian/Ubuntu

@@ -17,7 +17,7 @@ automated agents). The README stays short; details live here.
 
 ### Goals
 
-- Play **local** audio files (FLAC, MP3, …).
+- Play **local** audio files — Tier 1: FLAC, WAV, AIFF, ALAC, MP3, AAC, Ogg Vorbis.
 - **Bit-perfect** output for audiophile use when enabled (no unnecessary DSP).
 - **Hardware / endpoint volume** — adjust the sound device or sink, not only in-app
   soft gain.
@@ -31,8 +31,33 @@ automated agents). The README stays short; details live here.
 - Unified cross-source deduplication (beyond basic federated search).
 - macOS / Windows UI.
 - Flatpak (may come later).
+- Local formats beyond [Tier 1](#local-audio-formats-v01) (e.g. Opus, WavPack, APE, DSD, cue sheets).
 
-### Naming
+### Local audio formats (v0.1)
+
+**Tier 1 — supported out of the box** for scan, metadata, and playback:
+
+| Format | Extensions | Notes |
+|--------|------------|--------|
+| FLAC | `.flac` | Primary audiophile lossless |
+| WAV | `.wav` | Uncompressed PCM |
+| AIFF | `.aiff`, `.aif` | Uncompressed |
+| ALAC | `.m4a` | Lossless; distinguish from AAC by probe |
+| MP3 | `.mp3` | Lossy |
+| AAC | `.m4a`, `.aac` | Lossy |
+| Vorbis | `.ogg` | Lossy |
+
+**Implementation:**
+
+- **Playback:** mpv.
+- **Tags / album art:** mutagen (primary); probe codec for `.m4a` (ALAC vs AAC).
+- **Scanner:** index Tier 1 extensions; verify readable before adding to library.
+
+Bit-perfect mode targets **lossless Tier 1** (FLAC, WAV, AIFF, ALAC). Lossy formats
+use the same no-extra-DSP path but are not “hi-res” sources.
+
+Other formats may play via mpv later without full library indexing until explicitly added.
+
 
 “Music” was avoided: GNOME ships **Music** (`gnome-music`). **Tunes** is distinct;
 `iTunes` echo is acceptable for a FOSS niche player.
