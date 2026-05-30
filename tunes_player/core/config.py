@@ -15,6 +15,7 @@ APP_NAME = "tunes-player"
 class AppConfig:
     music_folders: list[str] = field(default_factory=list)
     bit_perfect: bool = True
+    output_sink_id: str | None = None
 
 
 class ConfigManager:
@@ -44,6 +45,7 @@ class ConfigManager:
         self._config = AppConfig(
             music_folders=[str(item) for item in folders if item],
             bit_perfect=bool(raw.get("bit_perfect", True)),
+            output_sink_id=raw.get("output_sink_id") or None,
         )
         return self._config
 
@@ -52,6 +54,7 @@ class ConfigManager:
         payload = {
             "music_folders": list(self._config.music_folders),
             "bit_perfect": self._config.bit_perfect,
+            "output_sink_id": self._config.output_sink_id,
         }
         self._path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 

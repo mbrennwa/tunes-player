@@ -51,17 +51,23 @@ class PreferencesWindow(Adw.PreferencesWindow):
         audio = Adw.PreferencesGroup(title="Audio")
         self._bit_perfect_row = Adw.SwitchRow(
             title="Bit-perfect playback",
-            subtitle="No in-app resampling or soft gain when enabled",
+            subtitle=self._volume_mode_subtitle(),
             active=service.config.config.bit_perfect,
         )
         self._bit_perfect_row.connect("notify::active", self._on_bit_perfect_changed)
         audio.add(self._bit_perfect_row)
-        audio.add(
-            Adw.ActionRow(
-                title="Output device",
-                subtitle="Endpoint volume via PipeWire / ALSA (planned)",
-            )
+
+        self._output_row = Adw.ActionRow(
+            title="Output device",
+            subtitle="System default audio sink",
         )
+        self._output_dropdown = Gtk.DropDown(model=Gtk.StringList.new([]))
+        self._output_dropdown.set_valign(Gtk.Align.CENTER)
+        self._output_dropdown.connect("notify::selected", self._on_output_changed)
+        self._output_row.add_suffix(self._output_dropdown)
+        self._output_row.set_activatable_widget(self._output_dropdown)
+        audio.add(self._output_row)
+        self._reload_output_sinks()
 
         audio_page = Adw.PreferencesPage(title="Audio", icon_name="audio-speakers-symbolic")
         audio_page.add(audio)
@@ -121,6 +127,56 @@ class PreferencesWindow(Adw.PreferencesWindow):
 
     def _on_bit_perfect_changed(self, row: Adw.SwitchRow, *_args: object) -> None:
         self._service.set_bit_perfect(row.get_active())
+        row.set_subtitle(self._volume_mode_subtitle())
+
+    def _volume_mode_subtitle(self) -> str:
+        state = self._service.get_playback_state()
+        setting_on = self._service.config.config.bit_perfect
+        if state.bit_perfect:
+            return "Bit-perfect uses device volume only (no mpv soft gain)"
+        if setting_on and state.device_volume:
+            return "Bit-perfect enabled — volume adjusts the selected audio sink"
+        if setting_on:
+            return (
+                "Bit-perfect needs device volume; using mpv float software gain "
+                "(not bit-perfect)"
+            )
+        if state.device_volume:
+            return "Volume adjusts the selected audio sink"
+        return "Device volume unavailable — using mpv float software volume"
+
+    def _reload_output_sinks(self) -> None:
+        endpoints = self._service.list_output_sinks()
+        if not endpoints:
+            self._output_row.set_sensitive(False)
+            self._output_row.set_subtitle("No controllable sinks found")
+            return
+
+        self._output_row.set_sensitive(True)
+        names = [endpoint.description for endpoint in endpoints]
+        model = Gtk.StringList.new(names)
+        self._output_dropdown.set_model(model)
+
+        active_id = self._service.config.config.output_sink_id
+        selected = 0
+        for index, endpoint in enumerate(endpoints):
+            if endpoint.id == active_id or (active_id is None and endpoint.is_default):
+                selected = index
+                break
+        self._output_dropdown.handler_block_by_func(self._on_output_changed)
+        self._output_dropdown.set_selected(selected)
+        self._output_dropdown.handler_unblock_by_func(self._on_output_changed)
+        self._output_row.set_subtitle(endpoints[selected].description)
+
+    def _on_output_changed(self, dropdown: Gtk.DropDown, *_args: object) -> None:
+        endpoints = self._service.list_output_sinks()
+        index = dropdown.get_selected()
+        if index >= len(endpoints):
+            return
+        endpoint = endpoints[index]
+        self._service.set_output_sink(endpoint.id)
+        self._output_row.set_subtitle(endpoint.description)
+        self._bit_perfect_row.set_subtitle(self._volume_mode_subtitle())
 
     def _on_scan_clicked(self, *_args: object) -> None:
         if self._service.is_scanning():

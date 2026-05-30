@@ -9,7 +9,9 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
+from tunes_player.core.config import ConfigManager
 from tunes_player.core.services import PlayerService
+from tunes_player.platform.linux.audio import create_volume_controller
 from tunes_player.ui.gtk.now_playing import NowPlayingBar, attach_media_keys
 from tunes_player.ui.gtk.preferences import PreferencesWindow
 from tunes_player.ui.gtk.views import (
@@ -333,7 +335,10 @@ class TunesWindow(Adw.ApplicationWindow):
 
 
 def run() -> int:
-    service = PlayerService()
+    config = ConfigManager()
+    config.load()
+    volume_controller = create_volume_controller(config.config)
+    service = PlayerService(config=config, volume_controller=volume_controller)
     mpris_service = None
 
     class TunesApplication(Adw.Application):

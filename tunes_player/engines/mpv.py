@@ -20,9 +20,17 @@ def create_mpv_engine(
     *,
     bit_perfect: bool = False,
     volume: float = 0.72,
+    audio_device: str | None = None,
+    use_device_output: bool = False,
     on_event: EngineCallback | None = None,
 ) -> MpvEngine:
-    return MpvEngine(bit_perfect=bit_perfect, volume=volume, on_event=on_event)
+    return MpvEngine(
+        bit_perfect=bit_perfect,
+        volume=volume,
+        audio_device=audio_device,
+        use_device_output=use_device_output,
+        on_event=on_event,
+    )
 
 
 class MpvEngine:
@@ -33,6 +41,8 @@ class MpvEngine:
         *,
         bit_perfect: bool = False,
         volume: float = 0.72,
+        audio_device: str | None = None,
+        use_device_output: bool = False,
         on_event: EngineCallback | None = None,
     ) -> None:
         try:
@@ -49,6 +59,7 @@ class MpvEngine:
         self._mpv_module = mpv_module
         self._bit_perfect = bit_perfect
         self._volume = volume
+        self._software_volume = not bit_perfect and not use_device_output
         self._on_event = on_event
         self._loaded_uri: str | None = None
         self._position_sec = 0.0
@@ -65,14 +76,26 @@ class MpvEngine:
             "input_vo_keyboard": False,
             "ytdl": False,
         }
+        # Skip JACK in the probe order — it is rarely used and spams stderr when absent.
+        if use_device_output:
+            # Route through PipeWire/Pulse so wpctl/pactl sink volume affects playback.
+            options["ao"] = "pipewire,pulse,alsa,sndio"
+        else:
+            options["ao"] = "sndio,pulse,alsa,pipewire"
         if bit_perfect:
             options["volume"] = 100
             options["replaygain"] = "no"
         else:
-            options["volume"] = max(0, min(100, int(round(volume * 100))))
+            options["volume"] = max(0.0, min(100.0, volume * 100.0))
 
         self._player: MPV = mpv_module.MPV(**options)
+        if audio_device:
+            self._player.audio_device = audio_device
         self._register_observers()
+
+    def set_audio_device(self, audio_device: str | None) -> None:
+        if audio_device:
+            self._player.audio_device = audio_device
 
     def set_event_callback(self, callback: EngineCallback | None) -> None:
         self._on_event = callback
@@ -130,15 +153,21 @@ class MpvEngine:
         self._volume = max(0.0, min(1.0, level))
         if self._bit_perfect:
             return
-        self._player.volume = int(round(self._volume * 100))
+        self._apply_software_volume()
 
     def set_bit_perfect(self, enabled: bool) -> None:
         self._bit_perfect = enabled
         self._player.replaygain = "no"
-        if enabled:
+        if enabled or not self._software_volume:
             self._player.volume = 100
         else:
-            self._player.volume = int(round(self._volume * 100))
+            self._apply_software_volume()
+
+    def _apply_software_volume(self) -> None:
+        if not self._software_volume:
+            return
+        gain = max(0.0, min(1.0, self._volume))
+        self._player.volume = gain * 100.0
 
     def get_position(self) -> float:
         pos = self._player.time_pos

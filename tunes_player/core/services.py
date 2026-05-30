@@ -13,6 +13,7 @@ from tunes_player.core.library import LibraryStore, ScanResult
 from tunes_player.core.library.scan_worker import create_scan_process
 from tunes_player.core.models import Album, Artist, Track
 from tunes_player.core.playback.engine import EngineEvent, PlaybackEngine
+from tunes_player.core.volume import VolumeController, VolumeEndpoint
 
 EventCallback = Callable[[str], None]
 Unsubscribe = Callable[[], None]
@@ -41,14 +42,26 @@ class PlaybackState:
 class PlayerService:
     """Stable API for GTK (and future) frontends."""
 
-    def __init__(self, *, config: ConfigManager | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        config: ConfigManager | None = None,
+        volume_controller: VolumeController | None = None,
+    ) -> None:
         self._config_manager = config or ConfigManager()
         self._config_manager.load()
         self._store = LibraryStore(self._config_manager.database_path)
+        self._volume_controller = volume_controller
         self._listeners: list[EventCallback] = []
         self._volume = 0.72
         self._bit_perfect = self._config_manager.config.bit_perfect
-        self._device_volume = True
+        self._device_volume = self._has_device_volume()
+        if self._device_volume and self._volume_controller is not None:
+            try:
+                self._volume = self._volume_controller.get_level()
+            except OSError:
+                self._device_volume = False
+        self._device_output_fallback = False
         self._is_playing = False
         self._queue: list[Track] = []
         self._queue_index = -1
@@ -187,7 +200,7 @@ class PlayerService:
             queue=tuple(self._queue),
             queue_index=self._queue_index,
             quality_hint=self._quality_hint,
-            bit_perfect=self._bit_perfect,
+            bit_perfect=self._effective_bit_perfect(),
             device_volume=self._device_volume,
             position_sec=self._position_sec,
             duration_sec=self._duration_sec,
@@ -296,17 +309,56 @@ class PlayerService:
             return
         engine.seek(position_sec)
         self._sync_from_engine()
-        self._emit("position_changed", "playback_changed")
+        self._emit("position_changed")
 
-    def set_volume(self, level: float) -> None:
+    def set_volume(self, level: float, *, notify: bool = True) -> None:
         self._volume = max(0.0, min(1.0, level))
-        engine = self._engine
-        if engine is not None:
-            engine.set_volume(self._volume)
-        self._emit("volume_changed")
+        if self._device_volume and self._volume_controller is not None:
+            self._volume_controller.set_level(self._volume)
+        else:
+            engine = self._engine
+            if engine is not None:
+                engine.set_volume(self._volume)
+        if notify:
+            self._emit("volume_changed")
 
     def adjust_volume(self, delta: float) -> None:
-        self.set_volume(self._volume + delta)
+        if self._device_volume and self._volume_controller is not None:
+            self._volume_controller.adjust_level(delta)
+            try:
+                self._volume = self._volume_controller.get_level()
+            except OSError:
+                self._volume = max(0.0, min(1.0, self._volume + delta))
+        else:
+            self.set_volume(self._volume + delta)
+            return
+        self._emit("volume_changed")
+
+    def set_output_sink(self, endpoint_id: str) -> None:
+        if self._volume_controller is None:
+            return
+        self._volume_controller.set_active_endpoint(endpoint_id)
+        self._config_manager.save()
+        engine = self._engine
+        if engine is not None:
+            device = self._mpv_audio_device()
+            if device and hasattr(engine, "set_audio_device"):
+                engine.set_audio_device(device)
+            track = self._current_track
+            if track is not None:
+                source = resolve_local_track(self._store, track.id)
+                if source is not None:
+                    pos = engine.get_position()
+                    playing = engine.is_playing()
+                    engine.load(source.path, start_sec=pos)
+                    if not playing:
+                        engine.pause()
+        self._emit("playback_changed")
+
+    def list_output_sinks(self) -> list[VolumeEndpoint]:
+        if self._volume_controller is None:
+            return []
+        return self._volume_controller.list_endpoints()
 
     def set_bit_perfect(self, enabled: bool) -> None:
         self._bit_perfect = enabled
@@ -314,7 +366,11 @@ class PlayerService:
         self._config_manager.save()
         engine = self._engine
         if engine is not None:
-            engine.set_bit_perfect(enabled)
+            engine.set_bit_perfect(self._effective_bit_perfect())
+            if self._effective_bit_perfect() or self._device_volume:
+                engine.set_volume(1.0)
+            else:
+                engine.set_volume(self._volume)
         self._emit("playback_changed")
 
     def poll_playback(self) -> None:
@@ -340,6 +396,58 @@ class PlayerService:
 
         return unsubscribe
 
+    def _has_device_volume(self) -> bool:
+        controller = self._volume_controller
+        return controller is not None and controller.available() and controller.uses_device_volume
+
+    def _reset_engine(self) -> None:
+        engine = self._engine
+        if engine is not None:
+            engine.quit()
+        self._engine = None
+        self._engine_error = None
+
+    def _fallback_to_software_volume(self) -> bool:
+        """Retry playback through mpv soft volume when PipeWire routing fails."""
+        if not self._device_volume or self._device_output_fallback:
+            return False
+        self._device_output_fallback = True
+        self._device_volume = False
+        track = self._current_track
+        pos = self._position_sec
+        playing = self._is_playing
+        self._reset_engine()
+        if track is None:
+            return True
+        source = resolve_local_track(self._store, track.id)
+        if source is None:
+            return True
+        engine = self._ensure_engine()
+        if engine is None:
+            return True
+        engine.load(source.path, start_sec=pos)
+        if not playing:
+            engine.pause()
+        engine.set_volume(self._volume)
+        self._sync_from_engine()
+        return True
+
+    def _effective_bit_perfect(self) -> bool:
+        return self._bit_perfect and self._device_volume
+
+    def _mpv_volume_level(self) -> float:
+        if self._effective_bit_perfect() or self._device_volume:
+            return 1.0
+        return self._volume
+
+    def _mpv_audio_device(self) -> str | None:
+        if self._volume_controller is None:
+            return None
+        try:
+            return self._volume_controller.mpv_audio_device()
+        except OSError:
+            return None
+
     def _ensure_engine(self) -> PlaybackEngine | None:
         if self._engine is not None:
             return self._engine
@@ -349,8 +457,10 @@ class PlayerService:
             from tunes_player.engines.mpv import create_mpv_engine
 
             self._engine = create_mpv_engine(
-                bit_perfect=self._bit_perfect,
-                volume=self._volume,
+                bit_perfect=self._effective_bit_perfect(),
+                volume=self._mpv_volume_level(),
+                audio_device=self._mpv_audio_device(),
+                use_device_output=self._device_volume,
                 on_event=self._on_engine_event,
             )
         except RuntimeError as exc:
@@ -404,6 +514,9 @@ class PlayerService:
             self.skip_next()
             return
         if event == "playback_error":
+            if self._fallback_to_software_volume():
+                self._emit("playback_changed", "volume_changed")
+                return
             self._sync_from_engine()
             self._emit("playback_error", "playback_changed")
             return

@@ -302,8 +302,11 @@ Linux implementations (platform/linux/audio.py):
 ```
 
 - **PlayerService.set_volume()** → **VolumeController**, not `mpv.volume` (except
-  maybe a separate “software volume” fallback when no hardware control exists — clearly
+  a separate “software volume” fallback when no hardware control exists — clearly
   labeled and **disables bit-perfect**).
+- **Software volume fallback:** mpv applies linear gain through its float audio filter
+  chain (`volume` filter, ~32-bit float samples). That is the best precision libmpv
+  offers; it is **not** 64-bit and **not** bit-perfect. Prefer device/sink volume.
 - **MPRIS** volume property maps to the same **VolumeController**.
 - Settings: output device / sink selection; optional “allow software volume fallback”.
 
