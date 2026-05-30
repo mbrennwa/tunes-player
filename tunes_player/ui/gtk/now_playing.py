@@ -122,8 +122,42 @@ class NowPlayingBar(Gtk.Box):
             queue_btn.connect("clicked", self._on_queue_clicked)
             controls.append(queue_btn)
 
+        self._progress_row: Gtk.Box | None = None
+        self._elapsed: Gtk.Label | None = None
+        self._remaining: Gtk.Label | None = None
+        self._progress: Gtk.Scale | None = None
+        self._seeking = False
+        if not compact:
+            self._progress_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            self._progress_row.set_margin_start(12)
+            self._progress_row.set_margin_end(12)
+            self._progress_row.set_margin_bottom(8)
+            self.append(self._progress_row)
+
+            self._elapsed = Gtk.Label(label="0:00", xalign=0)
+            self._elapsed.add_css_class("caption")
+            self._elapsed.add_css_class("dim-label")
+            self._progress_row.append(self._elapsed)
+
+            self._progress = Gtk.Scale.new_with_range(
+                Gtk.Orientation.HORIZONTAL,
+                0.0,
+                1.0,
+                0.1,
+            )
+            self._progress.set_hexpand(True)
+            self._progress.set_draw_value(False)
+            self._progress.set_sensitive(False)
+            self._progress.connect("change-value", self._on_seek)
+            self._progress_row.append(self._progress)
+
+            self._remaining = Gtk.Label(label="0:00", xalign=1)
+            self._remaining.add_css_class("caption")
+            self._remaining.add_css_class("dim-label")
+            self._progress_row.append(self._remaining)
+
         self._queue_handler: Callable[[], None] | None = None
-        service.subscribe(lambda _event: GLib.idle_add(self._sync_from_service))
+        service.subscribe(self._on_service_event)
         self._sync_from_service()
 
     def set_queue_handler(self, handler: Callable[[], None]) -> None:
@@ -143,6 +177,29 @@ class NowPlayingBar(Gtk.Box):
         if scale.get_value() != self._service.get_playback_state().volume:
             self._service.set_volume(scale.get_value())
 
+    def _on_service_event(self, event: str) -> None:
+        GLib.idle_add(self._sync_from_service)
+
+    def _on_seek(
+        self,
+        scale: Gtk.Scale,
+        _scroll_type: Gtk.ScrollType,
+        value: float,
+    ) -> bool:
+        self._seeking = True
+        state = self._service.get_playback_state()
+        duration = state.duration_sec
+        if duration is None or duration <= 0:
+            self._seeking = False
+            return True
+        self._service.seek(max(0.0, min(value, duration)))
+        if self._elapsed is not None:
+            self._elapsed.set_label(format_duration(value))
+        if self._remaining is not None:
+            self._remaining.set_label(format_duration(max(0.0, duration - value)))
+        self._seeking = False
+        return False
+
     def _sync_from_service(self) -> bool:
         state = self._service.get_playback_state()
         track = state.current_track
@@ -154,6 +211,7 @@ class NowPlayingBar(Gtk.Box):
                 self._quality.set_label("")
             self._play_btn.set_icon_name("media-playback-start-symbolic")
             self._play_btn.set_tooltip_text("Play")
+            self._sync_progress(None, 0.0, None)
         else:
             self._title.set_label(track.title)
             artist = track.artist_name
@@ -174,6 +232,7 @@ class NowPlayingBar(Gtk.Box):
             )
             self._play_btn.set_icon_name(icon)
             self._play_btn.set_tooltip_text("Pause" if state.is_playing else "Play")
+            self._sync_progress(track, state.position_sec, state.duration_sec)
 
         if self._volume is not None:
             self._volume.handler_block_by_func(self._on_volume_changed)
@@ -181,6 +240,33 @@ class NowPlayingBar(Gtk.Box):
             self._volume.handler_unblock_by_func(self._on_volume_changed)
 
         return False
+
+    def _sync_progress(
+        self,
+        track: object | None,
+        position_sec: float,
+        duration_sec: float | None,
+    ) -> None:
+        if self._progress is None:
+            return
+        if track is None or duration_sec is None or duration_sec <= 0:
+            self._progress.set_sensitive(False)
+            self._progress.set_range(0.0, 1.0)
+            self._progress.set_value(0.0)
+            if self._elapsed is not None:
+                self._elapsed.set_label("0:00")
+            if self._remaining is not None:
+                self._remaining.set_label("0:00")
+            return
+
+        if not self._seeking:
+            self._progress.set_range(0.0, duration_sec)
+            self._progress.set_value(max(0.0, min(position_sec, duration_sec)))
+        self._progress.set_sensitive(True)
+        if self._elapsed is not None:
+            self._elapsed.set_label(format_duration(position_sec))
+        if self._remaining is not None:
+            self._remaining.set_label(format_duration(max(0.0, duration_sec - position_sec)))
 
 
 def attach_media_keys(window: Gtk.Widget, service: PlayerService) -> None:

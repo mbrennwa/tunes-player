@@ -342,5 +342,15 @@ def run() -> int:
                 window = TunesWindow(application=self, service=service)
             window.present()
 
+        def do_shutdown(self) -> None:  # noqa: N802 — GTK vfunc
+            service.shutdown()
+            Adw.Application.do_shutdown(self)
+
     app = TunesApplication(application_id="io.github.mbrennwa.Tunes")
+
+    def _poll_playback() -> bool:
+        service.poll_playback()
+        return True
+
+    GLib.timeout_add(100, _poll_playback)
     return app.run(None)
