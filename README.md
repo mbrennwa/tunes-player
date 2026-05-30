@@ -20,13 +20,16 @@ Streaming integration and unified cross-source search are on the roadmap.
 
 ```
 tunes_player/
-├── core/       # Models, library, playback — no GTK
-├── platform/   # OS-specific glue (MPRIS, paths, …)
-└── ui/gtk/     # Libadwaita user interface (Linux)
+├── core/       # Models, library, playback, catalog — no GTK, no mpv
+├── engines/    # PlaybackEngine (mpv) — planned
+├── platform/   # MPRIS, OS-specific glue — planned
+└── ui/gtk/     # Libadwaita UI (Linux)
 ```
 
-The core is kept UI-toolkit-agnostic so other frontends (e.g. Qt on macOS) can be added
-later without rewriting playback or library logic.
+The **core** is UI- and engine-agnostic so other frontends (e.g. Qt on macOS) and a
+shared **mpv** backend can be added without rewriting library or playback logic.
+
+**Full design notes (handoff for contributors/agents):** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 ## Requirements (Linux)
 
@@ -67,4 +70,5 @@ in compliance with each service's terms of use.
 
 ## License
 
-GPL-3.0-or-later — see [LICENSE](LICENSE).
+GPL-3.0-or-later — see [LICENSE](LICENSE). Rationale (mpv, mutagen, streaming deps):
+[docs/ARCHITECTURE.md#license-rationale](docs/ARCHITECTURE.md#license-rationale).
