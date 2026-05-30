@@ -183,6 +183,37 @@ patterns as albums. Unified cross-source playlists remain [catalog phase D](#uni
 **Deferred after v0.1 UI skeleton:** folder browse (Roon-style), full-screen Now Playing,
 lyrics, streaming source badges in browse views.
 
+### Settings (preferences window)
+
+`AdwPreferencesWindow` with one page per concern — **not** one flat list. Streaming
+accounts do **not** belong under **Library → Music folders** (local scan paths only).
+
+| Page | v0.1 | Later |
+|------|------|-------|
+| **Library** | Music folders, scan options | Watch folders, rescan |
+| **Sources** | — | Tidal, Qobuz: sign in, sign out, “connected as …”, enable/disable per service |
+| **Audio** | Bit-perfect toggle, output device (placeholders today) | Endpoint volume, software-volume fallback |
+
+**Sources page (when streaming lands):**
+
+- One **PreferencesGroup** per service (Tidal, Qobuz).
+- Rows: login / logout, account label, connection status — not filesystem paths.
+- Auth and tokens live in **core/backends/** (and config on disk via `platformdirs`);
+  Settings UI only calls **PlayerService** (or a small settings facade), never
+  streaming APIs directly from GTK.
+- README [streaming disclaimer](#streaming) applies; UI should link or repeat it on
+  first connect.
+
+**Where streaming appears outside Settings:**
+
+- **Browse / search:** unified results tagged Local / Tidal / Qobuz (see
+  [Unified catalog](#unified-catalog)); no extra sidebar section for “Tidal library”.
+- **Now Playing:** optional source badge on the bar (deferred).
+- **Playlists:** cross-source playlists remain catalog phase D — not v0.1.
+
+Implement the **Sources** page with the first streaming backend (roadmap step 5), not
+with local folder scanning.
+
 ---
 
 ## Sound / playback separation
