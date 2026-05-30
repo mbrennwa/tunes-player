@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Tunes — music player for local files and streaming services (Linux/GNOME first)"
 readme = "README.md"
 license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [{ name = "mbrennwa" }]
 keywords = ["music", "player", "gtk", "gnome", "audio"]
@@ -15,7 +16,6 @@ classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Environment :: X11 Applications :: GTK",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Topic :: Multimedia :: Sound/Audio :: Players",
