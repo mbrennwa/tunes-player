@@ -12,8 +12,8 @@ gi.require_version("GLib", "2.0")
 
 from gi.repository import Gio, GLib  # noqa: E402
 
-from tunes_player.core.backends.local import resolve_local_track
-from tunes_player.core.services import PlayerService
+from tunes_player.core.backends.local import resolve_local_track  # noqa: E402
+from tunes_player.core.services import PlaybackState, PlayerService  # noqa: E402
 
 BUS_NAME = "org.mpris.MediaPlayer2.io_github_mbrennwa_Tunes"
 OBJECT_PATH = "/org/mpris/MediaPlayer2"
@@ -99,6 +99,7 @@ _INTROSPECTION = """
 """
 
 _POSITION_EMIT_INTERVAL_SEC = 1.0
+_VOID_REPLY = GLib.Variant("()", ())
 
 
 def _track_object_path(track_id: str) -> str:
@@ -126,6 +127,8 @@ class MprisService:
         self._loop_status = "None"
         self._shuffle = False
         self._last_position_emit = 0.0
+        self._pending_property_names: set[str] = set()
+        self._pending_property_emit = False
         self._node_info = Gio.DBusNodeInfo.new_for_xml(_INTROSPECTION)
 
     def start(self) -> None:
@@ -138,7 +141,6 @@ class MprisService:
             self._on_bus_acquired,
             None,
             self._on_name_lost,
-            None,
         )
         self._unsubscribe = self._service.subscribe(self._on_service_event)
 
@@ -166,7 +168,7 @@ class MprisService:
                 self._handle_set_property,
             )
             self._registration_ids.append(registration_id)
-        self._emit_player_properties(
+        self._schedule_player_properties(
             "PlaybackStatus",
             "Metadata",
             "CanGoNext",
@@ -186,7 +188,7 @@ class MprisService:
 
     def _handle_service_event(self, event: str) -> bool:
         if event in {"playback_changed", "queue_changed", "library_updated"}:
-            self._emit_player_properties(
+            self._schedule_player_properties(
                 "PlaybackStatus",
                 "Metadata",
                 "CanGoNext",
@@ -197,7 +199,7 @@ class MprisService:
                 "Position",
             )
         elif event == "volume_changed":
-            self._emit_player_properties("Volume")
+            self._schedule_player_properties("Volume")
         elif event == "position_changed":
             now = GLib.get_monotonic_time() / 1_000_000
             state = self._service.get_playback_state()
@@ -205,7 +207,7 @@ class MprisService:
                 return False
             if now - self._last_position_emit >= _POSITION_EMIT_INTERVAL_SEC:
                 self._last_position_emit = now
-                self._emit_player_properties("Position")
+                self._schedule_player_properties("Position")
         return False
 
     def _handle_method_call(
@@ -242,17 +244,17 @@ class MprisService:
         if method_name == "Get":
             interface_name, property_name = parameters.unpack()
             value = self._get_property_variant(str(interface_name), str(property_name))
-            invocation.return_value(GLib.Variant("v", value))
+            invocation.return_value(GLib.Variant("(v)", (value,)))
         elif method_name == "GetAll":
             (interface_name,) = parameters.unpack()
             properties = self._get_all_properties(str(interface_name))
-            invocation.return_value(GLib.Variant("a{sv}", properties))
+            invocation.return_value(GLib.Variant("(a{sv})", (properties,)))
         elif method_name == "Set":
             interface_name, property_name, value = parameters.unpack()
             self._set_property_value(str(interface_name), str(property_name), value)
-            invocation.return_value(None)
+            invocation.return_value(_VOID_REPLY)
             if str(interface_name) == PLAYER_INTERFACE:
-                self._emit_player_properties(str(property_name))
+                self._schedule_player_properties(str(property_name))
         else:
             invocation.return_dbus_error(
                 "org.freedesktop.DBus.Error.UnknownMethod",
@@ -262,10 +264,10 @@ class MprisService:
     def _handle_root_method(self, method_name: str, invocation: Gio.DBusMethodInvocation) -> None:
         if method_name == "Raise":
             self._on_raise()
-            invocation.return_value(None)
+            invocation.return_value(_VOID_REPLY)
         elif method_name == "Quit":
             self._on_quit()
-            invocation.return_value(None)
+            invocation.return_value(_VOID_REPLY)
         else:
             invocation.return_dbus_error(
                 "org.freedesktop.DBus.Error.UnknownMethod",
@@ -303,8 +305,8 @@ class MprisService:
                 f"Unknown method {method_name}",
             )
             return
-        invocation.return_value(None)
-        self._emit_player_properties(
+        invocation.return_value(_VOID_REPLY)
+        self._schedule_player_properties(
             "PlaybackStatus",
             "CanGoNext",
             "CanGoPrevious",
@@ -336,7 +338,7 @@ class MprisService:
     ) -> bool:
         self._set_property_value(interface_name, property_name, value)
         if interface_name == PLAYER_INTERFACE:
-            GLib.idle_add(self._emit_player_properties, property_name)
+            self._schedule_player_properties(property_name)
         return True
 
     def _get_property_variant(self, interface_name: str, property_name: str) -> GLib.Variant:
@@ -424,6 +426,22 @@ class MprisService:
                 f"Property {property_name} is read-only",
             )
 
+    def _schedule_player_properties(self, *property_names: str) -> None:
+        self._pending_property_names.update(property_names)
+        if self._pending_property_emit:
+            return
+        self._pending_property_emit = True
+        GLib.idle_add(self._flush_player_properties)
+
+    def _flush_player_properties(self) -> bool:
+        self._pending_property_emit = False
+        if not self._pending_property_names:
+            return False
+        names = tuple(self._pending_property_names)
+        self._pending_property_names.clear()
+        self._emit_player_properties(*names)
+        return False
+
     def _emit_player_properties(self, *property_names: str) -> bool:
         if self._connection is None:
             return False
@@ -455,7 +473,7 @@ class MprisService:
         )
 
     @staticmethod
-    def _playback_status(state: object) -> str:
+    def _playback_status(state: PlaybackState) -> str:
         track = state.current_track
         if track is None:
             return "Stopped"
@@ -464,26 +482,26 @@ class MprisService:
         return "Paused"
 
     @staticmethod
-    def _position_us(state: object) -> int:
+    def _position_us(state: PlaybackState) -> int:
         return int(max(0.0, state.position_sec) * 1_000_000)
 
     @staticmethod
-    def _can_go_next(state: object) -> bool:
+    def _can_go_next(state: PlaybackState) -> bool:
         return bool(state.queue) and state.queue_index + 1 < len(state.queue)
 
     @staticmethod
-    def _can_go_previous(state: object) -> bool:
+    def _can_go_previous(state: PlaybackState) -> bool:
         return bool(state.queue) and (state.queue_index > 0 or state.position_sec > 3.0)
 
     @staticmethod
-    def _can_play(state: object) -> bool:
+    def _can_play(state: PlaybackState) -> bool:
         return state.current_track is not None or bool(state.queue)
 
     @staticmethod
-    def _can_pause(state: object) -> bool:
+    def _can_pause(state: PlaybackState) -> bool:
         return state.current_track is not None and state.is_playing
 
-    def _metadata(self, state: object) -> dict[str, GLib.Variant]:
+    def _metadata(self, state: PlaybackState) -> dict[str, GLib.Variant]:
         track = state.current_track
         if track is None:
             return {}

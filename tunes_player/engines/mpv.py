@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
@@ -56,7 +55,6 @@ class MpvEngine:
         self._duration_sec: float | None = None
         self._playing = False
         self._last_position_emit = 0.0
-        self._lock = threading.Lock()
 
         options: dict[str, object] = {
             "video": False,
@@ -87,8 +85,7 @@ class MpvEngine:
         if start_sec > 0:
             self._player.time_pos = start_sec
         self._player.pause = False
-        with self._lock:
-            self._playing = True
+        self._playing = True
         self._emit("duration_changed")
         self._emit("position_changed")
         self._emit("playing_changed")
@@ -97,8 +94,7 @@ class MpvEngine:
         if self._loaded_uri is None:
             return
         self._player.pause = False
-        with self._lock:
-            self._playing = True
+        self._playing = True
         self._emit("playing_changed")
 
     def pause(self) -> None:
@@ -106,77 +102,68 @@ class MpvEngine:
             return
         self._player.pause = True
         pos = self._player.time_pos
-        with self._lock:
-            self._playing = False
-            if pos is not None:
-                self._position_sec = float(pos)
+        self._playing = False
+        if pos is not None:
+            self._position_sec = float(pos)
         self._emit("playing_changed")
         self._emit("position_changed")
 
     def stop(self) -> None:
-        with self._lock:
-            self._player.command("stop")
-            self._loaded_uri = None
-            self._playing = False
-            self._position_sec = 0.0
-            self._duration_sec = None
+        self._player.command("stop")
+        self._loaded_uri = None
+        self._playing = False
+        self._position_sec = 0.0
+        self._duration_sec = None
         self._emit("playing_changed")
         self._emit("position_changed")
         self._emit("duration_changed")
 
     def seek(self, position_sec: float) -> None:
-        with self._lock:
-            if self._loaded_uri is None:
-                return
-            target = max(0.0, position_sec)
-            self._player.time_pos = target
-            self._position_sec = target
+        if self._loaded_uri is None:
+            return
+        target = max(0.0, position_sec)
+        self._player.time_pos = target
+        self._position_sec = target
         self._emit("position_changed")
 
     def set_volume(self, level: float) -> None:
         self._volume = max(0.0, min(1.0, level))
         if self._bit_perfect:
             return
-        with self._lock:
-            self._player.volume = int(round(self._volume * 100))
+        self._player.volume = int(round(self._volume * 100))
 
     def set_bit_perfect(self, enabled: bool) -> None:
         self._bit_perfect = enabled
-        with self._lock:
-            self._player.replaygain = "no"
-            if enabled:
-                self._player.volume = 100
-            else:
-                self._player.volume = int(round(self._volume * 100))
+        self._player.replaygain = "no"
+        if enabled:
+            self._player.volume = 100
+        else:
+            self._player.volume = int(round(self._volume * 100))
 
     def get_position(self) -> float:
-        with self._lock:
-            pos = self._player.time_pos
-            if pos is not None:
-                self._position_sec = float(pos)
+        pos = self._player.time_pos
+        if pos is not None:
+            self._position_sec = float(pos)
         return self._position_sec
 
     def get_duration(self) -> float | None:
-        with self._lock:
-            duration = self._player.duration
-            if duration is not None and duration > 0:
-                self._duration_sec = float(duration)
+        duration = self._player.duration
+        if duration is not None and duration > 0:
+            self._duration_sec = float(duration)
         return self._duration_sec
 
     def is_playing(self) -> bool:
-        with self._lock:
-            if self._loaded_uri is None:
-                return False
-            paused = self._player.pause
-            if paused is None:
-                return self._playing
-            return not bool(paused)
+        if self._loaded_uri is None:
+            return False
+        paused = self._player.pause
+        if paused is None:
+            return self._playing
+        return not bool(paused)
 
     def quit(self) -> None:
-        with self._lock:
-            self._loaded_uri = None
-            self._playing = False
-            self._player.terminate()
+        self._loaded_uri = None
+        self._playing = False
+        self._player.terminate()
 
     def _register_observers(self) -> None:
         player = self._player
@@ -186,8 +173,7 @@ class MpvEngine:
         def _on_time_pos(_name: str, value: float | None) -> None:
             if value is None:
                 return
-            with self._lock:
-                self._position_sec = float(value)
+            self._position_sec = float(value)
             now = time.monotonic()
             if now - self._last_position_emit >= _POSITION_INTERVAL_SEC:
                 self._last_position_emit = now
@@ -197,14 +183,12 @@ class MpvEngine:
         def _on_duration(_name: str, value: float | None) -> None:
             if value is None or value <= 0:
                 return
-            with self._lock:
-                self._duration_sec = float(value)
+            self._duration_sec = float(value)
             self._emit("duration_changed")
 
         @player.property_observer("pause")
         def _on_pause(_name: str, value: bool | None) -> None:
-            with self._lock:
-                self._playing = value is not True and self._loaded_uri is not None
+            self._playing = value is not True and self._loaded_uri is not None
             self._emit("playing_changed")
 
         @player.event_callback("end-file")
@@ -214,14 +198,12 @@ class MpvEngine:
                 return
             reason = int(end_data.reason)
             if reason == end_file.EOF:
-                with self._lock:
-                    if self._loaded_uri is None:
-                        return
-                    self._playing = False
+                if self._loaded_uri is None:
+                    return
+                self._playing = False
                 self._emit("track_finished")
             elif reason == end_file.ERROR:
-                with self._lock:
-                    self._playing = False
+                self._playing = False
                 self._emit("playback_error")
 
     def _emit(self, event: EngineEvent) -> None:
