@@ -9,8 +9,8 @@ live here.
 | Item | Choice |
 |------|--------|
 | Display name | **Tunes** |
-| Package / CLI | **tunes-player** |
-| App ID | `io.github.mbrennwa.Tunes` |
+| Package / CLI / icon name | **tunes-player** |
+| GTK / D-Bus app ID | `tunes.player` |
 | License | **GPL-3.0-or-later** (see [License rationale](#license-rationale)) |
 | Distribution | Public FOSS; **DEB** for Debian/Ubuntu first (not Flatpak-first) |
 | Initial platform | **Linux / GNOME / GTK 4 + Libadwaita** |
@@ -484,7 +484,7 @@ instead of mpv). **AGPL** is unnecessary for a desktop app.
 | GitHub repo | `mbrennwa/tunes-player` |
 | Debian package | `tunes-player` (not bare `tunes`) |
 | Binary | `tunes-player` |
-| Desktop file | `data/io.github.mbrennwa.Tunes.desktop` |
+| Desktop file | `data/tunes-player.desktop` |
 | Config (planned) | `platformdirs` → e.g. `~/.config/tunes-player/` |
 
 ---

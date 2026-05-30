@@ -16,12 +16,12 @@ from tunes_player.core.art import resolve_art_url  # noqa: E402
 from tunes_player.core.backends.local import resolve_local_track  # noqa: E402
 from tunes_player.core.services import PlaybackState, PlayerService  # noqa: E402
 
-BUS_NAME = "org.mpris.MediaPlayer2.io_github_mbrennwa_Tunes"
+BUS_NAME = "org.mpris.MediaPlayer2.tunes_player"
 OBJECT_PATH = "/org/mpris/MediaPlayer2"
 ROOT_INTERFACE = "org.mpris.MediaPlayer2"
 PLAYER_INTERFACE = "org.mpris.MediaPlayer2.Player"
 PROPERTIES_INTERFACE = "org.freedesktop.DBus.Properties"
-DESKTOP_ENTRY = "io.github.mbrennwa.Tunes"
+DESKTOP_ENTRY = "tunes-player"
 IDENTITY = "Tunes"
 SUPPORTED_MIME_TYPES = [
     "audio/flac",

@@ -366,7 +366,7 @@ def run() -> int:
             service.shutdown()
             Adw.Application.do_shutdown(self)
 
-    app = TunesApplication(application_id="io.github.mbrennwa.Tunes")
+    app = TunesApplication(application_id="tunes.player")
 
     def _raise_app() -> None:
         window = app.get_active_window()
