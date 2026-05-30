@@ -334,6 +334,7 @@ class TunesWindow(Adw.ApplicationWindow):
 
 def run() -> int:
     service = PlayerService()
+    mpris_service = None
 
     class TunesApplication(Adw.Application):
         def do_activate(self) -> None:  # noqa: N802 — GTK vfunc
@@ -343,10 +344,28 @@ def run() -> int:
             window.present()
 
         def do_shutdown(self) -> None:  # noqa: N802 — GTK vfunc
+            nonlocal mpris_service
+            if mpris_service is not None:
+                mpris_service.stop()
+                mpris_service = None
             service.shutdown()
             Adw.Application.do_shutdown(self)
 
     app = TunesApplication(application_id="io.github.mbrennwa.Tunes")
+
+    def _raise_app() -> None:
+        window = app.get_active_window()
+        if window is not None:
+            window.present()
+
+    from tunes_player.platform.linux.mpris import create_mpris_service
+
+    mpris_service = create_mpris_service(
+        service,
+        on_raise=_raise_app,
+        on_quit=app.quit,
+    )
+    mpris_service.start()
 
     def _poll_playback() -> bool:
         service.poll_playback()

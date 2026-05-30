@@ -80,7 +80,7 @@ tunes_player/
 ├── engines/        # PlaybackEngine implementations (planned)
 │   └── mpv.py      # libmpv wrapper
 ├── platform/       # OS-specific, non-UI
-│   └── linux/      # MPRIS, audio device hints (planned)
+│   └── linux/      # MPRIS, PipeWire/ALSA, UPnP renderer (planned)
 └── ui/
     └── gtk/        # Libadwaita only on Linux for now
 ```
@@ -192,7 +192,7 @@ accounts do **not** belong under **Library → Music folders** (local scan paths
 |------|------|-------|
 | **Library** | Music folders, scan options | Watch folders, rescan |
 | **Sources** | — | Tidal, Qobuz: sign in, sign out, “connected as …”, enable/disable per service |
-| **Audio** | Bit-perfect toggle, output device (placeholders today) | Endpoint volume, software-volume fallback |
+| **Audio** | Bit-perfect toggle, output device (placeholders today) | Local sink (PipeWire/ALSA), UPnP renderer, endpoint volume |
 
 **Sources page (when streaming lands):**
 
@@ -310,6 +310,52 @@ Linux implementations (platform/linux/audio.py):
 **UI:** show when volume is **device** vs **software** (e.g. badge or subtitle in
 preferences) so users know bit-perfect status is intact.
 
+### Output endpoints (planned — not implemented yet)
+
+Tunes supports more than one **output type**. Endpoints are not all “ALSA cards”;
+network renderers use a different control path than local mpv playback.
+
+**Priorities (product order):**
+
+| Priority | Type | Typical hardware | Implementation sketch |
+|----------|------|------------------|------------------------|
+| **1 — Local** | Linux audio sink | DAC, headphones, USB interface on the Tunes machine | `mpv` → PipeWire node or ALSA device; **VolumeController** on that sink; full bit-perfect control |
+| **2 — Network (open)** | UPnP / DLNA **Media Renderer** | TVs, AVRs, hi-fi streamers, NAS-friendly speakers (any OS on device) | SSDP discovery; push `PlayableSource.uri` via AVTransport; sync transport/volume from renderer; device decodes (lossless URL when possible) |
+| **3 — Optional / later** | **AES67** / **Dante** / Ravenna | Studio/install, some high-end gear | PCM over Ethernet; PTP/multicast complexity; only if there is demand — treat as separate pro-audio adapter |
+
+**Explicitly not on the roadmap:** Logitech Media Server / Squeezelite (awkward fit for
+a standalone player). **Deferred / low priority:** Snapcast, PipeWire/Pulse **network**
+sinks (Linux-only receivers), AirPlay sender, Google Cast — may revisit for compatibility
+but not core architecture.
+
+**Local (priority 1)** — see [Volume control](#volume-control-requirement) and
+`platform/linux/audio.py` (planned): list sinks and ALSA devices; apply bit-perfect mpv
+profile to the selected local endpoint.
+
+**UPnP renderer (priority 2)** — for non-Linuxy LAN devices:
+
+- `core/backends/` still resolves `Track` → `PlayableSource` (often `http://` to a
+  short-lived file server on the Tunes host, or a reachable `file://` if the renderer
+  shares storage).
+- A **renderer adapter** (e.g. `platform/linux/upnp.py` or `engines/upnp_renderer.py`)
+  implements play/pause/seek/volume against the device’s UPnP services, not mpv PCM output.
+- **PlayerService** chooses engine by selected output: **local** → `MpvEngine`; **UPnP**
+  → renderer adapter. Queue and library logic stay in `core/`.
+- **Bit-perfect** on renderers is *best-effort*: send lossless sources without transcoding
+  in Tunes; document that the device may still resample or apply DSP.
+- **OpenHome** (UPnP profile for hi-fi) is an enhancement on the same stack if needed
+  for gapless/playlist quality on supported brands.
+
+**AES67 / Dante (optional)** — cool for pro installs; heavy (timing, multicast, licensing
+of stacks). Spec-only until someone needs it; do not block v1 local + UPnP work.
+
+```text
+Settings → Output
+  ├── Local: PipeWire sink / ALSA device   → MpvEngine + VolumeController
+  ├── Network: UPnP Media Renderer (list)  → RendererAdapter (URI push)
+  └── (future) AES67 / Dante endpoint      → pro adapter
+```
+
 ### Media keys (requirement)
 
 Tunes must respond to **hardware media keys** and OS-level media controls — the same
@@ -419,13 +465,15 @@ instead of mpv). **AGPL** is unnecessary for a desktop app.
 
 1. Local folder scan + SQLite library index.
 2. `PlaybackEngine` + `MpvEngine` + queue; GTK transport bar (expanded + minimized compact controller); **MPRIS + media keys**.
-3. **Bit-perfect profile + `VolumeController` (PipeWire/ALSA endpoint volume).**
+3. **Local output (priority):** bit-perfect profile + output device selection + **`VolumeController`** (PipeWire / ALSA endpoint volume). See [Output endpoints](#output-endpoints-planned--not-implemented-yet).
 4. DEB package with declared depends (`python3-gi`, `gir1.2-adw-1`, `mpv`, …).
-5. One streaming backend (Tidal or Qobuz).
-6. Federated catalog search (phase A).
-7. Heuristic dedup / prefer-local.
-8. Optional Qt UI for macOS.
-9. Playlists UI (if needed for other users; not required for core browsing workflow).
+5. **UPnP / DLNA Media Renderer** output — SSDP discovery, push `PlayableSource` URI, transport/volume sync; Settings lists renderers alongside local sinks. Not started until step 3 lands.
+6. One streaming backend (Tidal or Qobuz).
+7. Federated catalog search (phase A).
+8. Heuristic dedup / prefer-local.
+9. Optional Qt UI for macOS.
+10. Playlists UI (if needed for other users; not required for core browsing workflow).
+11. **(Optional)** AES67 / Dante (or Ravenna) LAN output — pro-audio adapter; only if there is clear demand; does not precede local + UPnP.
 
 ---
 

@@ -15,6 +15,9 @@ Early development. v0.1 targets:
 - Bit-perfect local playback; volume on output device/sink (not in-app soft gain only)
 - DEB packaging for Debian/Ubuntu
 
+**Planned output (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#output-endpoints-planned--not-implemented-yet)):**
+local PipeWire/ALSA first, then UPnP network renderers; optional later AES67/Dante for pro gear.
+
 Streaming integration and unified cross-source search are on the roadmap.
 
 ## Architecture
