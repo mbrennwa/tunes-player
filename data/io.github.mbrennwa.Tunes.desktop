@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Tunes
+Comment=Music player for local files and streaming
+Exec=tunes-player
+Icon=io.github.mbrennwa.Tunes
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=music;audio;player;library;
+StartupNotify=true
+SingleMainWindow=true

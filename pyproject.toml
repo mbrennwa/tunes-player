@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tunes-player"
+version = "0.1.0"
+description = "Tunes — music player for local files and streaming services (Linux/GNOME first)"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.11"
+authors = [{ name = "mbrennwa" }]
+keywords = ["music", "player", "gtk", "gnome", "audio"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: X11 Applications :: GTK",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Sound/Audio :: Players",
+]
+dependencies = [
+    "platformdirs>=4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.8",
+]
+
+[project.scripts]
+tunes-player = "tunes_player.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/mbrennwa/tunes-player"
+Repository = "https://github.com/mbrennwa/tunes-player"
+Issues = "https://github.com/mbrennwa/tunes-player/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tunes_player*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
