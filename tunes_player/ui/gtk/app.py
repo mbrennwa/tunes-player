@@ -7,7 +7,7 @@ import gi
 gi.require_version("Adw", "1")
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Adw, Gtk  # noqa: E402
+from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.now_playing import NowPlayingBar, attach_media_keys
@@ -46,6 +46,7 @@ class TunesWindow(Adw.ApplicationWindow):
 
         self._build_expanded_shell()
         attach_media_keys(self, service)
+        service.subscribe(lambda event: GLib.idle_add(self._on_service_event, event))
 
     def _build_expanded_shell(self) -> None:
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -137,25 +138,58 @@ class TunesWindow(Adw.ApplicationWindow):
 
         self._expanded_shell = outer
 
+    def _replace_root_page(
+        self,
+        nav: Adw.NavigationView,
+        *,
+        title: str,
+        tag: str,
+        child: Gtk.Widget,
+    ) -> None:
+        self._pop_to_root(nav)
+        current = nav.get_visible_page()
+        if current is not None and current.get_tag() == tag:
+            current.set_child(child)
+            current.set_title(title)
+            return
+        nav.add(Adw.NavigationPage(title=title, child=child, tag=tag))
+
     def _show_albums_root(self) -> None:
+        albums = self._service.list_albums()
+        empty_message = None
+        if not albums:
+            empty_message = (
+                "No albums in your library.\n"
+                "Open Settings, add music folders, and scan your library."
+            )
         view = AlbumGridView(
-            albums=self._service.list_albums(),
+            albums=albums,
             on_album_activated=self._open_album,
+            empty_message=empty_message,
         )
-        page = Adw.NavigationPage(title="Albums", child=view, tag="albums-root")
-        while self._albums_nav.get_visible_page() is not None:
-            self._albums_nav.pop()
-        self._albums_nav.add(page)
+        self._replace_root_page(
+            self._albums_nav,
+            title="Albums",
+            tag="albums-root",
+            child=view,
+        )
 
     def _show_artists_root(self) -> None:
+        artists = self._service.list_artists()
+        empty_message = None
+        if not artists:
+            empty_message = "No artists indexed yet. Scan your library in Settings."
         view = ArtistListView(
-            artists=self._service.list_artists(),
+            artists=artists,
             on_artist_activated=self._open_artist,
+            empty_message=empty_message,
         )
-        page = Adw.NavigationPage(title="Artists", child=view, tag="artists-root")
-        while self._artists_nav.get_visible_page() is not None:
-            self._artists_nav.pop()
-        self._artists_nav.add(page)
+        self._replace_root_page(
+            self._artists_nav,
+            title="Artists",
+            tag="artists-root",
+            child=view,
+        )
 
     def _open_album(self, album_id: str) -> None:
         album = self._service.get_album(album_id)
@@ -241,12 +275,28 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _open_preferences(self, *_args: object) -> None:
         if self._preferences is None:
-            self._preferences = PreferencesWindow(parent=self)
+            self._preferences = PreferencesWindow(parent=self, service=self._service)
             self._preferences.connect(
                 "close-request",
                 lambda *_: setattr(self, "_preferences", None) or False,
             )
         self._preferences.present()
+
+    def _on_service_event(self, event: str) -> bool:
+        if event == "library_updated":
+            GLib.idle_add(self._refresh_library_after_scan)
+        return False
+
+    def _refresh_library_after_scan(self) -> bool:
+        self._show_albums_root()
+        GLib.idle_add(self._refresh_artists_after_scan)
+        return False
+
+    def _refresh_artists_after_scan(self) -> bool:
+        self._show_artists_root()
+        if self._search_active:
+            self._refresh_search()
+        return False
 
     def _open_queue_sheet(self, *_args: object) -> None:
         if self._queue_sheet is None:

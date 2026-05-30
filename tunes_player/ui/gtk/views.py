@@ -9,7 +9,7 @@ import gi
 gi.require_version("Adw", "1")
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Adw, Gtk  # noqa: E402
+from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.models import Album, Artist
 from tunes_player.core.services import PlayerService
@@ -22,9 +22,21 @@ class AlbumGridView(Gtk.ScrolledWindow):
         *,
         albums: list[Album],
         on_album_activated: Callable[[str], None],
+        empty_message: str | None = None,
     ) -> None:
         super().__init__(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         self.add_css_class("view")
+
+        if not albums and empty_message:
+            label = Gtk.Label(label=empty_message, vexpand=True, justify=Gtk.Justification.CENTER)
+            label.add_css_class("dim-label")
+            label.set_valign(Gtk.Align.CENTER)
+            label.set_margin_top(24)
+            label.set_margin_bottom(24)
+            label.set_margin_start(24)
+            label.set_margin_end(24)
+            self.set_child(label)
+            return
 
         flow = Gtk.FlowBox()
         flow.set_valign(Gtk.Align.START)
@@ -39,10 +51,32 @@ class AlbumGridView(Gtk.ScrolledWindow):
         flow.set_margin_end(18)
         self.set_child(flow)
 
-        for album in albums:
+        self._populate_albums(flow, albums, on_album_activated)
+
+    @staticmethod
+    def _populate_albums(
+        flow: Gtk.FlowBox,
+        albums: list[Album],
+        on_album_activated: Callable[[str], None],
+        *,
+        start: int = 0,
+        batch_size: int = 24,
+    ) -> None:
+        end = min(start + batch_size, len(albums))
+        for album in albums[start:end]:
             card = _album_card(album)
             card.connect("clicked", lambda _btn, album_id=album.id: on_album_activated(album_id))
             flow.append(card)
+
+        if end < len(albums):
+            GLib.idle_add(
+                AlbumGridView._populate_albums,
+                flow,
+                albums,
+                on_album_activated,
+                start=end,
+                batch_size=batch_size,
+            )
 
 
 class ArtistListView(Gtk.ScrolledWindow):
@@ -51,20 +85,53 @@ class ArtistListView(Gtk.ScrolledWindow):
         *,
         artists: list[Artist],
         on_artist_activated: Callable[[str], None],
+        empty_message: str | None = None,
     ) -> None:
         super().__init__(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         self.add_css_class("view")
+
+        if not artists and empty_message:
+            label = Gtk.Label(label=empty_message, vexpand=True, justify=Gtk.Justification.CENTER)
+            label.add_css_class("dim-label")
+            label.set_valign(Gtk.Align.CENTER)
+            self.set_child(label)
+            return
 
         list_box = Gtk.ListBox()
         list_box.add_css_class("navigation-sidebar")
         list_box.set_selection_mode(Gtk.SelectionMode.NONE)
         self.set_child(list_box)
 
-        for artist in artists:
+        ArtistListView._populate_artists(list_box, artists, on_artist_activated)
+
+    @staticmethod
+    def _populate_artists(
+        list_box: Gtk.ListBox,
+        artists: list[Artist],
+        on_artist_activated: Callable[[str], None],
+        *,
+        start: int = 0,
+        batch_size: int = 50,
+    ) -> None:
+        end = min(start + batch_size, len(artists))
+        for artist in artists[start:end]:
             row = Adw.ActionRow(title=artist.name, subtitle="Artist")
             row.set_activatable(True)
-            row.connect("activated", lambda _row, artist_id=artist.id: on_artist_activated(artist_id))
+            row.connect(
+                "activated",
+                lambda _row, artist_id=artist.id: on_artist_activated(artist_id),
+            )
             list_box.append(row)
+
+        if end < len(artists):
+            GLib.idle_add(
+                ArtistListView._populate_artists,
+                list_box,
+                artists,
+                on_artist_activated,
+                start=end,
+                batch_size=batch_size,
+            )
 
 
 class AlbumDetailView(Gtk.Box):
@@ -215,8 +282,13 @@ class QueueSheet(Adw.Dialog):
         self._list_box.set_selection_mode(Gtk.SelectionMode.NONE)
         scrolled.set_child(self._list_box)
 
-        service.subscribe(lambda _event: self._refresh())
+        service.subscribe(lambda _event: GLib.idle_add(self._refresh_on_main))
+
         self._refresh()
+
+    def _refresh_on_main(self) -> bool:
+        self._refresh()
+        return False
 
     def _refresh(self) -> None:
         child = self._list_box.get_first_child()

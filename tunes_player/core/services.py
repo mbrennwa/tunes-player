@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import multiprocessing
 from dataclasses import dataclass
+from queue import Empty
 from typing import Callable
 
-from tunes_player.core import demo_library
+from tunes_player.core.config import ConfigManager
+from tunes_player.core.library import LibraryStore, ScanResult
+from tunes_player.core.library.scan_worker import create_scan_process
 from tunes_player.core.models import Album, Artist, Track
 
 EventCallback = Callable[[str], None]
@@ -33,53 +37,131 @@ class PlaybackState:
 class PlayerService:
     """Stable API for GTK (and future) frontends."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, config: ConfigManager | None = None) -> None:
+        self._config_manager = config or ConfigManager()
+        self._config_manager.load()
+        self._store = LibraryStore(self._config_manager.database_path)
         self._listeners: list[EventCallback] = []
         self._volume = 0.72
-        self._bit_perfect = True
+        self._bit_perfect = self._config_manager.config.bit_perfect
         self._device_volume = True
         self._is_playing = False
         self._queue: list[Track] = []
         self._queue_index = -1
         self._current_track: Track | None = None
         self._quality_hint = ""
+        self._scan_process: multiprocessing.Process | None = None
+        self._scan_queue: multiprocessing.Queue | None = None
+        self._scan_on_progress: Callable[[int, int, str], None] | None = None
+        self._scan_on_finished: Callable[[ScanResult], None] | None = None
+        self._scan_on_error: Callable[[Exception], None] | None = None
+
+    @property
+    def config(self) -> ConfigManager:
+        return self._config_manager
+
+    @property
+    def store(self) -> LibraryStore:
+        return self._store
 
     def list_albums(self) -> list[Album]:
-        return list(demo_library.demo_albums())
+        return self._store.list_albums()
 
     def list_artists(self) -> list[Artist]:
-        return list(demo_library.demo_artists())
+        return self._store.list_artists()
 
     def get_album(self, album_id: str) -> Album | None:
-        return demo_library.demo_album_by_id(album_id)
+        return self._store.get_album(album_id)
 
     def get_album_tracks(self, album_id: str) -> list[Track]:
-        return list(demo_library.demo_tracks_for_album(album_id))
+        return self._store.get_album_tracks(album_id)
 
     def get_artist_albums(self, artist_id: str) -> list[Album]:
-        artist = next((item for item in self.list_artists() if item.id == artist_id), None)
-        if artist is None:
-            return []
-        return [album for album in self.list_albums() if album.artist_name == artist.name]
+        return self._store.get_artist_albums(artist_id)
 
     def search(self, query: str) -> SearchResults:
-        needle = query.strip().casefold()
+        needle = query.strip()
         if not needle:
             return SearchResults(albums=[], tracks=[])
-
-        albums = [
-            album
-            for album in self.list_albums()
-            if needle in album.title.casefold() or needle in album.artist_name.casefold()
-        ]
-        tracks = [
-            track
-            for track in demo_library.demo_all_tracks()
-            if needle in track.title.casefold()
-            or needle in track.artist_name.casefold()
-            or (track.album_title and needle in track.album_title.casefold())
-        ]
+        albums, tracks = self._store.search(needle)
         return SearchResults(albums=albums, tracks=tracks)
+
+    def scan_library(
+        self,
+        *,
+        on_progress: Callable[[int, int, str], None] | None = None,
+        on_finished: Callable[[ScanResult], None] | None = None,
+        on_error: Callable[[Exception], None] | None = None,
+    ) -> None:
+        if self.is_scanning():
+            return
+
+        self._scan_on_progress = on_progress
+        self._scan_on_finished = on_finished
+        self._scan_on_error = on_error
+        self._scan_process, self._scan_queue = create_scan_process(
+            db_path=self._config_manager.database_path,
+            music_folders=self._config_manager.config.music_folders,
+        )
+        self._scan_process.start()
+
+    def poll_scan(self) -> bool:
+        """Drain scan events on the GTK main thread. Returns True while scan runs."""
+        if self._scan_queue is None:
+            return False
+
+        while True:
+            try:
+                message = self._scan_queue.get_nowait()
+            except Empty:
+                break
+
+            kind = message[0]
+            if kind == "progress" and self._scan_on_progress is not None:
+                self._scan_on_progress(message[1], message[2], message[3])
+            elif kind == "done":
+                result = ScanResult(
+                    indexed=message[1],
+                    removed=message[2],
+                    skipped=message[3],
+                    errors=message[4],
+                )
+                if self._scan_on_finished is not None:
+                    self._scan_on_finished(result)
+                self._cleanup_scan()
+                return False
+            elif kind == "error":
+                if self._scan_on_error is not None:
+                    self._scan_on_error(RuntimeError(message[1]))
+                self._cleanup_scan()
+                return False
+
+        if self._scan_process is not None and self._scan_process.is_alive():
+            return True
+
+        if self._scan_process is not None and self._scan_on_error is not None:
+            code = self._scan_process.exitcode
+            if code not in (0, None):
+                self._scan_on_error(RuntimeError(f"Scan process exited with code {code}"))
+        self._cleanup_scan()
+        return False
+
+    def _cleanup_scan(self) -> None:
+        if self._scan_process is not None:
+            self._scan_process.join(timeout=2.0)
+            self._scan_process = None
+        self._scan_queue = None
+        self._scan_on_progress = None
+        self._scan_on_finished = None
+        self._scan_on_error = None
+
+    def is_scanning(self) -> bool:
+        return self._scan_process is not None and self._scan_process.is_alive()
+
+    def notify_library_updated(self) -> None:
+        """Call from the GTK main thread after a scan completes."""
+        self._store.reconnect()
+        self._emit("library_updated")
 
     def get_playback_state(self) -> PlaybackState:
         return PlaybackState(
@@ -94,12 +176,12 @@ class PlayerService:
         )
 
     def play_track(self, track_id: str) -> None:
-        track = demo_library.demo_track_by_id(track_id)
+        track = self._store.get_track(track_id)
         if track is None:
             return
-        album_id = demo_library.demo_album_id_for_track(track_id)
+        album_id = self._store.album_id_for_track(track_id)
         if album_id is not None:
-            self._queue = list(demo_library.demo_tracks_for_album(album_id))
+            self._queue = self.get_album_tracks(album_id)
             self._queue_index = next(
                 (index for index, item in enumerate(self._queue) if item.id == track_id),
                 0,
@@ -176,6 +258,12 @@ class PlayerService:
     def adjust_volume(self, delta: float) -> None:
         self.set_volume(self._volume + delta)
 
+    def set_bit_perfect(self, enabled: bool) -> None:
+        self._bit_perfect = enabled
+        self._config_manager.config.bit_perfect = enabled
+        self._config_manager.save()
+        self._emit("playback_changed")
+
     def subscribe(self, callback: EventCallback) -> Unsubscribe:
         self._listeners.append(callback)
 
@@ -187,7 +275,8 @@ class PlayerService:
 
     def _set_current_track(self, track: Track) -> None:
         self._current_track = track
-        self._quality_hint = demo_library.demo_quality_hint_for_track(track.id)
+        metadata = self._store.get_file_metadata(track.id)
+        self._quality_hint = LibraryStore.quality_hint(metadata)
 
     def _emit(self, *events: str) -> None:
         for event in events:
