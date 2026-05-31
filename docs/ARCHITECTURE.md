@@ -24,7 +24,8 @@ live here.
   soft gain.
 - **Media keys** — play/pause, skip, volume, mute from keyboard and OS (see
   [Media keys](#media-keys-requirement)).
-- Eventually integrate **streaming** (Tidal, Qobuz) via unofficial APIs.
+- Eventually integrate **streaming** (Tidal, Deezer, Qobuz) via provider-specific APIs
+  (official developer paths where available; see [Streaming](#streaming)).
 - Present sources as **one searchable library** (see [Unified catalog](#unified-catalog)).
 - **Simple** Libadwaita GUI; native GNOME look (not Qt on Linux).
 
@@ -75,7 +76,7 @@ tunes_player/
 ├── core/           # No GTK, no mpv — models, services, library, playback logic
 │   ├── models.py
 │   ├── services.py # PlayerService facade for all UIs
-│   ├── backends/   # Local, Tidal, Qobuz → PlayableSource (planned)
+│   ├── backends/   # local/, tidal/, deezer/, qobuz/ → PlayableSource (planned)
 │   ├── playback/   # Queue, controller, events (planned)
 │   └── catalog/    # Unified search across sources (planned)
 ├── engines/        # PlaybackEngine implementations (planned)
@@ -99,7 +100,7 @@ Future: `ui/qt/` for macOS/Windows; same `PlayerService` API.
 - **PlayerService** (`core/services.py`): stable API — `play`, `pause`, `search`,
   `subscribe(events)`.
 - **No GTK types in core models** — use `art_uri: str`, opaque IDs like
-  `local:…`, `tidal:…`.
+  `local:…`, `tidal:…`, `deezer:…`, `qobuz:…`.
 
 GTK runs on the main loop; mpv callbacks post to a queue → GLib idle (same pattern
 will work for Qt signals later).
@@ -192,23 +193,28 @@ accounts do **not** belong under **Library → Music folders** (local scan paths
 | Page | v0.1 | Later |
 |------|------|-------|
 | **Library** | Music folders, scan options | Watch folders, rescan |
-| **Sources** | — | Tidal, Qobuz: sign in, sign out, “connected as …”, enable/disable per service |
+| **Sources** | — | Tidal, Deezer, Qobuz: per-service connect/disconnect; see [Settings](#settings-preferences-window) |
 | **Audio** | Bit-perfect toggle, output device (placeholders today) | Local sink (PipeWire/ALSA), UPnP renderer, endpoint volume |
 
 **Sources page (when streaming lands):**
 
-- One **PreferencesGroup** per service (Tidal, Qobuz).
-- Rows: login / logout, account label, connection status — not filesystem paths.
+- One **PreferencesGroup** per service (Tidal, Deezer, Qobuz).
+- **Tidal / Deezer:** OAuth or documented sign-in; rows for login / logout, account
+  label (“connected as …”), connection status, enable/disable — not filesystem paths.
+- **Qobuz (advanced):** user-supplied **App ID** and **App Secret** plus account auth;
+  explicit copy that Tunes does **not** include or distribute Qobuz credentials. Help
+  text may explain how users obtain keys; the app must **not** auto-scrape secrets from
+  Qobuz’s web player.
 - Auth and tokens live in **core/backends/** (and config on disk via `platformdirs`);
   Settings UI only calls **PlayerService** (or a small settings facade), never
   streaming APIs directly from GTK.
 - README [streaming disclaimer](#streaming) applies; UI should link or repeat it on
-  first connect.
+  first connect (extra emphasis for Qobuz credential setup).
 
 **Where streaming appears outside Settings:**
 
-- **Browse / search:** unified results tagged Local / Tidal / Qobuz (see
-  [Unified catalog](#unified-catalog)); no extra sidebar section for “Tidal library”.
+- **Browse / search:** unified results tagged Local / Tidal / Deezer / Qobuz (see
+  [Unified catalog](#unified-catalog)); no per-service sidebar library section.
 - **Now Playing:** optional source badge on the bar (deferred).
 - **Playlists:** cross-source playlists remain catalog phase D — not v0.1.
 
@@ -272,7 +278,7 @@ Audiophile use is a **product requirement**, not an optional extra.
 
 - **Bit-perfect + software volume are incompatible** — lowering level inside the
   player changes samples. Volume must move to the **device or sink**.
-- **Streaming** (Tidal/Qobuz) may already be lossy or transcoded; “bit-perfect” means
+- **Streaming** (Tidal/Deezer/Qobuz) may already be lossy or transcoded; “bit-perfect” means
   **no additional processing in Tunes**, not that the stream is hi-res MQA/bitstream.
 - **Local FLAC/WAV** is the primary bit-perfect use case for v1.
 
@@ -433,7 +439,7 @@ UI never polls mpv properties directly.
 
 | Phase | User experience | Effort (rough) |
 |-------|-----------------|----------------|
-| A | One search box; results tagged Local / Tidal / Qobuz | +2–4 weeks after streaming works |
+| A | One search box; results tagged Local / Tidal / Deezer / Qobuz | +2–4 weeks after streaming works |
 | B | Merged list, heuristic duplicate titles | +2–4 weeks |
 | C | Dedup via MusicBrainz / ISRC / UPC | +1–2 months |
 | D | Unified playlists, “prefer local if duplicate” | ongoing |
@@ -450,13 +456,57 @@ local file (match on normalized artist/title or MBID later).
 
 ## Streaming
 
-- **Unofficial** APIs only; not affiliated with Tidal/Qobuz.
-- Users need **own subscriptions**; features can break when providers change auth.
-- Likely libraries: `tidalapi` (LGPL), Qobuz tooling (often **GPL/AGPL** — affects
-  combined work; may become optional plugin).
-- README includes a user-facing disclaimer.
+Tunes is **not affiliated** with any streaming provider. Users need **own paid
+subscriptions** where required. Features can break when providers change auth or terms.
+README includes a user-facing [disclaimer](../README.md#streaming-disclaimer).
 
-Implement streaming **after** local library + mpv playback work.
+Implement streaming **after** local library + mpv playback work (roadmap steps 7–9).
+One **provider abstraction** in `core/backends/` (auth, catalog/search, resolve
+`PlayableSource` at play time) is proven with the **first** backend, then reused.
+
+### Provider strategy (integration order)
+
+Commercial hi-fi apps often have **formal partnerships** with lossless services; a small
+FOSS desktop player should not depend on that. There is no Spotify-like open ecosystem
+for lossless streaming — plan per provider:
+
+| Provider | Access model (working assumption) | Role in Tunes |
+|----------|-------------------------------------|---------------|
+| **Tidal** | Official developer platform; OAuth | **First** streaming backend — prove abstraction, auth, playback |
+| **Deezer** | Documented developer API | **Second** — validate streaming/playback; add if API stays clean |
+| **Qobuz** | No simple public third-party path for hobby apps | **Later, optional** — user-supplied App ID + App Secret; “advanced” in Settings |
+
+Optional: a short email to Qobuz asking whether they support third-party open-source
+clients (could enable an official path later; does not block BYO-credentials work).
+
+### Backend layout (planned)
+
+```text
+tunes_player/core/backends/
+  local/
+  tidal/       # oauth, api, playback
+  deezer/      # auth, api, playback
+  qobuz/       # user credentials, api, playback
+```
+
+### Auth and credentials
+
+- **Tidal:** OAuth via developer registration; tokens in config (see `platformdirs`).
+- **Deezer:** documented API auth (details when implementing).
+- **Qobuz:** **user-supplied** App ID and App Secret stored in config — same pattern as
+  media apps that require your own API keys (YouTube, TMDb, etc.). Tunes must **not**
+  redistribute Qobuz credentials in source or binaries and must **not** ship code that
+  automatically extracts current secrets from Qobuz’s web application.
+
+### Libraries and license
+
+| Provider | Likely dependency | License note |
+|----------|-------------------|--------------|
+| Tidal | `tidalapi` | LGPL-3.0 — OK inside GPL app |
+| Deezer | TBD (REST/client) | Confirm before linking |
+| Qobuz | community tooling (if any) | Often GPL/AGPL — may be optional or isolated module |
+
+See [License rationale](#license-rationale).
 
 ---
 
@@ -470,7 +520,8 @@ Implement streaming **after** local library + mpv playback work.
 | mutagen (planned) | GPLv2+ | Tags |
 | GTK / Libadwaita | LGPL | OK inside GPL app |
 | tidalapi (planned) | LGPL-3.0 | OK inside GPL app |
-| Qobuz libs (planned) | GPL/AGPL | Strong copyleft if linked |
+| Deezer client (planned) | TBD | Confirm before linking |
+| Qobuz libs (planned) | GPL/AGPL | Strong copyleft if linked; optional module |
 
 MIT/Apache would only be realistic if the stack avoided GPL deps (e.g. GStreamer
 instead of mpv). **AGPL** is unnecessary for a desktop app.
@@ -497,12 +548,14 @@ instead of mpv). **AGPL** is unnecessary for a desktop app.
 4. **External control interface** — bidirectional sync with external tools; inbound volume from device/DAC/stack → Tunes UI + MPRIS. See [External control interface](#external-control-interface-requirement).
 5. DEB package with declared depends (`python3-gi`, `gir1.2-adw-1`, `mpv`, …).
 6. **UPnP / DLNA Media Renderer** output — SSDP discovery, push `PlayableSource` URI, transport/volume sync; Settings lists renderers alongside local sinks. Not started until step 3 lands.
-7. One streaming backend (Tidal or Qobuz).
-8. Federated catalog search (phase A).
-9. Heuristic dedup / prefer-local.
-10. Optional Qt UI for macOS.
-11. Playlists UI (if needed for other users; not required for core browsing workflow).
-12. **(Optional)** AES67 / Dante (or Ravenna) LAN output — pro-audio adapter; only if there is clear demand; does not precede local + UPnP.
+7. **Streaming — Tidal** (provider abstraction + OAuth; Settings → Sources).
+8. **Streaming — Deezer** (second backend if developer API and playback are viable).
+9. **Streaming — Qobuz** (optional; user-supplied App ID/Secret; advanced setup; no bundled or auto-scraped credentials).
+10. Federated catalog search (phase A).
+11. Heuristic dedup / prefer-local.
+12. Optional Qt UI for macOS.
+13. Playlists UI (if needed for other users; not required for core browsing workflow).
+14. **(Optional)** AES67 / Dante (or Ravenna) LAN output — pro-audio adapter; only if there is clear demand; does not precede local + UPnP.
 
 ---
 

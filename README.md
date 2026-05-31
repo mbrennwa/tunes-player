@@ -2,7 +2,9 @@
 
 **Tunes** is a free, open-source music player for Linux (GNOME/GTK first), with planned
 support for macOS and Windows. It plays local audio files and, in the future, streaming
-catalogs from services such as Tidal and Qobuz — presented as one searchable library.
+catalogs from Tidal, Deezer, and Qobuz (and similar services) — presented as one
+searchable library. **Tidal** is the planned first streaming integration; see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#streaming).
 
 Package and command name: **tunes-player**.
 
@@ -68,10 +70,12 @@ tunes-player
 
 ## Streaming disclaimer
 
-Tunes is **not affiliated with Tidal, Qobuz, or any other streaming provider**. Future
-streaming features will use unofficial APIs, require your own paid subscriptions, and may
-break when providers change authentication or terms. Use at your own responsibility and
-in compliance with each service's terms of use.
+Tunes is **not affiliated with Tidal, Deezer, Qobuz, or any other streaming provider**.
+Streaming requires your own paid subscriptions where applicable. Integrations may use
+official developer APIs (e.g. Tidal, Deezer) or user-supplied credentials (Qobuz App ID
+and App Secret — Tunes does not ship or distribute Qobuz keys). Features can break when
+providers change authentication or terms. Use at your own responsibility and in compliance
+with each service's terms of use.
 
 ## License
 

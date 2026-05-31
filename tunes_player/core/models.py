@@ -9,6 +9,7 @@ from enum import Enum
 class Source(str, Enum):
     LOCAL = "local"
     TIDAL = "tidal"
+    DEEZER = "deezer"
     QOBUZ = "qobuz"
 
 
