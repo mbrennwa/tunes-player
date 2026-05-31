@@ -65,8 +65,9 @@ class TidalClient:
             return False
         try:
             return bool(session.check_login())
-        except Exception:
-            log.exception("TIDAL login check failed")
+        except Exception as exc:
+            log.warning("TIDAL login check failed: %s", exc)
+            self._drop_session()
             return False
 
     def account_label(self) -> str | None:
@@ -186,9 +187,19 @@ class TidalClient:
 
     def logout(self) -> None:
         self.cancel_oauth()
-        self._session = None
+        self._drop_session()
+
+    def _clear_stored_session(self) -> None:
         if self._session_file.is_file():
-            self._session_file.unlink()
+            try:
+                self._session_file.unlink()
+            except OSError:
+                log.warning("Could not remove TIDAL session file %s", self._session_file)
+
+    def _drop_session(self) -> None:
+        """Forget in-memory and on-disk TIDAL credentials."""
+        self._clear_stored_session()
+        self._session = None
 
     def search(self, query: str, *, limit: int = 25) -> tuple[list[Album], list[Track]]:
         session = self._require_login()
@@ -364,8 +375,10 @@ class TidalClient:
         return path
 
     def _require_login(self) -> tidalapi.Session:
-        session = self._ensure_session()
-        if not session.check_login():
+        if not self.is_logged_in():
+            raise TidalUnavailableError("Not signed in to TIDAL")
+        session = self._get_session()
+        if session is None:
             raise TidalUnavailableError("Not signed in to TIDAL")
         return session
 
@@ -378,7 +391,12 @@ class TidalClient:
 
         self._session = tidalapi.Session()
         if self._session_file.is_file():
-            self._session.load_session_from_file(self._session_file)
+            try:
+                self._session.load_session_from_file(self._session_file)
+            except Exception as exc:
+                log.warning("TIDAL session expired or invalid; sign in again (%s)", exc)
+                self._clear_stored_session()
+                self._session = tidalapi.Session()
         return self._session
 
     def _ensure_session(self) -> tidalapi.Session:
