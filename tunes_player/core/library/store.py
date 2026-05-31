@@ -93,7 +93,16 @@ class LibraryStore:
     def get_album_tracks(self, album_id: str) -> list[Track]:
         rows = self._connection.execute(
             """
-            SELECT t.id, t.title, t.artist, t.album, t.album_artist, f.duration_sec, aa.art_uri
+            SELECT
+                t.id,
+                t.title,
+                t.artist,
+                t.album,
+                t.album_artist,
+                t.disc_number,
+                t.track_number,
+                f.duration_sec,
+                aa.art_uri
             FROM tracks t
             JOIN files f ON f.id = t.file_id
             LEFT JOIN album_art aa ON aa.album_id = t.album_id
@@ -138,7 +147,16 @@ class LibraryStore:
     def get_track(self, track_id: str) -> Track | None:
         row = self._connection.execute(
             """
-            SELECT t.id, t.title, t.artist, t.album, t.album_artist, f.duration_sec, aa.art_uri
+            SELECT
+                t.id,
+                t.title,
+                t.artist,
+                t.album,
+                t.album_artist,
+                t.disc_number,
+                t.track_number,
+                f.duration_sec,
+                aa.art_uri
             FROM tracks t
             JOIN files f ON f.id = t.file_id
             LEFT JOIN album_art aa ON aa.album_id = t.album_id
@@ -281,4 +299,6 @@ class LibraryStore:
             source=Source.LOCAL,
             duration_sec=duration,
             art_uri=art_uri,
+            track_number=row["track_number"] if "track_number" in row.keys() else None,
+            disc_number=row["disc_number"] if "disc_number" in row.keys() else None,
         )

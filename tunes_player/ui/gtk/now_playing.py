@@ -13,7 +13,7 @@ from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.art import ArtLoader
-from tunes_player.ui.gtk.util import format_duration
+from tunes_player.ui.gtk.util import format_duration, join_detail, source_label
 
 _TIME_LABEL_CHARS = 7  # wide enough for "0:00:00"
 
@@ -82,6 +82,7 @@ class NowPlayingBar(Gtk.Box):
         row.append(controls)
 
         prev_btn = Gtk.Button()
+        prev_btn.add_css_class("circular")
         prev_btn.set_icon_name("media-skip-backward-symbolic")
         prev_btn.set_tooltip_text("Previous")
         prev_btn.connect("clicked", lambda *_: service.skip_previous())
@@ -89,12 +90,14 @@ class NowPlayingBar(Gtk.Box):
 
         self._play_btn = Gtk.Button()
         self._play_btn.add_css_class("suggested-action")
+        self._play_btn.add_css_class("circular")
         self._play_btn.set_icon_name("media-playback-start-symbolic")
         self._play_btn.set_tooltip_text("Play")
         self._play_btn.connect("clicked", lambda *_: service.toggle_play_pause())
         controls.append(self._play_btn)
 
         next_btn = Gtk.Button()
+        next_btn.add_css_class("circular")
         next_btn.set_icon_name("media-skip-forward-symbolic")
         next_btn.set_tooltip_text("Next")
         next_btn.connect("clicked", lambda *_: service.skip_next())
@@ -349,7 +352,14 @@ class NowPlayingBar(Gtk.Box):
             artist = track.artist_name
             album = track.album_title or ""
             duration = format_duration(track.duration_sec)
-            self._subtitle.set_label(f"{artist} · {album} · {duration}".strip(" · "))
+            self._subtitle.set_label(
+                join_detail(
+                    source_label(track.source),
+                    artist,
+                    album or None,
+                    duration,
+                )
+            )
             if self._quality is not None:
                 badges = [state.quality_hint]
                 if state.bit_perfect:

@@ -40,3 +40,5 @@ class Track:
     source: Source
     duration_sec: float | None = None
     art_uri: str | None = None
+    track_number: int | None = None
+    disc_number: int | None = None

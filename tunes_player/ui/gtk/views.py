@@ -11,10 +11,16 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
-from tunes_player.core.models import Album, Artist, Source
+from tunes_player.core.models import Album, Artist, Track
 from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.art import ArtLoader
-from tunes_player.ui.gtk.util import escape_markup, format_duration
+from tunes_player.ui.gtk.util import (
+    escape_markup,
+    format_duration,
+    format_track_number,
+    join_detail,
+    source_label,
+)
 
 
 class AlbumGridView(Gtk.ScrolledWindow):
@@ -138,6 +144,9 @@ class ArtistListView(Gtk.ScrolledWindow):
             )
 
 
+_ALBUM_DETAIL_ART_SIZE = 96
+
+
 class AlbumDetailView(Gtk.Box):
     def __init__(
         self,
@@ -149,26 +158,35 @@ class AlbumDetailView(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
         self.add_css_class("view")
 
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
-        header.set_margin_top(18)
-        header.set_margin_bottom(12)
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        header.set_margin_top(12)
+        header.set_margin_bottom(8)
         header.set_margin_start(18)
         header.set_margin_end(18)
         self.append(header)
 
+        art_box = Gtk.Box()
+        art_box.set_size_request(_ALBUM_DETAIL_ART_SIZE, _ALBUM_DETAIL_ART_SIZE)
+        art_box.add_css_class("card")
+        art_box.set_halign(Gtk.Align.CENTER)
+        art_box.set_valign(Gtk.Align.CENTER)
         art = Gtk.Image.new_from_icon_name("audio-x-generic-symbolic")
-        art.set_pixel_size(160)
-        art.add_css_class("card")
+        art.set_pixel_size(_ALBUM_DETAIL_ART_SIZE)
+        art.set_halign(Gtk.Align.CENTER)
+        art.set_valign(Gtk.Align.CENTER)
+        art_box.append(art)
         if art_loader is not None:
-            art_loader.set_image(art, album.art_uri, pixel_size=160)
-        header.append(art)
+            art_loader.set_image(art, album.art_uri, pixel_size=_ALBUM_DETAIL_ART_SIZE)
+        header.append(art_box)
 
-        meta = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, vexpand=True)
+        meta = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         meta.set_valign(Gtk.Align.CENTER)
+        meta.set_hexpand(True)
         header.append(meta)
 
-        title = Gtk.Label(label=album.title, xalign=0)
-        title.add_css_class("title-1")
+        title = Gtk.Label(label=album.title, xalign=0, ellipsize=3)
+        title.add_css_class("title-2")
+        title.set_wrap(False)
         meta.append(title)
 
         artist = Gtk.Label(label=album.artist_name, xalign=0)
@@ -176,16 +194,23 @@ class AlbumDetailView(Gtk.Box):
         artist.add_css_class("dim-label")
         meta.append(artist)
 
-        year = str(album.year) if album.year else ""
-        subtitle = f"{year} · {album.track_count} tracks".strip(" · ")
-        info = Gtk.Label(label=subtitle, xalign=0)
+        year = str(album.year) if album.year else None
+        track_count = f"{album.track_count} tracks" if album.track_count else None
+        info = Gtk.Label(
+            label=join_detail(source_label(album.source), year, track_count),
+            xalign=0,
+        )
         info.add_css_class("dim-label")
         meta.append(info)
 
-        play_btn = Gtk.Button(label="Play Album")
+        play_btn = Gtk.Button()
+        play_btn.set_icon_name("media-playback-start-symbolic")
         play_btn.add_css_class("suggested-action")
+        play_btn.add_css_class("circular")
+        play_btn.set_valign(Gtk.Align.CENTER)
+        play_btn.set_tooltip_text("Play album")
         play_btn.connect("clicked", lambda *_: service.play_album(album.id))
-        meta.append(play_btn)
+        header.append(play_btn)
 
         scrolled = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         self.append(scrolled)
@@ -193,19 +218,14 @@ class AlbumDetailView(Gtk.Box):
         list_box = Gtk.ListBox()
         list_box.add_css_class("boxed-list")
         list_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        list_box.connect(
+            "row-activated",
+            lambda _box, row: service.play_track(row.track_id),
+        )
         scrolled.set_child(list_box)
 
         for index, track in enumerate(service.get_album_tracks(album.id)):
-            row = Adw.ActionRow(
-                title=escape_markup(track.title),
-                subtitle=format_duration(track.duration_sec),
-            )
-            row.set_activatable(True)
-            row.connect(
-                "activated",
-                lambda _row, track_id=track.id: service.play_track(track_id),
-            )
-            list_box.append(row)
+            list_box.append(_compact_track_row(track, index=index))
 
 
 class SearchResultsView(Gtk.ScrolledWindow):
@@ -257,9 +277,8 @@ class SearchResultsView(Gtk.ScrolledWindow):
             track_list.set_selection_mode(Gtk.SelectionMode.NONE)
             box.append(track_list)
             for track in results.tracks:
-                source_label = _source_label(track.source)
-                detail = f"{track.artist_name} · {track.album_title or ''}".strip(" · ")
-                subtitle = f"{source_label} · {detail}" if detail else source_label
+                detail = join_detail(track.artist_name, track.album_title or None)
+                subtitle = join_detail(source_label(track.source), detail)
                 row = Adw.ActionRow(
                     title=escape_markup(track.title),
                     subtitle=escape_markup(subtitle),
@@ -319,7 +338,11 @@ class QueueSheet(Adw.Dialog):
             row = Adw.ActionRow(
                 title=escape_markup(track.title),
                 subtitle=escape_markup(
-                    f"{track.artist_name} · {track.album_title or ''}".strip(" · ")
+                    join_detail(
+                        source_label(track.source),
+                        track.artist_name,
+                        track.album_title or None,
+                    )
                 ),
             )
             if index == state.queue_index:
@@ -332,10 +355,46 @@ class QueueSheet(Adw.Dialog):
             self._list_box.append(row)
 
 
-def _source_label(source: Source) -> str:
-    if source == Source.LOCAL:
-        return "Local"
-    return source.value.capitalize()
+def _compact_track_row(track: Track, *, index: int) -> Gtk.ListBoxRow:
+    row = Gtk.ListBoxRow()
+    row.track_id = track.id
+    row.set_activatable(True)
+
+    box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+    box.set_margin_top(4)
+    box.set_margin_bottom(4)
+    box.set_margin_start(12)
+    box.set_margin_end(12)
+    row.set_child(box)
+
+    number = format_track_number(track, fallback=index + 1) or str(index + 1)
+    num_label = Gtk.Label(label=number, xalign=1.0)
+    num_label.set_width_chars(4)
+    num_label.add_css_class("dim-label")
+    num_label.add_css_class("numeric")
+    num_label.set_valign(Gtk.Align.CENTER)
+    box.append(num_label)
+
+    title = Gtk.Label(label=track.title, xalign=0.0, ellipsize=3)
+    title.set_hexpand(True)
+    title.set_halign(Gtk.Align.START)
+    title.set_valign(Gtk.Align.CENTER)
+    box.append(title)
+
+    meta = Gtk.Label(
+        label=join_detail(
+            format_duration(track.duration_sec),
+            source_label(track.source),
+        ),
+        xalign=1.0,
+    )
+    meta.add_css_class("dim-label")
+    meta.add_css_class("caption")
+    meta.set_halign(Gtk.Align.END)
+    meta.set_valign(Gtk.Align.CENTER)
+    box.append(meta)
+
+    return row
 
 
 def _section_label(text: str) -> Gtk.Label:
@@ -376,5 +435,13 @@ def _album_card(
     artist.add_css_class("dim-label")
     artist.add_css_class("caption")
     box.append(artist)
+
+    source = Gtk.Label(
+        label=source_label(album.source),
+        justify=Gtk.Justification.CENTER,
+    )
+    source.add_css_class("dim-label")
+    source.add_css_class("caption")
+    box.append(source)
 
     return button

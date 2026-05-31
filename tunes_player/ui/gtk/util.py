@@ -12,12 +12,40 @@ gi.require_version("Gio", "2.0")
 
 from gi.repository import Gio, GLib  # noqa: E402
 
+from tunes_player.core.models import Source, Track
+
 
 def escape_markup(text: str | None) -> str:
     """Escape text for Adw/Gtk widgets that interpret title as Pango markup."""
     if not text:
         return ""
     return GLib.markup_escape_text(text, -1)
+
+
+def source_label(source: Source) -> str:
+    """Human-readable catalog source name for UI badges and subtitles."""
+    labels = {
+        Source.LOCAL: "Local",
+        Source.TIDAL: "TIDAL",
+        Source.DEEZER: "Deezer",
+        Source.QOBUZ: "Qobuz",
+    }
+    return labels.get(source, source.value.capitalize())
+
+
+def format_track_number(track: Track, *, fallback: int | None = None) -> str | None:
+    """Display track index for album lists (e.g. 3 or 2-5 for multi-disc)."""
+    number = track.track_number if track.track_number is not None else fallback
+    if number is None:
+        return None
+    if track.disc_number is not None and track.disc_number > 1:
+        return f"{track.disc_number}-{number}"
+    return str(number)
+
+
+def join_detail(*parts: str | None) -> str:
+    """Join non-empty subtitle segments with middle dots."""
+    return " · ".join(part for part in parts if part)
 
 
 def format_duration(seconds: float | None) -> str:

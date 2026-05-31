@@ -60,6 +60,8 @@ def track_from_tidal(session: Session, track: TidalTrack, *, album: TidalAlbum |
     duration = None
     if track.duration is not None:
         duration = float(track.duration)
+    track_number = getattr(track, "track_num", None)
+    disc_number = getattr(track, "volume_num", None)
     return Track(
         id=tidal_ids.track_id(track.id),
         title=track.name or "Unknown Track",
@@ -68,4 +70,6 @@ def track_from_tidal(session: Session, track: TidalTrack, *, album: TidalAlbum |
         source=Source.TIDAL,
         duration_sec=duration,
         art_uri=art_uri,
+        track_number=int(track_number) if track_number is not None else None,
+        disc_number=int(disc_number) if disc_number is not None else None,
     )
