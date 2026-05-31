@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
@@ -89,9 +90,22 @@ class MpvEngine:
             options["volume"] = max(0.0, min(100.0, volume * 100.0))
 
         self._player: MPV = mpv_module.MPV(**options)
+        # TIDAL (and other DASH/HLS) manifests fetch HTTPS segments via ffmpeg.
+        self._configure_stream_demuxer()
         if audio_device:
             self._player.audio_device = audio_device
         self._register_observers()
+
+    def _configure_stream_demuxer(self) -> None:
+        try:
+            self._player._set_property(
+                "stream-lavf-o",
+                {"protocol_whitelist": "file,crypto,data,https,tcp,tls"},
+            )
+        except (TypeError, AttributeError):
+            logging.getLogger(__name__).warning(
+                "Could not set mpv stream-lavf-o for HTTPS streaming"
+            )
 
     def set_audio_device(self, audio_device: str | None) -> None:
         if audio_device:

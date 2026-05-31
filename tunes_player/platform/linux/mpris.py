@@ -13,7 +13,7 @@ gi.require_version("GLib", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
 from tunes_player.core.art import resolve_art_url  # noqa: E402
-from tunes_player.core.backends.local import resolve_local_track  # noqa: E402
+from tunes_player.core.backends.resolve import resolve_track  # noqa: E402
 from tunes_player.core.services import PlaybackState, PlayerService  # noqa: E402
 
 BUS_NAME = "org.mpris.MediaPlayer2.tunes_player"
@@ -515,7 +515,7 @@ class MprisService:
             metadata["xesam:album"] = GLib.Variant("s", track.album_title)
         if state.duration_sec is not None:
             metadata["xesam:duration"] = GLib.Variant("x", int(state.duration_sec * 1_000_000))
-        source = resolve_local_track(self._service.store, track.id)
+        source = resolve_track(self._service.store, track.id, tidal=self._service.tidal)
         if source is not None:
             metadata["xesam:url"] = GLib.Variant("s", source.uri)
         art_url = resolve_art_url(

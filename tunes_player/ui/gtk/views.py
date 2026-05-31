@@ -11,10 +11,10 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
-from tunes_player.core.models import Album, Artist
+from tunes_player.core.models import Album, Artist, Source
 from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.art import ArtLoader
-from tunes_player.ui.gtk.util import format_duration
+from tunes_player.ui.gtk.util import escape_markup, format_duration
 
 
 class AlbumGridView(Gtk.ScrolledWindow):
@@ -119,7 +119,7 @@ class ArtistListView(Gtk.ScrolledWindow):
     ) -> None:
         end = min(start + batch_size, len(artists))
         for artist in artists[start:end]:
-            row = Adw.ActionRow(title=artist.name, subtitle="Artist")
+            row = Adw.ActionRow(title=escape_markup(artist.name), subtitle="Artist")
             row.set_activatable(True)
             row.connect(
                 "activated",
@@ -197,7 +197,7 @@ class AlbumDetailView(Gtk.Box):
 
         for index, track in enumerate(service.get_album_tracks(album.id)):
             row = Adw.ActionRow(
-                title=track.title,
+                title=escape_markup(track.title),
                 subtitle=format_duration(track.duration_sec),
             )
             row.set_activatable(True)
@@ -257,9 +257,12 @@ class SearchResultsView(Gtk.ScrolledWindow):
             track_list.set_selection_mode(Gtk.SelectionMode.NONE)
             box.append(track_list)
             for track in results.tracks:
+                source_label = _source_label(track.source)
+                detail = f"{track.artist_name} · {track.album_title or ''}".strip(" · ")
+                subtitle = f"{source_label} · {detail}" if detail else source_label
                 row = Adw.ActionRow(
-                    title=track.title,
-                    subtitle=f"{track.artist_name} · {track.album_title or ''}".strip(" · "),
+                    title=escape_markup(track.title),
+                    subtitle=escape_markup(subtitle),
                 )
                 row.set_activatable(True)
                 row.connect(
@@ -314,8 +317,10 @@ class QueueSheet(Adw.Dialog):
 
         for index, track in enumerate(state.queue):
             row = Adw.ActionRow(
-                title=track.title,
-                subtitle=f"{track.artist_name} · {track.album_title or ''}".strip(" · "),
+                title=escape_markup(track.title),
+                subtitle=escape_markup(
+                    f"{track.artist_name} · {track.album_title or ''}".strip(" · ")
+                ),
             )
             if index == state.queue_index:
                 row.add_prefix(Gtk.Image.new_from_icon_name("media-playback-start-symbolic"))
@@ -325,6 +330,12 @@ class QueueSheet(Adw.Dialog):
                 lambda _row, track_id=track.id: self._service.play_track(track_id),
             )
             self._list_box.append(row)
+
+
+def _source_label(source: Source) -> str:
+    if source == Source.LOCAL:
+        return "Local"
+    return source.value.capitalize()
 
 
 def _section_label(text: str) -> Gtk.Label:

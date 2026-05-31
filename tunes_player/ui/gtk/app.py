@@ -15,6 +15,7 @@ from tunes_player.platform.linux.audio import create_volume_controller
 from tunes_player.ui.gtk.art import ArtLoader
 from tunes_player.ui.gtk.now_playing import NowPlayingBar, attach_media_keys
 from tunes_player.ui.gtk.preferences import PreferencesWindow
+from tunes_player.ui.gtk.util import escape_markup
 from tunes_player.ui.gtk.views import (
     AlbumDetailView,
     AlbumGridView,
@@ -65,7 +66,8 @@ class TunesWindow(Adw.ApplicationWindow):
         self._header.set_title_widget(self._title_label)
 
         self._search_entry = Gtk.SearchEntry()
-        self._search_entry.set_placeholder_text("Search albums and tracks")
+        self._search_entry.set_placeholder_text("Search library and TIDAL")
+        self._search_entry.set_width_chars(36)
         self._search_entry.connect("search-changed", self._on_search_changed)
         self._search_entry.connect("stop-search", self._on_stop_search)
 
@@ -73,15 +75,6 @@ class TunesWindow(Adw.ApplicationWindow):
         self._search_button.set_tooltip_text("Search")
         self._search_button.connect("toggled", self._on_search_toggled)
         self._header.pack_start(self._search_button)
-
-        self._search_bar = Gtk.SearchBar()
-        self._search_bar.set_search_mode(False)
-        self._search_bar.set_key_capture_widget(self)
-        self._search_bar.connect_entry(self._search_entry)
-
-        search_wrap = Gtk.Box()
-        search_wrap.append(self._search_bar)
-        outer.append(search_wrap)
 
         settings_btn = Gtk.Button(icon_name="emblem-system-symbolic")
         settings_btn.set_tooltip_text("Settings")
@@ -155,9 +148,9 @@ class TunesWindow(Adw.ApplicationWindow):
         current = nav.get_visible_page()
         if current is not None and current.get_tag() == tag:
             current.set_child(child)
-            current.set_title(title)
+            current.set_title(escape_markup(title))
             return
-        nav.add(Adw.NavigationPage(title=title, child=child, tag=tag))
+        nav.add(Adw.NavigationPage(title=escape_markup(title), child=child, tag=tag))
 
     def _show_albums_root(self) -> None:
         albums = self._service.list_albums()
@@ -206,7 +199,7 @@ class TunesWindow(Adw.ApplicationWindow):
             album=album,
             art_loader=self._art_loader,
         )
-        page = Adw.NavigationPage(title=album.title, child=detail, tag=album_id)
+        page = Adw.NavigationPage(title=escape_markup(album.title), child=detail, tag=album_id)
 
         visible = self._content_stack.get_visible_child_name()
         if visible == "search":
@@ -231,7 +224,7 @@ class TunesWindow(Adw.ApplicationWindow):
             on_album_activated=self._open_album,
             art_loader=self._art_loader,
         )
-        page = Adw.NavigationPage(title=title, child=view, tag=artist_id)
+        page = Adw.NavigationPage(title=escape_markup(title), child=view, tag=artist_id)
         if self._artists_nav.get_visible_page() is not None and self._artists_nav.get_visible_page().get_tag() != "artists-root":
             self._artists_nav.pop()
         self._artists_nav.push(page)
@@ -249,15 +242,17 @@ class TunesWindow(Adw.ApplicationWindow):
     def _on_search_toggled(self, button: Gtk.ToggleButton) -> None:
         active = button.get_active()
         self._search_active = active
-        self._search_bar.set_search_mode(active)
         if active:
+            self._header.set_title_widget(self._search_entry)
             self._content_stack.set_visible_child_name("search")
-            self._title_label.set_label("Search")
             self._search_entry.grab_focus()
             self._refresh_search()
-        elif self._content_stack.get_visible_child_name() == "search":
-            self._content_stack.set_visible_child_name("albums")
-            self._title_label.set_label("Albums")
+        else:
+            self._header.set_title_widget(self._title_label)
+            self._search_entry.set_text("")
+            if self._content_stack.get_visible_child_name() == "search":
+                self._content_stack.set_visible_child_name("albums")
+                self._title_label.set_label("Albums")
 
     def _on_search_changed(self, entry: Gtk.SearchEntry) -> None:
         if self._search_active:
@@ -272,7 +267,7 @@ class TunesWindow(Adw.ApplicationWindow):
             self._search_host.remove(child)
         text = query if query is not None else self._search_entry.get_text()
         if not text.strip():
-            placeholder = Gtk.Label(label="Type to search your library", vexpand=True)
+            placeholder = Gtk.Label(label="Type to search your library and TIDAL", vexpand=True)
             placeholder.add_css_class("dim-label")
             placeholder.set_valign(Gtk.Align.CENTER)
             self._search_host.append(placeholder)
@@ -329,14 +324,12 @@ class TunesWindow(Adw.ApplicationWindow):
         self._minimized = minimized
         if minimized:
             self._expanded_shell.set_visible(False)
-            self._search_bar.get_parent().set_visible(False)
             self._now_playing.set_compact(True)
             self._now_playing.set_size_request(_MINIMIZED_SIZE[0], -1)
             self.set_size_request(_MINIMIZED_SIZE[0], _MINIMIZED_SIZE[1])
             self.set_default_size(*_MINIMIZED_SIZE)
         else:
             self._expanded_shell.set_visible(True)
-            self._search_bar.get_parent().set_visible(True)
             self._now_playing.set_compact(False)
             self._now_playing.set_size_request(-1, -1)
             self.set_size_request(-1, -1)

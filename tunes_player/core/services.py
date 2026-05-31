@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from queue import Empty, Queue
 from typing import Callable
 
-from tunes_player.core.backends.local import resolve_local_track
+from tunes_player.core.backends.resolve import resolve_track
+from tunes_player.core.backends.tidal import TidalClient, TidalUnavailableError
 from tunes_player.core.config import ConfigManager
 from tunes_player.core.library import LibraryStore, ScanResult
 from tunes_player.core.library.scan_worker import create_scan_process
@@ -79,6 +80,11 @@ class PlayerService:
         self._scan_on_progress: Callable[[int, int, str], None] | None = None
         self._scan_on_finished: Callable[[ScanResult], None] | None = None
         self._scan_on_error: Callable[[Exception], None] | None = None
+        data_dir = self._config_manager.data_dir
+        self._tidal = TidalClient(
+            data_dir / "tidal-session.json",
+            cache_dir=data_dir / "tidal-cache",
+        )
 
     @property
     def config(self) -> ConfigManager:
@@ -88,6 +94,10 @@ class PlayerService:
     def store(self) -> LibraryStore:
         return self._store
 
+    @property
+    def tidal(self) -> TidalClient:
+        return self._tidal
+
     def list_albums(self) -> list[Album]:
         return self._store.list_albums()
 
@@ -95,9 +105,23 @@ class PlayerService:
         return self._store.list_artists()
 
     def get_album(self, album_id: str) -> Album | None:
+        if album_id.startswith("tidal:"):
+            if not self._tidal.is_logged_in():
+                return None
+            try:
+                return self._tidal.get_album(album_id)
+            except TidalUnavailableError:
+                return None
         return self._store.get_album(album_id)
 
     def get_album_tracks(self, album_id: str) -> list[Track]:
+        if album_id.startswith("tidal:"):
+            if not self._tidal.is_logged_in():
+                return []
+            try:
+                return self._tidal.get_album_tracks(album_id)
+            except TidalUnavailableError:
+                return []
         return self._store.get_album_tracks(album_id)
 
     def get_artist_albums(self, artist_id: str) -> list[Album]:
@@ -108,7 +132,42 @@ class PlayerService:
         if not needle:
             return SearchResults(albums=[], tracks=[])
         albums, tracks = self._store.search(needle)
+        if self._tidal.is_logged_in():
+            try:
+                tidal_albums, tidal_tracks = self._tidal.search(needle)
+                albums = [*albums, *tidal_albums]
+                tracks = [*tracks, *tidal_tracks]
+            except TidalUnavailableError:
+                pass
         return SearchResults(albums=albums, tracks=tracks)
+
+    def tidal_available(self) -> bool:
+        return self._tidal.is_available()
+
+    def tidal_is_logged_in(self) -> bool:
+        return self._tidal.is_logged_in()
+
+    def tidal_account_label(self) -> str | None:
+        return self._tidal.account_label()
+
+    def tidal_begin_login(self) -> tuple[str, float, str]:
+        return self._tidal.begin_oauth()
+
+    def tidal_poll_login(self) -> str:
+        return self._tidal.poll_oauth()
+
+    def tidal_cancel_login(self) -> None:
+        self._tidal.cancel_oauth()
+
+    def tidal_oauth_error(self) -> str | None:
+        return self._tidal.oauth_error_message()
+
+    def tidal_logout(self) -> None:
+        self._tidal.logout()
+        self._emit("sources_changed")
+
+    def notify_sources_changed(self) -> None:
+        self._emit("sources_changed")
 
     def scan_library(
         self,
@@ -203,6 +262,9 @@ class PlayerService:
         )
 
     def play_track(self, track_id: str) -> None:
+        if track_id.startswith("tidal:"):
+            self._play_tidal_track(track_id)
+            return
         track = self._store.get_track(track_id)
         if track is None:
             return
@@ -217,6 +279,23 @@ class PlayerService:
             self._queue = [track]
             self._queue_index = 0
         self._start_queue_track(track)
+
+    def _play_tidal_track(self, track_id: str) -> None:
+        if not self._tidal.is_logged_in():
+            self._engine_error = "Sign in to TIDAL in Settings → Sources."
+            self._emit("playback_error")
+            return
+        try:
+            self._queue, self._queue_index = self._tidal.queue_for_track(track_id)
+        except TidalUnavailableError as exc:
+            self._engine_error = str(exc)
+            self._emit("playback_error")
+            return
+        if not self._queue:
+            self._engine_error = "TIDAL track not found."
+            self._emit("playback_error")
+            return
+        self._start_queue_track(self._queue[self._queue_index])
 
     def play_album(self, album_id: str, *, start_index: int = 0) -> None:
         tracks = self.get_album_tracks(album_id)
@@ -343,11 +422,11 @@ class PlayerService:
                 engine.set_audio_device(device)
             track = self._current_track
             if track is not None:
-                source = resolve_local_track(self._store, track.id)
+                source = resolve_track(self._store, track.id, tidal=self._tidal)
                 if source is not None:
                     pos = engine.get_position()
                     playing = engine.is_playing()
-                    engine.load(source.path, start_sec=pos)
+                    engine.load(source.playback_target, start_sec=pos)
                     if not playing:
                         engine.pause()
         self._emit("playback_changed")
@@ -416,13 +495,13 @@ class PlayerService:
         self._reset_engine()
         if track is None:
             return True
-        source = resolve_local_track(self._store, track.id)
+        source = resolve_track(self._store, track.id, tidal=self._tidal)
         if source is None:
             return True
         engine = self._ensure_engine()
         if engine is None:
             return True
-        engine.load(source.path, start_sec=pos)
+        engine.load(source.playback_target, start_sec=pos)
         if not playing:
             engine.pause()
         engine.set_volume(self._volume)
@@ -467,9 +546,17 @@ class PlayerService:
         return self._engine
 
     def _start_queue_track(self, track: Track, *, resume: bool = True) -> None:
-        source = resolve_local_track(self._store, track.id)
+        try:
+            source = resolve_track(self._store, track.id, tidal=self._tidal)
+        except Exception as exc:
+            self._engine_error = str(exc)
+            self._emit("playback_error")
+            return
         if source is None:
-            self._engine_error = "Track file is missing from disk."
+            if track.id.startswith("tidal:"):
+                self._engine_error = "Could not play TIDAL track. Check your subscription and sign-in."
+            else:
+                self._engine_error = "Track file is missing from disk."
             self._emit("playback_error")
             return
         engine = self._ensure_engine()
@@ -477,7 +564,7 @@ class PlayerService:
             return
         self._engine_error = None
         self._set_current_track(track)
-        engine.load(source.path, start_sec=source.start_sec)
+        engine.load(source.playback_target, start_sec=source.start_sec)
         if not resume:
             engine.pause()
         self._sync_from_engine()
@@ -485,9 +572,12 @@ class PlayerService:
 
     def _set_current_track(self, track: Track) -> None:
         self._current_track = track
-        metadata = self._store.get_file_metadata(track.id)
-        self._quality_hint = LibraryStore.quality_hint(metadata)
-        self._duration_sec = None
+        if track.source.value == "tidal":
+            self._quality_hint = "TIDAL"
+        else:
+            metadata = self._store.get_file_metadata(track.id)
+            self._quality_hint = LibraryStore.quality_hint(metadata)
+        self._duration_sec = track.duration_sec
         self._reset_playback_position(0.0)
 
     def _reset_playback_position(self, position_sec: float) -> None:
@@ -521,7 +611,17 @@ class PlayerService:
             return
         duration = engine.get_duration()
         if duration is not None:
-            self._duration_sec = duration
+            track = self._current_track
+            catalog_duration = track.duration_sec if track is not None else None
+            if (
+                catalog_duration
+                and catalog_duration > 0
+                and duration < catalog_duration * 0.5
+            ):
+                # Manifest still looks like a short preview — keep catalog length for UI.
+                self._duration_sec = catalog_duration
+            else:
+                self._duration_sec = duration
         self._is_playing = engine.is_playing()
 
     def _sync_from_engine(self) -> None:

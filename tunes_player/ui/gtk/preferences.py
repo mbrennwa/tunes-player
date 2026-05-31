@@ -7,10 +7,11 @@ import gi
 gi.require_version("Adw", "1")
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.library import ScanResult
 from tunes_player.core.services import PlayerService
+from tunes_player.ui.gtk.util import escape_markup, open_external_uri
 
 
 class PreferencesWindow(Adw.PreferencesWindow):
@@ -72,10 +73,35 @@ class PreferencesWindow(Adw.PreferencesWindow):
         audio_page = Adw.PreferencesPage(title="Audio", icon_name="audio-speakers-symbolic")
         audio_page.add(audio)
 
+        sources_page = Adw.PreferencesPage(title="Sources", icon_name="cloud-download-symbolic")
+        self._tidal_status_row = Adw.ActionRow(title="TIDAL")
+        self._tidal_sign_in_btn = Gtk.Button(label="Sign in")
+        self._tidal_sign_in_btn.connect("clicked", self._on_tidal_sign_in_clicked)
+        self._tidal_sign_out_btn = Gtk.Button(label="Sign out")
+        self._tidal_sign_out_btn.connect("clicked", self._on_tidal_sign_out_clicked)
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        btn_box.append(self._tidal_sign_in_btn)
+        btn_box.append(self._tidal_sign_out_btn)
+        btn_box.set_valign(Gtk.Align.CENTER)
+        self._tidal_status_row.add_suffix(btn_box)
+        tidal_group = Adw.PreferencesGroup(
+            title="Streaming",
+            description=(
+                "Requires your own TIDAL subscription. Sign in via the device link "
+                "(link.tidal.com) for full-length playback."
+            ),
+        )
+        tidal_group.add(self._tidal_status_row)
+        sources_page.add(tidal_group)
+
         self.add(library_page)
+        self.add(sources_page)
         self.add(audio_page)
 
+        self._tidal_oauth_poll_id = 0
         self._reload_folders()
+        self._reload_tidal_status()
+        service.subscribe(lambda event: GLib.idle_add(self._on_service_event, event))
 
     def _reload_folders(self) -> None:
         for row in self._dynamic_rows:
@@ -96,7 +122,10 @@ class PreferencesWindow(Adw.PreferencesWindow):
             self._dynamic_rows.append(empty)
         else:
             for folder in folders:
-                row = Adw.ActionRow(title=folder, subtitle="Local music library")
+                row = Adw.ActionRow(
+                    title=escape_markup(folder),
+                    subtitle="Local music library",
+                )
                 remove_button = Gtk.Button(icon_name="user-trash-symbolic")
                 remove_button.set_valign(Gtk.Align.CENTER)
                 remove_button.connect("clicked", lambda _btn, path=folder: self._remove_folder(path))
@@ -229,3 +258,96 @@ class PreferencesWindow(Adw.PreferencesWindow):
     def _update_scan_error(self, exc: Exception) -> None:
         self._scan_button.set_sensitive(True)
         self._scan_row.set_subtitle(f"Scan failed: {exc}")
+
+    def _on_service_event(self, event: str) -> bool:
+        if event == "sources_changed":
+            self._reload_tidal_status()
+        return False
+
+    def _reload_tidal_status(self) -> None:
+        service = self._service
+        if not service.tidal_available():
+            self._tidal_status_row.set_subtitle(
+                "tidalapi is not installed (pip install tidalapi)"
+            )
+            self._tidal_sign_in_btn.set_sensitive(False)
+            self._tidal_sign_out_btn.set_sensitive(False)
+            return
+
+        if service.tidal_is_logged_in():
+            label = service.tidal_account_label()
+            self._tidal_status_row.set_subtitle(
+                f"Connected as {label}" if label else "Connected"
+            )
+            self._tidal_sign_in_btn.set_sensitive(False)
+            self._tidal_sign_out_btn.set_sensitive(True)
+        else:
+            self._tidal_status_row.set_subtitle("Not connected")
+            self._tidal_sign_in_btn.set_sensitive(True)
+            self._tidal_sign_out_btn.set_sensitive(False)
+
+    def _on_tidal_sign_in_clicked(self, *_args: object) -> None:
+        try:
+            url, expires_in, user_code = self._service.tidal_begin_login()
+        except Exception as exc:
+            self._tidal_status_row.set_subtitle(f"Sign-in failed: {exc}")
+            return
+
+        self._tidal_status_row.set_subtitle("Waiting for browser sign-in…")
+        if self._tidal_oauth_poll_id == 0:
+            self._tidal_oauth_poll_id = GLib.timeout_add(500, self._poll_tidal_oauth)
+
+        dialog = Adw.AlertDialog(
+            heading="Sign in to TIDAL",
+            body=(
+                "Open the link below, log in, and approve access. "
+                f"Code: {user_code} (expires in about {int(expires_in)} seconds).\n\n"
+                f"{url}\n\n"
+                "Use this device-link flow for full-length tracks. "
+                "The paste-URL browser login only provides ~30s previews."
+            ),
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("open", "Open in browser")
+        dialog.set_response_appearance("open", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("open")
+        dialog.set_close_response("cancel")
+
+        def on_response(_dlg: Adw.AlertDialog, response: str) -> None:
+            if response == "cancel":
+                if self._tidal_oauth_poll_id != 0:
+                    GLib.source_remove(self._tidal_oauth_poll_id)
+                    self._tidal_oauth_poll_id = 0
+                self._service.tidal_cancel_login()
+                self._reload_tidal_status()
+                return
+            if response == "open":
+                ok, err = open_external_uri(url)
+                if not ok:
+                    err_dialog = Adw.AlertDialog(
+                        heading="Could not open browser",
+                        body=f"{err or 'Unknown error'}\n\nOpen this link manually:\n{url}",
+                    )
+                    err_dialog.add_response("close", "Close")
+                    err_dialog.present(self)
+
+        dialog.connect("response", on_response)
+        dialog.present(self)
+
+    def _poll_tidal_oauth(self) -> bool:
+        status = self._service.tidal_poll_login()
+        if status == "pending":
+            return True
+        self._tidal_oauth_poll_id = 0
+        if status == "success":
+            self._reload_tidal_status()
+            self._service.notify_sources_changed()
+        elif status == "failed":
+            err = self._service.tidal_oauth_error()
+            self._tidal_status_row.set_subtitle(err or "Sign-in failed or timed out")
+            self._reload_tidal_status()
+        return False
+
+    def _on_tidal_sign_out_clicked(self, *_args: object) -> None:
+        self._service.tidal_logout()
+        self._reload_tidal_status()

@@ -24,6 +24,7 @@ dependencies = [
     "platformdirs>=4.0",
     "mutagen>=1.47",
     "python-mpv>=1.0.8",
+    "tidalapi>=0.8.0",
 ]
 
 [project.optional-dependencies]

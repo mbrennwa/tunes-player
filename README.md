@@ -54,7 +54,7 @@ PyGObject is provided by the system on GNOME; a normal venv cannot see it unless
 System dependencies (Debian/Ubuntu):
 
 ```bash
-sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1
+sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 mpv
 ```
 
 Clone and install into a venv that can use system `gi`:

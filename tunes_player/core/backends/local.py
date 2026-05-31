@@ -2,19 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 
+from tunes_player.core.backends.playable import PlayableSource
 from tunes_player.core.library.store import LibraryStore
-from tunes_player.core.models import Track
-
-
-@dataclass(frozen=True, slots=True)
-class PlayableSource:
-    uri: str
-    path: str
-    metadata: Track
-    start_sec: float = 0
 
 
 def resolve_local_track(store: LibraryStore, track_id: str) -> PlayableSource | None:
@@ -30,6 +21,5 @@ def resolve_local_track(store: LibraryStore, track_id: str) -> PlayableSource | 
     resolved = path.resolve()
     return PlayableSource(
         uri=resolved.as_uri(),
-        path=str(resolved),
         metadata=track,
     )
