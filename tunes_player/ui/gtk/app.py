@@ -26,6 +26,8 @@ from tunes_player.ui.gtk.views import (
 
 _EXPANDED_SIZE = (960, 640)
 _MINIMIZED_SIZE = (360, 88)
+_NAV_ROOT_TAGS = frozenset({"albums-root", "artists-root"})
+_NAV_ROOT_TITLES = {"albums-root": "Albums", "artists-root": "Artists"}
 
 
 class TunesWindow(Adw.ApplicationWindow):
@@ -70,6 +72,12 @@ class TunesWindow(Adw.ApplicationWindow):
         self._search_entry.set_width_chars(36)
         self._search_entry.connect("search-changed", self._on_search_changed)
         self._search_entry.connect("stop-search", self._on_stop_search)
+
+        self._back_btn = Gtk.Button(icon_name="go-previous-symbolic")
+        self._back_btn.set_tooltip_text("Back")
+        self._back_btn.set_visible(False)
+        self._back_btn.connect("clicked", self._on_nav_back)
+        self._header.pack_start(self._back_btn)
 
         self._search_button = Gtk.ToggleButton(icon_name="system-search-symbolic")
         self._search_button.set_tooltip_text("Search")
@@ -122,6 +130,8 @@ class TunesWindow(Adw.ApplicationWindow):
         self._content_stack.set_vexpand(True)
         self._albums_nav = Adw.NavigationView()
         self._artists_nav = Adw.NavigationView()
+        for nav in (self._albums_nav, self._artists_nav):
+            nav.connect("notify::visible-page", self._on_nav_visible_page_changed)
         self._search_host = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
         self._content_stack.add_named(self._albums_nav, "albums")
         self._content_stack.add_named(self._artists_nav, "artists")
@@ -214,6 +224,7 @@ class TunesWindow(Adw.ApplicationWindow):
 
         self._pop_to_root(nav)
         nav.push(page)
+        self._sync_header_with_nav()
 
     def _open_artist(self, artist_id: str) -> None:
         albums = self._service.get_artist_albums(artist_id)
@@ -228,6 +239,7 @@ class TunesWindow(Adw.ApplicationWindow):
         if self._artists_nav.get_visible_page() is not None and self._artists_nav.get_visible_page().get_tag() != "artists-root":
             self._artists_nav.pop()
         self._artists_nav.push(page)
+        self._sync_header_with_nav()
 
     def _on_sidebar_activated(self, section_id: str) -> None:
         if section_id == "queue":
@@ -235,9 +247,12 @@ class TunesWindow(Adw.ApplicationWindow):
             return
         if self._search_active:
             self._search_button.set_active(False)
+        if section_id == "albums":
+            self._pop_to_root(self._albums_nav)
+        elif section_id == "artists":
+            self._pop_to_root(self._artists_nav)
         self._content_stack.set_visible_child_name(section_id)
-        titles = {"albums": "Albums", "artists": "Artists"}
-        self._title_label.set_label(titles.get(section_id, "Tunes"))
+        self._sync_header_with_nav()
 
     def _on_search_toggled(self, button: Gtk.ToggleButton) -> None:
         active = button.get_active()
@@ -252,7 +267,7 @@ class TunesWindow(Adw.ApplicationWindow):
             self._search_entry.set_text("")
             if self._content_stack.get_visible_child_name() == "search":
                 self._content_stack.set_visible_child_name("albums")
-                self._title_label.set_label("Albums")
+            self._sync_header_with_nav()
 
     def _on_search_changed(self, entry: Gtk.SearchEntry) -> None:
         if self._search_active:
@@ -313,9 +328,67 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _pop_to_root(self, nav: Adw.NavigationView) -> None:
         page = nav.get_visible_page()
-        while page is not None and page.get_tag() not in {"albums-root", "artists-root"}:
+        while page is not None and page.get_tag() not in _NAV_ROOT_TAGS:
             nav.pop()
             page = nav.get_visible_page()
+
+    def _active_nav_view(self) -> Adw.NavigationView | None:
+        if self._search_active:
+            return None
+        section = self._content_stack.get_visible_child_name()
+        if section == "albums":
+            return self._albums_nav
+        if section == "artists":
+            return self._artists_nav
+        return None
+
+    def _nav_at_root(self, nav: Adw.NavigationView) -> bool:
+        page = nav.get_visible_page()
+        if page is None:
+            return True
+        return page.get_tag() in _NAV_ROOT_TAGS
+
+    def _title_for_nav_page(self, page: Adw.NavigationPage) -> str | None:
+        tag = page.get_tag()
+        if not tag or tag in _NAV_ROOT_TAGS:
+            return None
+        album = self._service.get_album(tag)
+        if album is not None:
+            return album.title
+        for artist in self._service.list_artists():
+            if artist.id == tag:
+                return artist.name
+        return None
+
+    def _sync_header_with_nav(self) -> None:
+        if self._search_active:
+            self._back_btn.set_visible(False)
+            return
+        nav = self._active_nav_view()
+        if nav is None:
+            self._back_btn.set_visible(False)
+            return
+        at_root = self._nav_at_root(nav)
+        self._back_btn.set_visible(not at_root)
+        page = nav.get_visible_page()
+        if page is None:
+            self._title_label.set_label("Tunes")
+            return
+        if at_root:
+            self._title_label.set_label(_NAV_ROOT_TITLES.get(page.get_tag(), "Tunes"))
+            return
+        title = self._title_for_nav_page(page)
+        if title:
+            self._title_label.set_label(title)
+
+    def _on_nav_back(self, *_args: object) -> None:
+        nav = self._active_nav_view()
+        if nav is None or self._nav_at_root(nav):
+            return
+        nav.pop()
+
+    def _on_nav_visible_page_changed(self, *_args: object) -> None:
+        self._sync_header_with_nav()
 
     def _toggle_minimized(self, *_args: object) -> None:
         self._set_minimized(not self._minimized)
