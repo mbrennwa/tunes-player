@@ -115,6 +115,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
 
         self._tidal_oauth_poll_id = 0
         self._tidal_sign_in_dialog: Adw.AlertDialog | None = None
+        self._tidal_sign_in_dialog_presented = False
         self._reload_folders()
         self._reload_tidal_status()
         service.subscribe(lambda event: GLib.idle_add(self._on_service_event, event))
@@ -343,8 +344,14 @@ class PreferencesWindow(Adw.PreferencesWindow):
         dialog.set_close_response("cancel")
         self._tidal_sign_in_dialog = dialog
 
+        def on_dialog_closed(_dlg: Adw.AlertDialog) -> None:
+            self._tidal_sign_in_dialog_presented = False
+            if self._tidal_sign_in_dialog is _dlg:
+                self._tidal_sign_in_dialog = None
+
         def on_response(_dlg: Adw.AlertDialog, response: str) -> None:
             if response == "cancel":
+                self._tidal_sign_in_dialog_presented = False
                 self._tidal_sign_in_dialog = None
                 if self._tidal_oauth_poll_id != 0:
                     GLib.source_remove(self._tidal_oauth_poll_id)
@@ -365,14 +372,20 @@ class PreferencesWindow(Adw.PreferencesWindow):
                     err_dialog.add_response("close", "Close")
                     err_dialog.present(self)
 
+        dialog.connect("closed", on_dialog_closed)
         dialog.connect("response", on_response)
         dialog.present(self)
+        self._tidal_sign_in_dialog_presented = True
 
     def _dismiss_tidal_sign_in_dialog(self) -> None:
+        if not self._tidal_sign_in_dialog_presented:
+            self._tidal_sign_in_dialog = None
+            return
         dialog = self._tidal_sign_in_dialog
+        self._tidal_sign_in_dialog = None
+        self._tidal_sign_in_dialog_presented = False
         if dialog is not None:
             dialog.close()
-            self._tidal_sign_in_dialog = None
 
     def _poll_tidal_oauth(self) -> bool:
         status = self._service.tidal_poll_login()
