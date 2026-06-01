@@ -20,14 +20,8 @@ def show_error_toast(overlay: Adw.ToastOverlay, message: str) -> None:
     overlay.add_toast(toast)
 
 
-def attach_error_toasts(window: Adw.ApplicationWindow, service: PlayerService) -> Adw.ToastOverlay:
-    """Wrap window content in a toast overlay and show errors from PlayerService."""
-    overlay = Adw.ToastOverlay()
-    content = window.get_content()
-    if content is not None:
-        window.set_content(None)
-        overlay.set_child(content)
-    window.set_content(overlay)
+def attach_error_toasts(overlay: Adw.ToastOverlay, service: PlayerService) -> None:
+    """Show playback errors from PlayerService on an existing toast overlay."""
 
     def on_event(event: str) -> bool:
         if event == "playback_error":
@@ -35,7 +29,6 @@ def attach_error_toasts(window: Adw.ApplicationWindow, service: PlayerService) -
         return False
 
     service.subscribe(lambda event: GLib.idle_add(on_event, event))
-    return overlay
 
 
 def _show_playback_error(overlay: Adw.ToastOverlay, service: PlayerService) -> bool:

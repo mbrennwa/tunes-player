@@ -17,6 +17,7 @@ from tunes_player.ui.gtk.art import ArtLoader
 from tunes_player.ui.gtk.util import format_duration, join_detail, source_label
 
 _TIME_LABEL_CHARS = 7  # wide enough for "0:00:00"
+_ART_PIXEL_SIZE = 48
 
 
 def _keyval(name: str) -> int:
@@ -34,41 +35,32 @@ _KEY_VOLUME_DOWN = _keyval("XF86AudioLowerVolume")
 
 
 class NowPlayingBar(Gtk.Box):
-    """Bottom transport bar shared by expanded and minimized layouts."""
+    """Bottom transport bar."""
 
     def __init__(
         self,
         *,
         service: PlayerService,
-        compact: bool = False,
-        on_restore: Callable[[], None] | None = None,
         art_loader: ArtLoader | None = None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
+        self.set_hexpand(True)
         self._service = service
-        self._compact = compact
         self._art_loader = art_loader
         self._art_track_id: str | None = None
         self.add_css_class("toolbar")
         self.add_css_class("now-playing-bar")
 
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        row.set_hexpand(True)
         row.set_margin_start(12)
         row.set_margin_end(12)
         row.set_margin_top(8)
         row.set_margin_bottom(8)
         self.append(row)
 
-        self._restore_btn: Gtk.Button | None = None
-        if on_restore is not None:
-            self._restore_btn = Gtk.Button(icon_name="view-restore-symbolic")
-            self._restore_btn.set_tooltip_text("Restore player")
-            self._restore_btn.set_visible(compact)
-            self._restore_btn.connect("clicked", lambda *_: on_restore())
-            row.append(self._restore_btn)
-
         self._art = Gtk.Image.new_from_icon_name("audio-x-generic-symbolic")
-        self._art.set_pixel_size(48 if not compact else 32)
+        self._art.set_pixel_size(_ART_PIXEL_SIZE)
         self._art.add_css_class("card")
         row.append(self._art)
 
@@ -85,12 +77,10 @@ class NowPlayingBar(Gtk.Box):
         self._subtitle.add_css_class("dim-label")
         meta.append(self._subtitle)
 
-        self._quality: Gtk.Label | None = None
-        if not compact:
-            self._quality = Gtk.Label(label="", xalign=0, ellipsize=3)
-            self._quality.add_css_class("caption")
-            self._quality.add_css_class("dim-label")
-            meta.append(self._quality)
+        self._quality = Gtk.Label(label="", xalign=0, ellipsize=3)
+        self._quality.add_css_class("caption")
+        self._quality.add_css_class("dim-label")
+        meta.append(self._quality)
 
         controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         controls.set_valign(Gtk.Align.CENTER)
@@ -118,82 +108,76 @@ class NowPlayingBar(Gtk.Box):
         next_btn.connect("clicked", lambda *_: service.skip_next())
         controls.append(next_btn)
 
-        self._volume: Gtk.Scale | None = None
-        self._progress: Gtk.Scale | None = None
+        volume_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        volume_box.set_valign(Gtk.Align.CENTER)
+        controls.append(volume_box)
+
+        mute_btn = Gtk.Button()
+        mute_btn.set_icon_name("audio-volume-high-symbolic")
+        mute_btn.set_tooltip_text("Volume")
+        volume_box.append(mute_btn)
+
+        self._volume = Gtk.Scale.new_with_range(
+            Gtk.Orientation.HORIZONTAL,
+            0.0,
+            1.0,
+            0.01,
+        )
+        self._volume.set_hexpand(True)
+        self._volume.set_size_request(72, -1)
+        self._volume.set_draw_value(False)
+        self._volume.connect("value-changed", self._on_volume_changed)
+        self._attach_drag_gesture(
+            self._volume,
+            self._begin_volume_drag,
+            self._end_volume_drag,
+        )
+        volume_box.append(self._volume)
+
+        queue_btn = Gtk.Button()
+        queue_btn.set_icon_name("view-list-symbolic")
+        queue_btn.set_tooltip_text("Queue")
+        queue_btn.connect("clicked", self._on_queue_clicked)
+        controls.append(queue_btn)
+
         self._updating_progress = False
-        if not compact:
-            volume_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            volume_box.set_valign(Gtk.Align.CENTER)
-            controls.append(volume_box)
+        self._progress_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self._progress_row.set_margin_start(12)
+        self._progress_row.set_margin_end(12)
+        self._progress_row.set_margin_bottom(8)
+        self.append(self._progress_row)
 
-            mute_btn = Gtk.Button()
-            mute_btn.set_icon_name("audio-volume-high-symbolic")
-            mute_btn.set_tooltip_text("Volume")
-            volume_box.append(mute_btn)
+        self._elapsed = Gtk.Label(label="0:00", xalign=0)
+        self._elapsed.set_width_chars(_TIME_LABEL_CHARS)
+        self._elapsed.add_css_class("caption")
+        self._elapsed.add_css_class("dim-label")
+        self._elapsed.add_css_class("numeric")
+        self._progress_row.append(self._elapsed)
 
-            self._volume = Gtk.Scale.new_with_range(
-                Gtk.Orientation.HORIZONTAL,
-                0.0,
-                1.0,
-                0.01,
-            )
-            self._volume.set_size_request(120, -1)
-            self._volume.set_draw_value(False)
-            self._volume.connect("value-changed", self._on_volume_changed)
-            self._attach_drag_gesture(
-                self._volume,
-                self._begin_volume_drag,
-                self._end_volume_drag,
-            )
-            volume_box.append(self._volume)
+        self._progress = Gtk.Scale.new_with_range(
+            Gtk.Orientation.HORIZONTAL,
+            0.0,
+            1.0,
+            0.001,
+        )
+        self._progress.set_hexpand(True)
+        self._progress.set_draw_value(False)
+        self._progress.set_sensitive(False)
+        self._progress.connect("change-value", self._on_progress_change_value)
+        self._progress.connect("value-changed", self._on_progress_value_changed)
+        self._attach_drag_gesture(
+            self._progress,
+            self._begin_seek_drag,
+            self._end_seek_drag,
+        )
+        self._progress_row.append(self._progress)
 
-            queue_btn = Gtk.Button()
-            queue_btn.set_icon_name("view-list-symbolic")
-            queue_btn.set_tooltip_text("Queue")
-            queue_btn.connect("clicked", self._on_queue_clicked)
-            controls.append(queue_btn)
-
-        self._progress_row: Gtk.Box | None = None
-        self._elapsed: Gtk.Label | None = None
-        self._remaining: Gtk.Label | None = None
-        if not compact:
-            self._progress_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            self._progress_row.set_margin_start(12)
-            self._progress_row.set_margin_end(12)
-            self._progress_row.set_margin_bottom(8)
-            self.append(self._progress_row)
-
-            self._elapsed = Gtk.Label(label="0:00", xalign=0)
-            self._elapsed.set_width_chars(_TIME_LABEL_CHARS)
-            self._elapsed.add_css_class("caption")
-            self._elapsed.add_css_class("dim-label")
-            self._elapsed.add_css_class("numeric")
-            self._progress_row.append(self._elapsed)
-
-            self._progress = Gtk.Scale.new_with_range(
-                Gtk.Orientation.HORIZONTAL,
-                0.0,
-                1.0,
-                0.001,
-            )
-            self._progress.set_hexpand(True)
-            self._progress.set_draw_value(False)
-            self._progress.set_sensitive(False)
-            self._progress.connect("change-value", self._on_progress_change_value)
-            self._progress.connect("value-changed", self._on_progress_value_changed)
-            self._attach_drag_gesture(
-                self._progress,
-                self._begin_seek_drag,
-                self._end_seek_drag,
-            )
-            self._progress_row.append(self._progress)
-
-            self._remaining = Gtk.Label(label="0:00", xalign=1)
-            self._remaining.set_width_chars(_TIME_LABEL_CHARS)
-            self._remaining.add_css_class("caption")
-            self._remaining.add_css_class("dim-label")
-            self._remaining.add_css_class("numeric")
-            self._progress_row.append(self._remaining)
+        self._remaining = Gtk.Label(label="0:00", xalign=1)
+        self._remaining.set_width_chars(_TIME_LABEL_CHARS)
+        self._remaining.add_css_class("caption")
+        self._remaining.add_css_class("dim-label")
+        self._remaining.add_css_class("numeric")
+        self._progress_row.append(self._remaining)
 
         self._queue_handler: Callable[[], None] | None = None
         self._volume_dragging = False
@@ -208,17 +192,10 @@ class NowPlayingBar(Gtk.Box):
         self._shown_sec = 0.0
         service.subscribe(self._on_service_event)
         self._sync_from_service()
-        if self._progress is not None:
-            GLib.timeout_add(33, self._tick_progress)
+        GLib.timeout_add(33, self._tick_progress)
 
     def set_queue_handler(self, handler: Callable[[], None]) -> None:
         self._queue_handler = handler
-
-    def set_compact(self, compact: bool) -> None:
-        self._compact = compact
-        self._art.set_pixel_size(32 if compact else 48)
-        if self._restore_btn is not None:
-            self._restore_btn.set_visible(compact)
 
     def _attach_drag_gesture(
         self,
@@ -303,8 +280,6 @@ class NowPlayingBar(Gtk.Box):
         self._update_seek_labels(position_sec, duration)
 
     def _set_progress_fraction(self, fraction: float, *, allow_decrease: bool = False) -> None:
-        if self._progress is None:
-            return
         fraction = max(0.0, min(fraction, 1.0))
         if not allow_decrease:
             fraction = max(self._progress.get_value(), fraction)
@@ -327,10 +302,8 @@ class NowPlayingBar(Gtk.Box):
         return False
 
     def _update_seek_labels(self, position_sec: float, duration_sec: float) -> None:
-        if self._elapsed is not None:
-            self._elapsed.set_label(format_duration(position_sec))
-        if self._remaining is not None:
-            self._remaining.set_label(format_duration(max(0.0, duration_sec - position_sec)))
+        self._elapsed.set_label(format_duration(position_sec))
+        self._remaining.set_label(format_duration(max(0.0, duration_sec - position_sec)))
 
     def _on_queue_clicked(self, *_args: object) -> None:
         if self._queue_handler is not None:
@@ -357,8 +330,7 @@ class NowPlayingBar(Gtk.Box):
         if track is None:
             self._title.set_label("Not playing")
             self._subtitle.set_label("Select an album or track")
-            if self._quality is not None:
-                self._quality.set_label("")
+            self._quality.set_label("")
             self._play_btn.set_icon_name("media-playback-start-symbolic")
             self._play_btn.set_tooltip_text("Play")
             self._sync_art(None)
@@ -375,15 +347,14 @@ class NowPlayingBar(Gtk.Box):
                     duration,
                 )
             )
-            if self._quality is not None:
-                badges = [state.quality_hint]
-                if state.bit_perfect:
-                    badges.append("bit-perfect")
-                if state.device_volume:
-                    badges.append("device volume")
-                elif not state.bit_perfect:
-                    badges.append("software volume")
-                self._quality.set_label(" · ".join(badges))
+            badges = [state.quality_hint]
+            if state.bit_perfect:
+                badges.append("bit-perfect")
+            if state.device_volume:
+                badges.append("device volume")
+            elif not state.bit_perfect:
+                badges.append("software volume")
+            self._quality.set_label(" · ".join(badges))
             icon = (
                 "media-playback-pause-symbolic"
                 if state.is_playing
@@ -393,7 +364,7 @@ class NowPlayingBar(Gtk.Box):
             self._play_btn.set_tooltip_text("Pause" if state.is_playing else "Play")
             self._sync_art(track)
 
-        if self._volume is not None and not self._volume_dragging:
+        if not self._volume_dragging:
             if event in (None, "volume_changed", "playback_changed"):
                 self._volume.handler_block_by_func(self._on_volume_changed)
                 self._volume.set_value(state.volume)
@@ -404,20 +375,19 @@ class NowPlayingBar(Gtk.Box):
     def _sync_art(self, track: object | None) -> None:
         if self._art_loader is None:
             return
-        pixel_size = 32 if self._compact else 48
         if track is None:
             self._art_track_id = None
-            self._art_loader.set_image(self._art, None, pixel_size=pixel_size)
+            self._art_loader.set_image(self._art, None, pixel_size=_ART_PIXEL_SIZE)
             return
         track_id = track.id if hasattr(track, "id") else None
         art_uri = track.art_uri if hasattr(track, "art_uri") else None
         if track_id == self._art_track_id:
             return
         self._art_track_id = track_id
-        self._art_loader.set_image(self._art, art_uri, pixel_size=pixel_size)
+        self._art_loader.set_image(self._art, art_uri, pixel_size=_ART_PIXEL_SIZE)
 
     def _tick_progress(self) -> bool:
-        if self._seeking or self._progress is None:
+        if self._seeking:
             return True
         state = self._service.get_playback_state()
         track = state.current_track

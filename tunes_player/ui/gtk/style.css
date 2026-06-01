@@ -1,3 +1,9 @@
+/* Let panes shrink with the window instead of clipping on the right */
+.view,
+.now-playing-bar {
+  min-width: 0;
+}
+
 /* Album grid tiles: square, cover fills tile, text overlaid at bottom */
 .album-card-frame {
   min-width: 0;

@@ -26,8 +26,11 @@ from tunes_player.ui.gtk.views import (
     SearchResultsView,
 )
 
-_EXPANDED_SIZE = (960, 640)
-_MINIMIZED_SIZE = (360, 88)
+# Fixed 3-column album grid width plus AlbumGridView margins (18px each side).
+_ALBUM_GRID_MIN_CONTENT_WIDTH = 564 + 2 * 18
+
+_DEFAULT_SIZE = (960, 640)
+_SIDEBAR_WIDTH_PADDING_SP = 16.0
 _NAV_ROOT_TAGS = frozenset({"albums-root", "artists-root", "search-root"})
 _NAV_ROOT_TITLES = {
     "albums-root": "Albums",
@@ -41,43 +44,42 @@ class TunesWindow(Adw.ApplicationWindow):
         super().__init__(application=application, title="Tunes")
         self._service = service
         self._art_loader = ArtLoader(service.config.data_dir)
-        self._minimized = False
         self._search_active = False
         self._preferences: PreferencesWindow | None = None
         self._queue_sheet: QueueSheet | None = None
-        self.set_default_size(*_EXPANDED_SIZE)
+        self.set_default_size(*_DEFAULT_SIZE)
 
-        self._now_playing = NowPlayingBar(
-            service=service,
-            on_restore=lambda: self._set_minimized(False),
-            art_loader=self._art_loader,
-        )
+        self._now_playing = NowPlayingBar(service=service, art_loader=self._art_loader)
         self._now_playing.set_queue_handler(self._open_queue_sheet)
 
         self._toolbar = Adw.ToolbarView()
+        self._toolbar.set_size_request(-1, -1)
         self._toolbar.add_bottom_bar(self._now_playing)
         self.set_content(self._toolbar)
 
+        self._toast_overlay = Adw.ToastOverlay()
+        self._toast_overlay.set_size_request(-1, -1)
         self._build_expanded_shell()
         attach_media_keys(self, service)
-        self._toast_overlay = attach_error_toasts(self, service)
+        attach_error_toasts(self._toast_overlay, service)
         service.subscribe(lambda event: GLib.idle_add(self._on_service_event, event))
         GLib.idle_add(self._startup_playback_probe)
 
     def _build_expanded_shell(self) -> None:
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self._toolbar.set_content(outer)
-
         self._header = Adw.HeaderBar()
-        outer.append(self._header)
+        self._toolbar.add_top_bar(self._header)
 
-        self._title_label = Gtk.Label(label="Albums")
-        self._title_label.add_css_class("title")
-        self._header.set_title_widget(self._title_label)
+        self._window_title = Adw.WindowTitle(title="Albums", subtitle="")
+        self._title_center = Gtk.Box()
+        self._title_center.set_halign(Gtk.Align.CENTER)
+        self._title_center.append(self._window_title)
+        self._header.set_title_widget(self._title_center)
 
         self._search_entry = Gtk.SearchEntry()
         self._search_entry.set_placeholder_text("Search library and TIDAL")
-        self._search_entry.set_width_chars(36)
+        self._search_entry.set_width_chars(24)
+        self._search_entry.set_max_width_chars(24)
+        self._search_entry.set_hexpand(False)
         self._search_entry.connect("search-changed", self._on_search_changed)
         self._search_entry.connect("stop-search", self._on_stop_search)
 
@@ -92,30 +94,35 @@ class TunesWindow(Adw.ApplicationWindow):
         self._search_button.connect("toggled", self._on_search_toggled)
         self._header.pack_start(self._search_button)
 
-        settings_btn = Gtk.Button(icon_name="emblem-system-symbolic")
-        settings_btn.set_tooltip_text("Settings")
-        settings_btn.connect("clicked", self._open_preferences)
-        self._header.pack_end(settings_btn)
-
-        self._minimize_btn = Gtk.Button(icon_name="window-minimize-symbolic")
-        self._minimize_btn.set_tooltip_text("Minimize player")
-        self._minimize_btn.connect("clicked", self._toggle_minimized)
-        self._header.pack_end(self._minimize_btn)
-
         self._split = Adw.NavigationSplitView()
+        self._split.set_size_request(-1, -1)
+        self._split.set_hexpand(True)
         self._split.set_vexpand(True)
-        outer.append(self._split)
+        # Default 25% fraction resizes the sidebar with the window; min=max locks width instead.
+        self._split.set_sidebar_width_fraction(0.0)
+        self._toast_overlay.set_child(self._split)
+        self._toolbar.set_content(self._toast_overlay)
 
         condition = Adw.BreakpointCondition.parse("max-width: 720sp")
         breakpoint = Adw.Breakpoint.new(condition)
         breakpoint.add_setter(self._split, "collapsed", True)
         self.add_breakpoint(breakpoint)
 
-        sidebar_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        sidebar_list = Gtk.ListBox()
-        sidebar_list.add_css_class("navigation-sidebar")
-        sidebar_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
-        sidebar_box.append(sidebar_list)
+        self._sidebar_shell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._sidebar_shell.set_vexpand(True)
+        self._sidebar_shell.set_hexpand(False)
+        self._sidebar_shell.set_halign(Gtk.Align.START)
+
+        self._sidebar_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._sidebar_box.set_vexpand(True)
+        self._sidebar_box.set_hexpand(False)
+        self._sidebar_shell.append(self._sidebar_box)
+
+        self._sidebar_nav_list = Gtk.ListBox()
+        self._sidebar_nav_list.add_css_class("navigation-sidebar")
+        self._sidebar_nav_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self._sidebar_nav_list.set_vexpand(True)
+        self._sidebar_box.append(self._sidebar_nav_list)
 
         self._sidebar_rows: dict[str, Gtk.ListBoxRow] = {}
         for section_id, label, icon in (
@@ -127,14 +134,27 @@ class TunesWindow(Adw.ApplicationWindow):
             row.set_activatable(True)
             image = Gtk.Image.new_from_icon_name(icon)
             row.add_prefix(image)
-            sidebar_list.append(row)
+            self._sidebar_nav_list.append(row)
             self._sidebar_rows[section_id] = row
             row.connect("activated", lambda _row, sid=section_id: self._on_sidebar_activated(sid))
 
-        sidebar_page = Adw.NavigationPage(title="Library", child=sidebar_box, tag="sidebar")
+        self._sidebar_settings_list = Gtk.ListBox()
+        self._sidebar_settings_list.add_css_class("navigation-sidebar")
+        self._sidebar_settings_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        settings_row = Adw.ActionRow(title="Settings...")
+        settings_row.set_activatable(True)
+        settings_row.add_prefix(Gtk.Image.new_from_icon_name("emblem-system-symbolic"))
+        self._sidebar_settings_list.append(settings_row)
+        settings_row.connect("activated", self._open_preferences)
+        self._sidebar_box.append(self._sidebar_settings_list)
+
+        self._apply_fixed_sidebar_width()
+        sidebar_page = Adw.NavigationPage(title="Library", child=self._sidebar_shell, tag="sidebar")
         self._split.set_sidebar(sidebar_page)
+        self._sidebar_shell.connect("map", lambda *_args: GLib.idle_add(self._apply_fixed_sidebar_width))
 
         self._content_stack = Gtk.Stack()
+        self._content_stack.set_size_request(-1, -1)
         self._content_stack.set_vexpand(True)
         self._albums_nav = Adw.NavigationView()
         self._artists_nav = Adw.NavigationView()
@@ -151,11 +171,47 @@ class TunesWindow(Adw.ApplicationWindow):
         content_page = Adw.NavigationPage(title="", child=self._content_stack, tag="content")
         self._split.set_content(content_page)
 
+        self._sidebar_width_sp = 0.0
+        self._split.connect("notify::collapsed", self._on_split_collapsed_changed)
         self._show_albums_root()
         self._show_artists_root()
-        sidebar_list.select_row(self._sidebar_rows["albums"])
+        self._sidebar_nav_list.select_row(self._sidebar_rows["albums"])
 
-        self._expanded_shell = outer
+    def _compute_sidebar_width_sp(self) -> float:
+        max_nat = 0
+        for list_box in (self._sidebar_nav_list, self._sidebar_settings_list):
+            row = list_box.get_first_child()
+            while row is not None:
+                _min_w, nat_w, _min_baseline, _nat_baseline = row.measure(
+                    Gtk.Orientation.HORIZONTAL,
+                    -1,
+                )
+                max_nat = max(max_nat, nat_w)
+                row = row.get_next_sibling()
+        return float(max_nat) + _SIDEBAR_WIDTH_PADDING_SP
+
+    def _apply_fixed_sidebar_width(self) -> bool:
+        width_sp = self._compute_sidebar_width_sp()
+        self._sidebar_width_sp = width_sp
+        self._split.set_min_sidebar_width(width_sp)
+        self._split.set_max_sidebar_width(width_sp)
+        self._apply_window_min_width()
+        return False
+
+    def _on_split_collapsed_changed(self, *_args: object) -> None:
+        self._apply_window_min_width()
+
+    def _apply_window_min_width(self) -> None:
+        content_min = _ALBUM_GRID_MIN_CONTENT_WIDTH
+        if self._split.get_collapsed():
+            min_width = content_min
+        else:
+            sidebar = self._sidebar_width_sp or self._split.get_max_sidebar_width()
+            min_width = int(sidebar) + content_min
+        _min_w, min_h = self.get_size_request()
+        if min_h < 0:
+            min_h = 400
+        self.set_size_request(min_width, min_h)
 
     def _replace_root_page(
         self,
@@ -269,12 +325,14 @@ class TunesWindow(Adw.ApplicationWindow):
         active = button.get_active()
         self._search_active = active
         if active:
-            self._header.set_title_widget(self._search_entry)
+            self._title_center.remove(self._window_title)
+            self._title_center.append(self._search_entry)
             self._content_stack.set_visible_child_name("search")
             self._search_entry.grab_focus()
             self._refresh_search()
         else:
-            self._header.set_title_widget(self._title_label)
+            self._title_center.remove(self._search_entry)
+            self._title_center.append(self._window_title)
             self._pop_to_root(self._search_nav)
             self._search_entry.set_text("")
             if self._content_stack.get_visible_child_name() == "search":
@@ -396,14 +454,14 @@ class TunesWindow(Adw.ApplicationWindow):
         self._back_btn.set_visible(not at_root)
         page = nav.get_visible_page()
         if page is None:
-            self._title_label.set_label("Tunes")
+            self._window_title.set_title("Tunes")
             return
         if at_root:
-            self._title_label.set_label(_NAV_ROOT_TITLES.get(page.get_tag(), "Tunes"))
+            self._window_title.set_title(_NAV_ROOT_TITLES.get(page.get_tag(), "Tunes"))
             return
         title = self._title_for_nav_page(page)
         if title:
-            self._title_label.set_label(title)
+            self._window_title.set_title(title)
 
     def _on_nav_back(self, *_args: object) -> None:
         nav = self._active_nav_view()
@@ -413,25 +471,6 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _on_nav_visible_page_changed(self, *_args: object) -> None:
         self._sync_header_with_nav()
-
-    def _toggle_minimized(self, *_args: object) -> None:
-        self._set_minimized(not self._minimized)
-
-    def _set_minimized(self, minimized: bool) -> None:
-        self._minimized = minimized
-        if minimized:
-            self._expanded_shell.set_visible(False)
-            self._now_playing.set_compact(True)
-            self._now_playing.set_size_request(_MINIMIZED_SIZE[0], -1)
-            self.set_size_request(_MINIMIZED_SIZE[0], _MINIMIZED_SIZE[1])
-            self.set_default_size(*_MINIMIZED_SIZE)
-        else:
-            self._expanded_shell.set_visible(True)
-            self._now_playing.set_compact(False)
-            self._now_playing.set_size_request(-1, -1)
-            self.set_size_request(-1, -1)
-            self.set_default_size(*_EXPANDED_SIZE)
-            self.present()
 
 
 def run() -> int:
