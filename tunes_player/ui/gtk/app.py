@@ -17,7 +17,7 @@ from tunes_player.ui.gtk.art import ArtLoader
 from tunes_player.ui.gtk.errors import attach_error_toasts, show_error_toast
 from tunes_player.ui.gtk.now_playing import NowPlayingBar, attach_media_keys
 from tunes_player.ui.gtk.preferences import PreferencesWindow
-from tunes_player.ui.gtk.util import escape_markup
+from tunes_player.ui.gtk.util import escape_markup, load_app_css
 from tunes_player.ui.gtk.views import (
     AlbumDetailView,
     AlbumGridView,
@@ -435,6 +435,7 @@ class TunesWindow(Adw.ApplicationWindow):
 
 
 def run() -> int:
+    load_app_css()
     config = ConfigManager()
     config.load()
     configure_logging(config.data_dir)

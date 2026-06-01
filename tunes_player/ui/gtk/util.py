@@ -5,14 +5,32 @@ from __future__ import annotations
 import shutil
 import subprocess
 import webbrowser
+from importlib import resources
 
 import gi
 
+gi.require_version("Gdk", "4.0")
 gi.require_version("Gio", "2.0")
+gi.require_version("Gtk", "4.0")
 
-from gi.repository import Gio, GLib  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.models import Source, Track
+
+
+def load_app_css() -> None:
+    """Load application Gtk CSS (album grid tiles, etc.)."""
+    css_path = resources.files("tunes_player.ui.gtk").joinpath("style.css")
+    provider = Gtk.CssProvider()
+    provider.load_from_path(str(css_path))
+    display = Gdk.Display.get_default()
+    if display is None:
+        return
+    Gtk.StyleContext.add_provider_for_display(
+        display,
+        provider,
+        Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+    )
 
 
 def escape_markup(text: str | None) -> str:

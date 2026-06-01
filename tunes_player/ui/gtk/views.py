@@ -33,6 +33,7 @@ class AlbumGridView(Gtk.ScrolledWindow):
         art_loader: ArtLoader | None = None,
     ) -> None:
         super().__init__(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        self.set_propagate_natural_width(False)
         self.add_css_class("view")
 
         if not albums and empty_message:
@@ -46,24 +47,25 @@ class AlbumGridView(Gtk.ScrolledWindow):
             self.set_child(label)
             return
 
-        flow = Gtk.FlowBox()
-        flow.set_valign(Gtk.Align.START)
-        flow.set_selection_mode(Gtk.SelectionMode.NONE)
-        flow.set_max_children_per_line(4)
-        flow.set_min_children_per_line(2)
-        flow.set_column_spacing(18)
-        flow.set_row_spacing(18)
-        flow.set_margin_top(18)
-        flow.set_margin_bottom(18)
-        flow.set_margin_start(18)
-        flow.set_margin_end(18)
-        self.set_child(flow)
+        shell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        shell.set_hexpand(True)
+        shell.set_halign(Gtk.Align.FILL)
 
-        self._populate_albums(flow, albums, on_album_activated, art_loader=art_loader)
+        grid = AlbumTileGrid()
+        grid.set_margin_top(18)
+        grid.set_margin_bottom(18)
+        grid.set_margin_start(18)
+        grid.set_margin_end(18)
+        shell.append(grid)
+        self.set_child(shell)
+        grid.bind_viewport(self)
+
+        self._populate_albums(grid, albums, on_album_activated, art_loader=art_loader)
+        GLib.idle_add(grid.relayout)
 
     @staticmethod
     def _populate_albums(
-        flow: Gtk.FlowBox,
+        grid: AlbumTileGrid,
         albums: list[Album],
         on_album_activated: Callable[[str], None],
         *,
@@ -73,20 +75,24 @@ class AlbumGridView(Gtk.ScrolledWindow):
     ) -> None:
         end = min(start + batch_size, len(albums))
         for album in albums[start:end]:
-            card = _album_card(album, art_loader=art_loader)
-            card.connect("clicked", lambda _btn, album_id=album.id: on_album_activated(album_id))
-            flow.append(card)
+            grid.append_album(
+                album,
+                on_activate=lambda album_id=album.id: on_album_activated(album_id),
+                art_loader=art_loader,
+            )
 
         if end < len(albums):
             GLib.idle_add(
                 AlbumGridView._populate_albums,
-                flow,
+                grid,
                 albums,
                 on_album_activated,
                 art_loader,
                 start=end,
                 batch_size=batch_size,
             )
+        else:
+            GLib.idle_add(grid.relayout)
 
 
 class ArtistListView(Gtk.ScrolledWindow):
@@ -144,7 +150,12 @@ class ArtistListView(Gtk.ScrolledWindow):
             )
 
 
-_ALBUM_DETAIL_ART_SIZE = 96
+_ALBUM_TILE_ART_PIXELS = 512
+_ALBUM_TILE_ART_PIXELS_SMALL = 384
+_ALBUM_DETAIL_ART_SIZE = 220
+_ALBUM_GRID_SPACING = 12
+_ALBUM_TILE_MIN_EDGE = 140
+_ALBUM_TILE_MAX_EDGE = 200
 
 
 class AlbumDetailView(Gtk.Box):
@@ -158,56 +169,56 @@ class AlbumDetailView(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
         self.add_css_class("view")
 
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
-        header.set_margin_top(12)
-        header.set_margin_bottom(8)
+        header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        header.set_margin_top(16)
+        header.set_margin_bottom(12)
         header.set_margin_start(18)
         header.set_margin_end(18)
         self.append(header)
 
         art_box = Gtk.Box()
-        art_box.set_size_request(_ALBUM_DETAIL_ART_SIZE, _ALBUM_DETAIL_ART_SIZE)
         art_box.add_css_class("card")
         art_box.set_halign(Gtk.Align.CENTER)
-        art_box.set_valign(Gtk.Align.CENTER)
-        art = Gtk.Image.new_from_icon_name("audio-x-generic-symbolic")
-        art.set_pixel_size(_ALBUM_DETAIL_ART_SIZE)
-        art.set_halign(Gtk.Align.CENTER)
-        art.set_valign(Gtk.Align.CENTER)
-        art_box.append(art)
-        if art_loader is not None:
-            art_loader.set_image(art, album.art_uri, pixel_size=_ALBUM_DETAIL_ART_SIZE)
+        art_box.append(
+            _square_art(
+                album,
+                size=_ALBUM_DETAIL_ART_SIZE,
+                art_loader=art_loader,
+                css_class="album-detail-art",
+            )
+        )
         header.append(art_box)
 
-        meta = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        meta.set_valign(Gtk.Align.CENTER)
-        meta.set_hexpand(True)
-        header.append(meta)
-
-        title = Gtk.Label(label=album.title, xalign=0, ellipsize=3)
-        title.add_css_class("title-2")
+        title = Gtk.Label(label=album.title, xalign=0.5, ellipsize=3)
+        title.add_css_class("title-1")
         title.set_wrap(False)
-        meta.append(title)
+        title.set_halign(Gtk.Align.CENTER)
+        header.append(title)
 
-        artist = Gtk.Label(label=album.artist_name, xalign=0)
+        artist = Gtk.Label(label=album.artist_name, xalign=0.5, ellipsize=3)
         artist.add_css_class("title-4")
         artist.add_css_class("dim-label")
-        meta.append(artist)
+        artist.set_wrap(False)
+        artist.set_halign(Gtk.Align.CENTER)
+        header.append(artist)
 
         year = str(album.year) if album.year else None
         track_count = f"{album.track_count} tracks" if album.track_count else None
         info = Gtk.Label(
             label=join_detail(source_label(album.source), year, track_count),
-            xalign=0,
+            xalign=0.5,
+            ellipsize=3,
         )
         info.add_css_class("dim-label")
-        meta.append(info)
+        info.set_wrap(False)
+        info.set_halign(Gtk.Align.CENTER)
+        header.append(info)
 
         play_btn = Gtk.Button()
         play_btn.set_icon_name("media-playback-start-symbolic")
         play_btn.add_css_class("suggested-action")
         play_btn.add_css_class("circular")
-        play_btn.set_valign(Gtk.Align.CENTER)
+        play_btn.set_halign(Gtk.Align.CENTER)
         play_btn.set_tooltip_text("Play album")
         play_btn.connect("clicked", lambda *_: service.play_album(album.id))
         header.append(play_btn)
@@ -238,9 +249,12 @@ class SearchResultsView(Gtk.ScrolledWindow):
         art_loader: ArtLoader | None = None,
     ) -> None:
         super().__init__(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        self.set_propagate_natural_width(False)
         self.add_css_class("view")
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, vexpand=True)
+        box.set_hexpand(True)
+        box.set_halign(Gtk.Align.FILL)
         box.set_margin_top(12)
         box.set_margin_bottom(12)
         box.set_margin_start(12)
@@ -256,19 +270,17 @@ class SearchResultsView(Gtk.ScrolledWindow):
 
         if results.albums:
             box.append(_section_label("Albums"))
-            album_flow = Gtk.FlowBox()
-            album_flow.set_selection_mode(Gtk.SelectionMode.NONE)
-            album_flow.set_max_children_per_line(3)
-            album_flow.set_column_spacing(12)
-            album_flow.set_row_spacing(12)
-            box.append(album_flow)
+            album_grid = AlbumTileGrid()
+            box.append(album_grid)
+            album_grid.bind_viewport(self)
             for album in results.albums:
-                card = _album_card(album, small=True, art_loader=art_loader)
-                card.connect(
-                    "clicked",
-                    lambda _btn, album_id=album.id: on_album_activated(album_id),
+                album_grid.append_album(
+                    album,
+                    on_activate=lambda album_id=album.id: on_album_activated(album_id),
+                    art_loader=art_loader,
+                    small=True,
                 )
-                album_flow.append(card)
+            GLib.idle_add(album_grid.relayout)
 
         if results.tracks:
             box.append(_section_label("Tracks"))
@@ -403,45 +415,343 @@ def _section_label(text: str) -> Gtk.Label:
     return label
 
 
+def _widget_allocated_width(widget: Gtk.Widget) -> int:
+    width = widget.get_width()
+    if width >= 64:
+        return width
+    allocation = widget.get_allocation()
+    return allocation.width if allocation.width >= 64 else 0
+
+
+def _find_ancestor(widget: Gtk.Widget, type_: type[Gtk.Widget]) -> Gtk.Widget | None:
+    node: Gtk.Widget | None = widget
+    while node is not None:
+        if isinstance(node, type_):
+            return node
+        node = node.get_parent()
+    return None
+
+
+def _horizontal_margins_until(widget: Gtk.Widget, stop: Gtk.Widget | None) -> int:
+    extra = 0
+    node: Gtk.Widget | None = widget
+    while node is not None and node is not stop:
+        extra += node.get_margin_start() + node.get_margin_end()
+        node = node.get_parent()
+    return extra
+
+
+def _viewport_inner_width(widget: Gtk.Widget) -> int:
+    viewport = getattr(widget, "_viewport", None)
+    if viewport is None:
+        return 0
+    width = _widget_allocated_width(viewport)
+    if width < 64:
+        return 0
+    return max(0, width - _horizontal_margins_until(widget, viewport))
+
+
+def _window_inner_width(widget: Gtk.Widget) -> int:
+    """Content width from the window; shrinks before the scroll child min-width does."""
+    root = widget.get_root()
+    if not isinstance(root, Gtk.Window):
+        return 0
+
+    width = _widget_allocated_width(root)
+    if width < 64:
+        return 0
+
+    split = _find_ancestor(widget, Adw.NavigationSplitView)
+    if split is not None and not split.get_collapsed():
+        sidebar = split.get_sidebar()
+        if sidebar is not None:
+            sidebar_w = _widget_allocated_width(sidebar)
+            if 0 < sidebar_w < width:
+                width -= sidebar_w
+
+    viewport = getattr(widget, "_viewport", None)
+    if viewport is not None:
+        return max(0, width - _horizontal_margins_until(widget, viewport))
+    return width
+
+
+def _content_area_inner_width(widget: Gtk.Widget) -> int:
+    """Use the smaller of viewport and window width (viewport lags on shrink)."""
+    candidates = [_viewport_inner_width(widget), _window_inner_width(widget)]
+    usable = [value for value in candidates if value >= 64]
+    if not usable:
+        return 0
+    return min(usable)
+
+
+def _album_grid_layout(inner_width: int) -> tuple[int, int]:
+    """Return (columns, tile_edge) that fill inner_width with fixed gaps."""
+    spacing = _ALBUM_GRID_SPACING
+    min_edge = _ALBUM_TILE_MIN_EDGE
+    max_edge = _ALBUM_TILE_MAX_EDGE
+
+    if inner_width < min_edge:
+        return 1, min_edge
+
+    slot_max = max_edge + spacing
+    # Fewest columns so tile edge does not exceed max_edge.
+    columns = max(1, (inner_width + spacing + max_edge - 1) // slot_max)
+    edge = (inner_width - spacing * (columns - 1)) // columns
+
+    if edge < min_edge:
+        columns = max(1, (inner_width + spacing) // (min_edge + spacing))
+        edge = (inner_width - spacing * (columns - 1)) // columns
+
+    edge = max(min_edge, min(edge, max_edge))
+    return columns, edge
+
+
+def _reset_album_tile_size(root: Gtk.Widget) -> None:
+    root.set_size_request(-1, -1)
+    if isinstance(root, Gtk.AspectFrame):
+        tile = root.get_child()
+        if tile is not None:
+            tile.set_size_request(-1, -1)
+
+
+def _apply_album_tile_size(root: Gtk.Widget, edge: int) -> None:
+    if edge < 1:
+        return
+    root.set_size_request(edge, edge)
+    if isinstance(root, Gtk.AspectFrame):
+        tile = root.get_child()
+        if tile is not None:
+            tile.set_size_request(edge, edge)
+    root.queue_resize()
+
+
+class AlbumTileGrid(Gtk.Box):
+    """Square album tiles in rows; column count follows available pane width."""
+
+    def __init__(self) -> None:
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=_ALBUM_GRID_SPACING)
+        self.add_css_class("album-grid")
+        self.set_hexpand(False)
+        self.set_vexpand(False)
+        self.set_halign(Gtk.Align.START)
+        self.set_valign(Gtk.Align.START)
+        self._cards: list[Gtk.Widget] = []
+        self._columns = 1
+        self._tile_edge = _ALBUM_TILE_MAX_EDGE
+        self._layout_key: tuple[int, int, int, int] | None = None
+        self._relayout_idle_id = 0
+        self._tick_callback_id = 0
+        self._viewport: Gtk.ScrolledWindow | None = None
+        self.connect("map", self._start_resize_watch)
+        self.connect("unmap", self._stop_resize_watch)
+
+    def bind_viewport(self, viewport: Gtk.ScrolledWindow) -> None:
+        self._viewport = viewport
+
+        def on_resize(*_args: object) -> None:
+            self._schedule_relayout()
+
+        viewport.connect_after("notify::width", on_resize)
+        ancestor: Gtk.Widget | None = viewport.get_parent()
+        while ancestor is not None:
+            ancestor.connect_after("notify::width", on_resize)
+            if isinstance(ancestor, Adw.NavigationSplitView):
+                ancestor.connect_after("notify::collapsed", on_resize)
+            ancestor = ancestor.get_parent()
+
+        root = viewport.get_root()
+        if isinstance(root, Gtk.Window):
+            root.connect_after("notify::width", on_resize)
+            root.connect_after("notify::default-width", on_resize)
+
+    def _start_resize_watch(self, *_args: object) -> None:
+        self._schedule_relayout()
+        if self._tick_callback_id:
+            return
+        self._tick_callback_id = self.add_tick_callback(self._on_frame_tick)
+
+    def _stop_resize_watch(self, *_args: object) -> None:
+        if self._tick_callback_id:
+            self.remove_tick_callback(self._tick_callback_id)
+            self._tick_callback_id = 0
+
+    def _on_frame_tick(self, _widget: Gtk.Widget, _frame_clock: object) -> bool:
+        inner = _content_area_inner_width(self)
+        if inner < 1:
+            return True
+        columns, edge = _album_grid_layout(inner)
+        key = (inner, columns, edge, len(self._cards))
+        if key != self._layout_key:
+            self.relayout()
+        return True
+
+    def _schedule_relayout(self) -> None:
+        if self._relayout_idle_id:
+            return
+        self._relayout_idle_id = GLib.idle_add(self._relayout_idle, priority=GLib.PRIORITY_LOW)
+
+    def _relayout_idle(self) -> bool:
+        self._relayout_idle_id = 0
+        self.relayout()
+        return False
+
+    def _clear_rows(self) -> None:
+        child = self.get_first_child()
+        while child is not None:
+            next_child = child.get_next_sibling()
+            self.remove(child)
+            child = next_child
+
+    def append_album(
+        self,
+        album: Album,
+        *,
+        on_activate: Callable[[], None],
+        art_loader: ArtLoader | None,
+        small: bool = False,
+    ) -> None:
+        card = _album_card(
+            album,
+            edge=self._tile_edge,
+            small=small,
+            art_loader=art_loader,
+        )
+        _attach_album_card_activate(card, on_activate)
+        self._cards.append(card)
+        self._schedule_relayout()
+
+    def _release_wide_minimums(self) -> None:
+        self.set_size_request(-1, -1)
+        self._clear_rows()
+        for card in self._cards:
+            _reset_album_tile_size(card)
+
+    def relayout(self) -> bool:
+        inner = _content_area_inner_width(self)
+        if inner < 1:
+            return False
+
+        columns, edge = _album_grid_layout(inner)
+        layout_key = (inner, columns, edge, len(self._cards))
+        if layout_key == self._layout_key:
+            return False
+
+        self._layout_key = layout_key
+        self._columns = columns
+        self._tile_edge = edge
+        self._release_wide_minimums()
+
+        for start in range(0, len(self._cards), columns):
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=_ALBUM_GRID_SPACING)
+            row.set_halign(Gtk.Align.START)
+            row.set_hexpand(False)
+            row.set_vexpand(False)
+            for card in self._cards[start : start + columns]:
+                _apply_album_tile_size(card, edge)
+                row.append(card)
+            self.append(row)
+
+        self.queue_resize()
+        if self._viewport is not None:
+            self._viewport.queue_resize()
+        return False
+
+
+def _attach_album_card_activate(tile: Gtk.Widget, callback: Callable[[], None]) -> None:
+    gesture = Gtk.GestureClick()
+    gesture.connect("released", lambda *_args: callback())
+    tile.add_controller(gesture)
+    tile.set_focusable(True)
+    tile.set_cursor_from_name("pointer")
+
+
+def _square_art(
+    album: Album,
+    *,
+    size: int,
+    art_loader: ArtLoader | None,
+    css_class: str = "album-card-art",
+) -> Gtk.Widget:
+    """Fixed square cover for album detail header."""
+    frame = Gtk.Box()
+    frame.add_css_class(css_class)
+    frame.set_size_request(size, size)
+    frame.set_halign(Gtk.Align.FILL)
+    frame.set_valign(Gtk.Align.START)
+
+    art = Gtk.Image.new_from_icon_name("audio-x-generic-symbolic")
+    art.set_halign(Gtk.Align.FILL)
+    art.set_valign(Gtk.Align.FILL)
+    art.set_hexpand(True)
+    art.set_vexpand(True)
+    art.set_size_request(size, size)
+    if art_loader is not None:
+        art_loader.set_image(art, album.art_uri, pixel_size=size)
+    else:
+        art.set_pixel_size(size)
+    frame.append(art)
+    return frame
+
+
+def _overlay_label(text: str, *, extra_classes: tuple[str, ...] = ()) -> Gtk.Label:
+    label = Gtk.Label(label=text, xalign=0.0, ellipsize=3)
+    label.set_halign(Gtk.Align.START)
+    label.set_wrap(False)
+    for css_class in extra_classes:
+        label.add_css_class(css_class)
+    return label
+
+
 def _album_card(
     album: Album,
     *,
+    edge: int,
     small: bool = False,
     art_loader: ArtLoader | None = None,
-) -> Gtk.Button:
-    button = Gtk.Button()
-    button.add_css_class("card")
-    button.add_css_class("album-card")
+) -> Gtk.AspectFrame:
+    """Square tile: cover fills the cell; title/artist/source overlaid at the bottom."""
+    frame = Gtk.AspectFrame()
+    frame.set_ratio(1.0)
+    frame.set_obey_child(True)
+    frame.add_css_class("album-card-frame")
+    frame.set_hexpand(False)
+    frame.set_vexpand(False)
+    frame.set_halign(Gtk.Align.START)
+    frame.set_valign(Gtk.Align.START)
+    _apply_album_tile_size(frame, edge)
 
-    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-    box.set_margin_top(12)
-    box.set_margin_bottom(12)
-    box.set_margin_start(12)
-    box.set_margin_end(12)
-    button.set_child(box)
+    tile = Gtk.Box()
+    tile.add_css_class("card")
+    tile.add_css_class("album-card")
+    frame.set_child(tile)
 
-    art = Gtk.Image.new_from_icon_name("audio-x-generic-symbolic")
-    pixel_size = 96 if not small else 72
-    art.set_pixel_size(pixel_size)
+    overlay = Gtk.Overlay()
+    overlay.set_hexpand(True)
+    overlay.set_vexpand(True)
+    tile.append(overlay)
+
+    picture = Gtk.Picture()
+    picture.add_css_class("album-card-art")
+    picture.set_content_fit(Gtk.ContentFit.COVER)
+    picture.set_can_shrink(True)
+    picture.set_hexpand(True)
+    picture.set_vexpand(True)
+    overlay.set_child(picture)
+
+    load_pixels = _ALBUM_TILE_ART_PIXELS_SMALL if small else _ALBUM_TILE_ART_PIXELS
     if art_loader is not None:
-        art_loader.set_image(art, album.art_uri, pixel_size=pixel_size)
-    box.append(art)
+        art_loader.set_picture(picture, album.art_uri, pixel_size=load_pixels)
 
-    title = Gtk.Label(label=album.title, wrap=True, justify=Gtk.Justification.CENTER, max_width_chars=18)
-    title.add_css_class("heading")
-    box.append(title)
+    labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+    labels.add_css_class("album-card-overlay")
+    labels.set_valign(Gtk.Align.END)
+    labels.set_halign(Gtk.Align.FILL)
+    labels.set_hexpand(True)
+    labels.set_vexpand(True)
+    overlay.add_overlay(labels)
 
-    artist = Gtk.Label(label=album.artist_name, wrap=True, justify=Gtk.Justification.CENTER)
-    artist.add_css_class("dim-label")
-    artist.add_css_class("caption")
-    box.append(artist)
+    labels.append(_overlay_label(album.title, extra_classes=("album-card-title",)))
+    labels.append(_overlay_label(album.artist_name, extra_classes=("album-card-meta",)))
+    labels.append(_overlay_label(source_label(album.source), extra_classes=("album-card-meta",)))
 
-    source = Gtk.Label(
-        label=source_label(album.source),
-        justify=Gtk.Justification.CENTER,
-    )
-    source.add_css_class("dim-label")
-    source.add_css_class("caption")
-    box.append(source)
-
-    return button
+    return frame

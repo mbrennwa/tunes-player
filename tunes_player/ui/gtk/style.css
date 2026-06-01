@@ -1,0 +1,38 @@
+/* Album grid tiles: square, cover fills tile, text overlaid at bottom */
+.album-card-frame {
+  min-width: 0;
+  min-height: 0;
+}
+
+.album-card {
+  padding: 0;
+  min-width: 0;
+  min-height: 0;
+  border-radius: 8px;
+}
+
+.album-card-art {
+  min-width: 0;
+  min-height: 0;
+}
+
+.album-card-overlay {
+  background-image: linear-gradient(
+    to top,
+    rgba(0, 0, 0, 0.9) 0%,
+    rgba(0, 0, 0, 0.55) 50%,
+    transparent 100%
+  );
+  padding: 0.65rem 0.35rem 0.3rem;
+}
+
+.album-card-overlay .album-card-title {
+  color: white;
+  font-weight: 700;
+  font-size: 0.9em;
+}
+
+.album-card-overlay .album-card-meta {
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 0.75em;
+}
