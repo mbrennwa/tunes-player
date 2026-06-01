@@ -212,10 +212,12 @@ accounts do **not** belong under **Library → Music folders** (local scan paths
 - One **PreferencesGroup** per service (Tidal, Deezer, Qobuz).
 - **Tidal / Deezer:** OAuth or documented sign-in; rows for login / logout, account
   label (“connected as …”), connection status, enable/disable — not filesystem paths.
-- **Qobuz (advanced):** user-supplied **App ID** and **App Secret** plus account auth;
-  explicit copy that Tunes does **not** include or distribute Qobuz credentials. Help
-  text may explain how users obtain keys; the app must **not** auto-scrape secrets from
-  Qobuz’s web player.
+- **Qobuz:** account sign-in (username + password, same API surface as other third-party
+  clients) plus **App ID** and **App Secret** in Settings until/unless Qobuz grants
+  Tunes its own client credentials — see [Qobuz credentials](#qobuz-credentials). v1
+  treats app credentials as user-supplied (“advanced”); help text explains how to obtain
+  them. Tunes must **not** ship or redistribute Qobuz app credentials in source or
+  binaries and must **not** auto-scrape secrets from Qobuz’s web player.
 - Auth and tokens live in **core/backends/** (and config on disk via `platformdirs`);
   Settings UI only calls **PlayerService** (or a small settings facade), never
   streaming APIs directly from GTK.
@@ -485,10 +487,11 @@ for lossless streaming — plan per provider:
 |----------|-------------------------------------|---------------|
 | **Tidal** | Official developer platform; OAuth | **First** streaming backend — prove abstraction, auth, playback |
 | **Deezer** | Documented developer API | **Second** — validate streaming/playback; add if API stays clean |
-| **Qobuz** | No simple public third-party path for hobby apps | **Later, optional** — user-supplied App ID + App Secret; “advanced” in Settings |
+| **Qobuz** | No simple public third-party path for hobby apps | **Later, optional** — config-driven client; v1 user-supplied app credentials ([Qobuz credentials](#qobuz-credentials)) |
 
-Optional: a short email to Qobuz asking whether they support third-party open-source
-clients (could enable an official path later; does not block BYO-credentials work).
+Optional: contact Qobuz about third-party open-source clients. Official app credentials
+for Tunes would switch the default from user-supplied keys to bundled defaults without
+changing the backend API shape.
 
 ### Backend layout (planned)
 
@@ -497,17 +500,44 @@ tunes_player/core/backends/
   local/
   tidal/       # oauth, api, playback
   deezer/      # auth, api, playback
-  qobuz/       # user credentials, api, playback
+  qobuz/       # api client, config-driven app credentials, session, playback
 ```
 
 ### Auth and credentials
 
 - **Tidal:** OAuth via developer registration; tokens in config (see `platformdirs`).
 - **Deezer:** documented API auth (details when implementing).
-- **Qobuz:** **user-supplied** App ID and App Secret stored in config — same pattern as
-  media apps that require your own API keys (YouTube, TMDb, etc.). Tunes must **not**
-  redistribute Qobuz credentials in source or binaries and must **not** ship code that
-  automatically extracts current secrets from Qobuz’s web application.
+- **Qobuz:** see [Qobuz credentials](#qobuz-credentials).
+
+#### Qobuz credentials
+
+Qobuz’s JSON API expects an **app id**, a signing **secret** (for signed endpoints such as
+stream URLs), and a per-user **auth token** after login. Community clients (e.g. the
+Lyrion/LMS plugin) bundle app credentials in the plugin package; Tunes uses the same API
+but does **not** copy or ship those values.
+
+**Single code path:** `core/backends/qobuz/` reads `app_id` and `app_secret` from
+configuration at runtime (optional second app id if needed for web-style token flows).
+There is no parallel “hard-coded vs user” implementation — only the **source** of those
+strings changes.
+
+| Phase | App id / secret | Account login |
+|-------|-----------------|---------------|
+| **v1 (planned)** | User enters in **Settings → Sources → Qobuz**; persisted in `platformdirs` config (e.g. `~/.config/tunes-player/config.json`). Same pattern as apps that use your own API keys (YouTube, TMDb). | Required: username + password → `user_auth_token` stored under the data dir (session file, analogous to TIDAL). |
+| **If Qobuz grants Tunes official credentials** | Ship defaults in the app (like LMS today); remove or hide the App ID / Secret fields from Settings. Config may still allow overrides for debugging. | Unchanged — subscribers still sign in with their Qobuz account. |
+
+**Policy (v1):**
+
+- Do **not** commit app credentials to the repository, example configs, or releases.
+- Do **not** implement runtime extraction from Qobuz’s web player or other official apps.
+- **Development:** maintainers may paste credentials into a **local** config only (e.g. keys
+  obtained from one’s own web-player inspection or another client install) to exercise the
+  backend against the live API.
+
+**Implementation notes:** password is MD5-hashed (UTF-8) for `user/login`; signed requests
+follow [Qobuz signed-request auth](https://github.com/Qobuz/api-documentation#signed-requests-authentification-).
+Credentials can rotate when Qobuz changes client fingerprints — users (or a future bundled
+update) replace app id/secret; session tokens are separate.
 
 ### Libraries and license
 
@@ -561,7 +591,7 @@ instead of mpv). **AGPL** is unnecessary for a desktop app.
 6. **UPnP / DLNA Media Renderer** output — SSDP discovery, push `PlayableSource` URI, transport/volume sync; Settings lists renderers alongside local sinks. Not started until step 3 lands.
 7. **Streaming — Tidal** (provider abstraction + OAuth; Settings → Sources).
 8. **Streaming — Deezer** (second backend if developer API and playback are viable).
-9. **Streaming — Qobuz** (optional; user-supplied App ID/Secret; advanced setup; no bundled or auto-scraped credentials).
+9. **Streaming — Qobuz** (optional; config-driven app credentials — v1 user-supplied in Settings, account login; no bundled or auto-scraped credentials in releases).
 10. Federated catalog search (phase A).
 11. Heuristic dedup / prefer-local.
 12. Optional Qt UI for macOS.
