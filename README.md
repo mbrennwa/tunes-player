@@ -44,7 +44,7 @@ Runtime (typical Debian/Ubuntu packages):
 
 - Python 3.11+
 - PyGObject and typelibs: `python3-gi`, `python3-gi-cairo`, `gir1.2-gtk-4.0`, `gir1.2-adw-1`
-- [mpv](https://mpv.io/) with libmpv (playback engine, planned)
+- [mpv](https://mpv.io/) with libmpv (required for playback; missing libmpv shows an in-app message)
 
 PyGObject is provided by the system on GNOME; a normal venv cannot see it unless you use
 `--system-site-packages` (recommended below) or install PyGObject into the venv yourself.
@@ -54,8 +54,11 @@ PyGObject is provided by the system on GNOME; a normal venv cannot see it unless
 System dependencies (Debian/Ubuntu):
 
 ```bash
-sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 mpv
+sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 mpv libmpv2
 ```
+
+If playback fails, check the log at `~/.local/share/tunes-player/tunes-player.log` or
+Settings → Library → Diagnostics. Set `TUNES_LOG_LEVEL=DEBUG` for verbose logging.
 
 Clone and install into a venv that can use system `gi`:
 

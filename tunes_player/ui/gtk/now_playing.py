@@ -7,6 +7,7 @@ from collections.abc import Callable
 import gi
 
 gi.require_version("Adw", "1")
+gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
@@ -16,6 +17,20 @@ from tunes_player.ui.gtk.art import ArtLoader
 from tunes_player.ui.gtk.util import format_duration, join_detail, source_label
 
 _TIME_LABEL_CHARS = 7  # wide enough for "0:00:00"
+
+
+def _keyval(name: str) -> int:
+    """Resolve a media key keyval (GDK 4 has no Gdk.KEY_XF86* constants)."""
+    return Gdk.keyval_from_name(name)
+
+
+# Resolved once at import; keyval_from_name works on GDK 4 where KEY_XF86* attrs do not.
+_KEY_PLAY_PAUSE = (_keyval("XF86AudioPlay"), _keyval("XF86AudioPause"))
+_KEY_NEXT = _keyval("XF86AudioNext")
+_KEY_PREV = _keyval("XF86AudioPrev")
+_KEY_STOP = _keyval("XF86AudioStop")
+_KEY_VOLUME_UP = _keyval("XF86AudioRaiseVolume")
+_KEY_VOLUME_DOWN = _keyval("XF86AudioLowerVolume")
 
 
 class NowPlayingBar(Gtk.Box):
@@ -452,22 +467,22 @@ def attach_media_keys(window: Gtk.Widget, service: PlayerService) -> None:
 
 
 def _handle_media_key(keyval: int, service: PlayerService) -> bool:
-    if keyval in (Gdk.KEY_XF86AudioPlay, Gdk.KEY_XF86AudioPause):
+    if keyval in _KEY_PLAY_PAUSE:
         service.toggle_play_pause()
         return True
-    if keyval == Gdk.KEY_XF86AudioNext:
+    if keyval == _KEY_NEXT:
         service.skip_next()
         return True
-    if keyval == Gdk.KEY_XF86AudioPrev:
+    if keyval == _KEY_PREV:
         service.skip_previous()
         return True
-    if keyval == Gdk.KEY_XF86AudioStop:
+    if keyval == _KEY_STOP:
         service.pause()
         return True
-    if keyval == Gdk.KEY_XF86AudioRaiseVolume:
+    if keyval == _KEY_VOLUME_UP:
         service.adjust_volume(0.05)
         return True
-    if keyval == Gdk.KEY_XF86AudioLowerVolume:
+    if keyval == _KEY_VOLUME_DOWN:
         service.adjust_volume(-0.05)
         return True
     return False

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import multiprocessing
 import time
 from dataclasses import dataclass
@@ -19,6 +20,8 @@ from tunes_player.core.volume import VolumeController, VolumeEndpoint
 
 EventCallback = Callable[[str], None]
 Unsubscribe = Callable[[], None]
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +100,16 @@ class PlayerService:
     @property
     def tidal(self) -> TidalClient:
         return self._tidal
+
+    def last_error(self) -> str | None:
+        """Last user-facing playback error, if any."""
+        return self._engine_error
+
+    def playback_available(self) -> str | None:
+        """Return an error message when the playback engine cannot load, else None."""
+        from tunes_player.engines.mpv import probe_playback_engine
+
+        return probe_playback_engine()
 
     def list_albums(self) -> list[Album]:
         return self._store.list_albums()
@@ -282,24 +295,28 @@ class PlayerService:
 
     def _play_tidal_track(self, track_id: str) -> None:
         if not self._tidal.is_logged_in():
-            self._engine_error = "Sign in to TIDAL in Settings → Sources."
-            self._emit("playback_error")
+            self._report_error("Sign in to TIDAL in Settings → Sources.")
             return
         try:
             self._queue, self._queue_index = self._tidal.queue_for_track(track_id)
         except TidalUnavailableError as exc:
-            self._engine_error = str(exc)
-            self._emit("playback_error")
+            self._report_error(str(exc), exc=exc)
             return
         if not self._queue:
-            self._engine_error = "TIDAL track not found."
-            self._emit("playback_error")
+            self._report_error("TIDAL track not found.")
             return
         self._start_queue_track(self._queue[self._queue_index])
 
     def play_album(self, album_id: str, *, start_index: int = 0) -> None:
         tracks = self.get_album_tracks(album_id)
         if not tracks:
+            if album_id.startswith("tidal:"):
+                if not self._tidal.is_logged_in():
+                    self._report_error("Sign in to TIDAL in Settings → Sources.")
+                else:
+                    self._report_error("Could not load tracks for this album.")
+            else:
+                self._report_error("No tracks in this album.")
             return
         start_index = max(0, min(start_index, len(tracks) - 1))
         self._queue = tracks
@@ -315,6 +332,7 @@ class PlayerService:
             return
         engine = self._ensure_engine()
         if engine is None:
+            self._notify_playback_unavailable()
             return
         if self._is_playing:
             engine.pause()
@@ -345,6 +363,7 @@ class PlayerService:
             return
         engine = self._ensure_engine()
         if engine is None:
+            self._notify_playback_unavailable()
             return
         engine.play()
         self._sync_from_engine()
@@ -495,12 +514,23 @@ class PlayerService:
         self._reset_engine()
         if track is None:
             return True
-        source = resolve_track(self._store, track.id, tidal=self._tidal)
+        try:
+            source = resolve_track(self._store, track.id, tidal=self._tidal)
+        except Exception as exc:
+            self._report_error(str(exc), exc=exc)
+            return False
         if source is None:
-            return True
+            if track.id.startswith("tidal:"):
+                self._report_error(
+                    "Could not play TIDAL track. Check your subscription and sign-in."
+                )
+            else:
+                self._report_error("Track file is missing from disk.")
+            return False
         engine = self._ensure_engine()
         if engine is None:
-            return True
+            self._notify_playback_unavailable()
+            return False
         engine.load(source.playback_target, start_sec=pos)
         if not playing:
             engine.pause()
@@ -540,8 +570,7 @@ class PlayerService:
                 on_event=self._on_engine_event,
             )
         except RuntimeError as exc:
-            self._engine_error = str(exc)
-            self._emit("playback_error")
+            self._report_error(str(exc), exc=exc)
             return None
         return self._engine
 
@@ -549,18 +578,19 @@ class PlayerService:
         try:
             source = resolve_track(self._store, track.id, tidal=self._tidal)
         except Exception as exc:
-            self._engine_error = str(exc)
-            self._emit("playback_error")
+            self._report_error(str(exc), exc=exc)
             return
         if source is None:
             if track.id.startswith("tidal:"):
-                self._engine_error = "Could not play TIDAL track. Check your subscription and sign-in."
+                self._report_error(
+                    "Could not play TIDAL track. Check your subscription and sign-in."
+                )
             else:
-                self._engine_error = "Track file is missing from disk."
-            self._emit("playback_error")
+                self._report_error("Track file is missing from disk.")
             return
         engine = self._ensure_engine()
         if engine is None:
+            self._notify_playback_unavailable()
             return
         self._engine_error = None
         self._set_current_track(track)
@@ -641,7 +671,10 @@ class PlayerService:
                 return
             self._sync_duration_from_engine()
             self._sync_playback_position_from_engine()
-            self._emit("playback_error", "playback_changed")
+            if self._engine_error is None:
+                self._report_error("Playback failed.")
+            else:
+                self._emit("playback_error", "playback_changed")
             return
         if event == "position_changed":
             self._sync_playback_position_from_engine()
@@ -654,6 +687,18 @@ class PlayerService:
             self._sync_duration_from_engine()
             self._sync_playback_position_from_engine()
             self._emit("playback_changed")
+
+    def _report_error(self, message: str, *, exc: BaseException | None = None) -> None:
+        self._engine_error = message
+        if exc is not None:
+            log.error("%s", message, exc_info=exc)
+        else:
+            log.warning("%s", message)
+        self._emit("playback_error")
+
+    def _notify_playback_unavailable(self) -> None:
+        if self._engine_error is not None:
+            self._emit("playback_error")
 
     def _emit(self, *events: str) -> None:
         for event in events:

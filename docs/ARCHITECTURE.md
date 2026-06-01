@@ -105,6 +105,17 @@ Future: `ui/qt/` for macOS/Windows; same `PlayerService` API.
 GTK runs on the main loop; mpv callbacks post to a queue → GLib idle (same pattern
 will work for Qt signals later).
 
+**Errors and logging:**
+
+- User-facing playback failures set `PlayerService.last_error()` and emit
+  `playback_error`; the GTK shell shows an `Adw.Toast` (see `ui/gtk/errors.py`).
+- Diagnostics use the stdlib `logging` package (`tunes_player.core.logging_config`),
+  configured at app startup. Log file: `{user_data_dir}/tunes-player.log` (typically
+  `~/.local/share/tunes-player/tunes-player.log`). Override verbosity with
+  `TUNES_LOG_LEVEL=DEBUG`.
+- Optional startup probe (`engines/mpv.probe_playback_engine`) warns when libmpv is
+  missing before the user presses Play.
+
 **Why GTK on Linux:** native Libadwaita on GNOME. Qt was rejected for Linux primary UI
 (native-widget concerns on GNOME). Qt remains the likely choice for a later macOS UI.
 

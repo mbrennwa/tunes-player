@@ -5,9 +5,10 @@ from __future__ import annotations
 import gi
 
 gi.require_version("Adw", "1")
+gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Adw, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.library import ScanResult
 from tunes_player.core.services import PlayerService
@@ -48,6 +49,20 @@ class PreferencesWindow(Adw.PreferencesWindow):
 
         library_page = Adw.PreferencesPage(title="Library", icon_name="folder-music-symbolic")
         library_page.add(self._folders_group)
+
+        log_path = service.config.data_dir / "tunes-player.log"
+        self._log_row = Adw.ActionRow(title="Log file", subtitle=str(log_path))
+        copy_log_btn = Gtk.Button(label="Copy path")
+        copy_log_btn.set_valign(Gtk.Align.CENTER)
+        copy_log_btn.connect("clicked", lambda *_: self._copy_log_path(log_path))
+        self._log_row.add_suffix(copy_log_btn)
+        self._log_row.set_activatable_widget(copy_log_btn)
+        diagnostics_group = Adw.PreferencesGroup(
+            title="Diagnostics",
+            description="Errors and warnings are appended to this file while Tunes runs.",
+        )
+        diagnostics_group.add(self._log_row)
+        library_page.add(diagnostics_group)
 
         audio = Adw.PreferencesGroup(title="Audio")
         self._bit_perfect_row = Adw.SwitchRow(
@@ -258,6 +273,12 @@ class PreferencesWindow(Adw.PreferencesWindow):
     def _update_scan_error(self, exc: Exception) -> None:
         self._scan_button.set_sensitive(True)
         self._scan_row.set_subtitle(f"Scan failed: {exc}")
+
+    def _copy_log_path(self, log_path: object) -> None:
+        display = Gdk.Display.get_default()
+        if display is None:
+            return
+        display.get_clipboard().set(Gdk.ContentProvider.new_for_string(str(log_path)))
 
     def _on_service_event(self, event: str) -> bool:
         if event == "sources_changed":

@@ -34,6 +34,16 @@ def create_mpv_engine(
     )
 
 
+def probe_playback_engine() -> str | None:
+    """Return a user-facing error message if libmpv cannot be loaded, else None."""
+    try:
+        engine = create_mpv_engine(volume=0.5, use_device_output=False)
+    except RuntimeError as exc:
+        return str(exc)
+    engine.quit()
+    return None
+
+
 class MpvEngine:
     """Headless mpv instance for music playback."""
 

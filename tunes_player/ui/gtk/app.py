@@ -10,9 +10,11 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.config import ConfigManager
+from tunes_player.core.logging_config import configure_logging
 from tunes_player.core.services import PlayerService
 from tunes_player.platform.linux.audio import create_volume_controller
 from tunes_player.ui.gtk.art import ArtLoader
+from tunes_player.ui.gtk.errors import attach_error_toasts, show_error_toast
 from tunes_player.ui.gtk.now_playing import NowPlayingBar, attach_media_keys
 from tunes_player.ui.gtk.preferences import PreferencesWindow
 from tunes_player.ui.gtk.util import escape_markup
@@ -54,7 +56,9 @@ class TunesWindow(Adw.ApplicationWindow):
 
         self._build_expanded_shell()
         attach_media_keys(self, service)
+        self._toast_overlay = attach_error_toasts(self, service)
         service.subscribe(lambda event: GLib.idle_add(self._on_service_event, event))
+        GLib.idle_add(self._startup_playback_probe)
 
     def _build_expanded_shell(self) -> None:
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -304,6 +308,12 @@ class TunesWindow(Adw.ApplicationWindow):
             )
         self._preferences.present()
 
+    def _startup_playback_probe(self) -> bool:
+        message = self._service.playback_available()
+        if message:
+            show_error_toast(self._toast_overlay, message)
+        return False
+
     def _on_service_event(self, event: str) -> bool:
         if event == "library_updated":
             GLib.idle_add(self._refresh_library_after_scan)
@@ -413,6 +423,7 @@ class TunesWindow(Adw.ApplicationWindow):
 def run() -> int:
     config = ConfigManager()
     config.load()
+    configure_logging(config.data_dir)
     volume_controller = create_volume_controller(config.config)
     service = PlayerService(config=config, volume_controller=volume_controller)
     mpris_service = None
