@@ -28,8 +28,12 @@ from tunes_player.ui.gtk.views import (
 
 _EXPANDED_SIZE = (960, 640)
 _MINIMIZED_SIZE = (360, 88)
-_NAV_ROOT_TAGS = frozenset({"albums-root", "artists-root"})
-_NAV_ROOT_TITLES = {"albums-root": "Albums", "artists-root": "Artists"}
+_NAV_ROOT_TAGS = frozenset({"albums-root", "artists-root", "search-root"})
+_NAV_ROOT_TITLES = {
+    "albums-root": "Albums",
+    "artists-root": "Artists",
+    "search-root": "Search",
+}
 
 
 class TunesWindow(Adw.ApplicationWindow):
@@ -136,7 +140,10 @@ class TunesWindow(Adw.ApplicationWindow):
         self._artists_nav = Adw.NavigationView()
         for nav in (self._albums_nav, self._artists_nav):
             nav.connect("notify::visible-page", self._on_nav_visible_page_changed)
+        self._search_nav = Adw.NavigationView()
+        self._search_nav.connect("notify::visible-page", self._on_nav_visible_page_changed)
         self._search_host = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
+        self._search_host.append(self._search_nav)
         self._content_stack.add_named(self._albums_nav, "albums")
         self._content_stack.add_named(self._artists_nav, "artists")
         self._content_stack.add_named(self._search_host, "search")
@@ -217,16 +224,16 @@ class TunesWindow(Adw.ApplicationWindow):
 
         visible = self._content_stack.get_visible_child_name()
         if visible == "search":
-            self._search_button.set_active(False)
-            self._content_stack.set_visible_child_name("albums")
-            self._title_label.set_label("Albums")
-            nav = self._albums_nav
+            nav = self._search_nav
+            if not self._nav_at_root(nav):
+                nav.pop()
         elif visible == "artists":
             nav = self._artists_nav
+            self._pop_to_root(nav)
         else:
             nav = self._albums_nav
+            self._pop_to_root(nav)
 
-        self._pop_to_root(nav)
         nav.push(page)
         self._sync_header_with_nav()
 
@@ -268,6 +275,7 @@ class TunesWindow(Adw.ApplicationWindow):
             self._refresh_search()
         else:
             self._header.set_title_widget(self._title_label)
+            self._pop_to_root(self._search_nav)
             self._search_entry.set_text("")
             if self._content_stack.get_visible_child_name() == "search":
                 self._content_stack.set_visible_child_name("albums")
@@ -281,15 +289,19 @@ class TunesWindow(Adw.ApplicationWindow):
         self._search_button.set_active(False)
 
     def _refresh_search(self, query: str | None = None) -> None:
-        child = self._search_host.get_first_child()
-        if child is not None:
-            self._search_host.remove(child)
+        if not self._nav_at_root(self._search_nav):
+            self._pop_to_root(self._search_nav)
         text = query if query is not None else self._search_entry.get_text()
         if not text.strip():
             placeholder = Gtk.Label(label="Type to search your library and TIDAL", vexpand=True)
             placeholder.add_css_class("dim-label")
             placeholder.set_valign(Gtk.Align.CENTER)
-            self._search_host.append(placeholder)
+            self._replace_root_page(
+                self._search_nav,
+                title="Search",
+                tag="search-root",
+                child=placeholder,
+            )
             return
         view = SearchResultsView(
             service=self._service,
@@ -297,7 +309,12 @@ class TunesWindow(Adw.ApplicationWindow):
             on_album_activated=self._open_album,
             art_loader=self._art_loader,
         )
-        self._search_host.append(view)
+        self._replace_root_page(
+            self._search_nav,
+            title="Search",
+            tag="search-root",
+            child=view,
+        )
 
     def _open_preferences(self, *_args: object) -> None:
         if self._preferences is None:
@@ -344,7 +361,7 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _active_nav_view(self) -> Adw.NavigationView | None:
         if self._search_active:
-            return None
+            return self._search_nav
         section = self._content_stack.get_visible_child_name()
         if section == "albums":
             return self._albums_nav
@@ -371,9 +388,6 @@ class TunesWindow(Adw.ApplicationWindow):
         return None
 
     def _sync_header_with_nav(self) -> None:
-        if self._search_active:
-            self._back_btn.set_visible(False)
-            return
         nav = self._active_nav_view()
         if nav is None:
             self._back_btn.set_visible(False)

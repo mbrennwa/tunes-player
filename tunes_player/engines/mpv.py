@@ -77,6 +77,7 @@ class MpvEngine:
         self._duration_sec: float | None = None
         self._playing = False
         self._last_position_emit = 0.0
+        self._track_end_signaled = False
 
         options: dict[str, object] = {
             "video": False,
@@ -126,6 +127,7 @@ class MpvEngine:
 
     def load(self, uri: str, *, start_sec: float = 0) -> None:
         self._loaded_uri = uri
+        self._track_end_signaled = False
         self._position_sec = max(0.0, start_sec)
         self._duration_sec = None
         self._last_position_emit = 0.0
@@ -159,6 +161,7 @@ class MpvEngine:
 
     def stop(self) -> None:
         self._player.command("stop")
+        self._track_end_signaled = False
         self._loaded_uri = None
         self._playing = False
         self._position_sec = 0.0
@@ -219,8 +222,24 @@ class MpvEngine:
 
     def quit(self) -> None:
         self._loaded_uri = None
+        self._track_end_signaled = False
         self._playing = False
         self._player.terminate()
+
+    def _signal_track_finished(self) -> None:
+        if self._loaded_uri is None or self._track_end_signaled:
+            return
+        self._track_end_signaled = True
+        self._playing = False
+        self._emit("track_finished")
+
+    @staticmethod
+    def _eof_reached(value: object) -> bool:
+        if value is True:
+            return True
+        if isinstance(value, str):
+            return value.lower() in ("yes", "true", "1")
+        return False
 
     def _register_observers(self) -> None:
         player = self._player
@@ -251,6 +270,12 @@ class MpvEngine:
             self._playing = value is not True and self._loaded_uri is not None
             self._emit("playing_changed")
 
+        @player.property_observer("eof-reached")
+        def _on_eof_reached(_name: str, value: object) -> None:
+            # keep_open=yes pauses at EOF without an end-file(EOF) event.
+            if self._eof_reached(value):
+                self._signal_track_finished()
+
         @player.event_callback("end-file")
         def _on_end_file(event: object) -> None:
             end_data = getattr(event, "data", None)
@@ -258,10 +283,7 @@ class MpvEngine:
                 return
             reason = int(end_data.reason)
             if reason == end_file.EOF:
-                if self._loaded_uri is None:
-                    return
-                self._playing = False
-                self._emit("track_finished")
+                self._signal_track_finished()
             elif reason == end_file.ERROR:
                 self._playing = False
                 self._emit("playback_error")
