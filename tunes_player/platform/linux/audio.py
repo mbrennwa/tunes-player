@@ -14,6 +14,7 @@ from tunes_player.core.volume import VolumeController, VolumeEndpoint
 
 _SINK_LINE = re.compile(r"^\s*(?P<default>\*)?\s*(?P<id>\d+)\.\s+(?P<name>.+?)(?:\s+\[|$)")
 _PACTL_VOLUME = re.compile(r"(\d+)%")
+_WPCTL_VOLUME = re.compile(r"Volume:\s*([\d.]+)", re.IGNORECASE)
 _PACTL_SINK_SHORT = re.compile(r"^(?P<id>\d+)\s+(?P<name>\S+)\s+(?P<desc>.+)$")
 
 
@@ -210,7 +211,12 @@ class WpctlVolumeController(_SubprocessVolumeController):
         return endpoints
 
     def _parse_level(self, raw: str) -> float:
-        value = float(raw.split()[0])
+        match = _WPCTL_VOLUME.search(raw)
+        if match is not None:
+            value = float(match.group(1))
+        else:
+            # Older wpctl printed a bare fraction, e.g. "0.40"
+            value = float(raw.split()[0])
         return max(0.0, min(1.0, value))
 
     def _mpv_device_for(self, endpoint: VolumeEndpoint) -> str | None:
