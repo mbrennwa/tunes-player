@@ -114,10 +114,10 @@ class TidalClient:
         self.save_session()
         self._oauth_error = None
 
-    def begin_oauth(self) -> tuple[str, float, str]:
+    def begin_oauth(self) -> tuple[str, float]:
         """Start device-link login.
 
-        Returns (verification URL, expires_in seconds, user_code).
+        Returns (verification URL, expires_in seconds).
         """
         session = self._ensure_session()
         if session.check_login():
@@ -137,7 +137,6 @@ class TidalClient:
         return (
             _normalize_oauth_url(link.verification_uri_complete),
             float(link.expires_in),
-            str(link.user_code),
         )
 
     def poll_oauth(self) -> OAuthStatus:

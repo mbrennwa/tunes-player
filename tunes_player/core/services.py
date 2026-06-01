@@ -163,7 +163,7 @@ class PlayerService:
     def tidal_account_label(self) -> str | None:
         return self._tidal.account_label()
 
-    def tidal_begin_login(self) -> tuple[str, float, str]:
+    def tidal_begin_login(self) -> tuple[str, float]:
         return self._tidal.begin_oauth()
 
     def tidal_poll_login(self) -> str:

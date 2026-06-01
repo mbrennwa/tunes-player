@@ -313,7 +313,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
 
     def _on_tidal_sign_in_clicked(self, *_args: object) -> None:
         try:
-            url, expires_in, _user_code = self._service.tidal_begin_login()
+            url, expires_in = self._service.tidal_begin_login()
         except Exception as exc:
             self._tidal_status_row.set_subtitle(f"Sign-in failed: {exc}")
             return
