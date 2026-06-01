@@ -25,6 +25,7 @@ from tunes_player.ui.gtk.views import (
     QueueSheet,
     SearchResultsView,
 )
+from tunes_player.ui.gtk.album_grid import album_grid_min_content_width
 
 _DEFAULT_SIZE = (960, 640)
 _SIDEBAR_WIDTH_PADDING_SP = 16.0
@@ -161,6 +162,7 @@ class TunesWindow(Adw.ApplicationWindow):
         content_page = Adw.NavigationPage(title="", child=self._content_stack, tag="content")
         self._split.set_content(content_page)
 
+        self._sidebar_width_sp = 0.0
         self._show_albums_root()
         self._show_artists_root()
         self._sidebar_nav_list.select_row(self._sidebar_rows["albums"])
@@ -180,9 +182,34 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _apply_fixed_sidebar_width(self) -> bool:
         width_sp = self._compute_sidebar_width_sp()
+        self._sidebar_width_sp = width_sp
         self._split.set_min_sidebar_width(width_sp)
         self._split.set_max_sidebar_width(width_sp)
+        self._apply_window_min_width()
         return False
+
+    def _apply_window_min_width(self) -> None:
+        sidebar = self._sidebar_width_sp or self._split.get_max_sidebar_width()
+        min_width = int(sidebar) + album_grid_min_content_width()
+        _min_w, min_h = self.get_size_request()
+        if min_h < 0:
+            min_h = 400
+        self.set_size_request(min_width, min_h)
+
+    def _sidebar_width_pixels(self) -> int:
+        sidebar_page = self._split.get_sidebar()
+        if sidebar_page is not None:
+            width = sidebar_page.get_width()
+            if width >= 64:
+                return width
+            alloc = sidebar_page.get_allocation()
+            if alloc.width > 0:
+                return alloc.width
+        cached = self._sidebar_width_sp
+        if cached > 0:
+            return int(cached)
+        max_width = self._split.get_max_sidebar_width()
+        return int(max_width) if max_width > 0 else 0
 
     def _replace_root_page(
         self,

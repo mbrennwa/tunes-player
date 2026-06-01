@@ -1,3 +1,9 @@
+/* Browse views and album grid: allow horizontal shrink with the window */
+.view,
+.album-tile-grid {
+  min-width: 0;
+}
+
 /* Album grid tiles: square, cover fills tile, text overlaid at bottom */
 .album-card-frame {
   min-width: 0;
