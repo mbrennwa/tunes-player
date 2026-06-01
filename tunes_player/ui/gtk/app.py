@@ -162,11 +162,9 @@ class TunesWindow(Adw.ApplicationWindow):
             nav.connect("notify::visible-page", self._on_nav_visible_page_changed)
         self._search_nav = Adw.NavigationView()
         self._search_nav.connect("notify::visible-page", self._on_nav_visible_page_changed)
-        self._search_host = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
-        self._search_host.append(self._search_nav)
         self._content_stack.add_named(self._albums_nav, "albums")
         self._content_stack.add_named(self._artists_nav, "artists")
-        self._content_stack.add_named(self._search_host, "search")
+        self._content_stack.add_named(self._search_nav, "search")
 
         content_page = Adw.NavigationPage(title="", child=self._content_stack, tag="content")
         self._split.set_content(content_page)
