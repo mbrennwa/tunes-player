@@ -45,7 +45,6 @@ class AlbumGridView(Gtk.ScrolledWindow):
         art_loader: ArtLoader | None = None,
     ) -> None:
         super().__init__(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
-        self.set_propagate_natural_width(False)
         self.add_css_class("view")
 
         if not albums and empty_message:
@@ -153,7 +152,6 @@ class SearchResultsView(Gtk.ScrolledWindow):
         art_loader: ArtLoader | None = None,
     ) -> None:
         super().__init__(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
-        self.set_propagate_natural_width(False)
         self.add_css_class("view")
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, vexpand=True)

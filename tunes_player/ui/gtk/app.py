@@ -26,9 +26,6 @@ from tunes_player.ui.gtk.views import (
     SearchResultsView,
 )
 
-# Fixed 3-column album grid width plus AlbumGridView margins (18px each side).
-_ALBUM_GRID_MIN_CONTENT_WIDTH = 564 + 2 * 18
-
 _DEFAULT_SIZE = (960, 640)
 _SIDEBAR_WIDTH_PADDING_SP = 16.0
 _NAV_ROOT_TAGS = frozenset({"albums-root", "artists-root", "search-root"})
@@ -103,11 +100,6 @@ class TunesWindow(Adw.ApplicationWindow):
         self._toast_overlay.set_child(self._split)
         self._toolbar.set_content(self._toast_overlay)
 
-        condition = Adw.BreakpointCondition.parse("max-width: 720sp")
-        breakpoint = Adw.Breakpoint.new(condition)
-        breakpoint.add_setter(self._split, "collapsed", True)
-        self.add_breakpoint(breakpoint)
-
         self._sidebar_shell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self._sidebar_shell.set_vexpand(True)
         self._sidebar_shell.set_hexpand(False)
@@ -169,8 +161,6 @@ class TunesWindow(Adw.ApplicationWindow):
         content_page = Adw.NavigationPage(title="", child=self._content_stack, tag="content")
         self._split.set_content(content_page)
 
-        self._sidebar_width_sp = 0.0
-        self._split.connect("notify::collapsed", self._on_split_collapsed_changed)
         self._show_albums_root()
         self._show_artists_root()
         self._sidebar_nav_list.select_row(self._sidebar_rows["albums"])
@@ -190,26 +180,9 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _apply_fixed_sidebar_width(self) -> bool:
         width_sp = self._compute_sidebar_width_sp()
-        self._sidebar_width_sp = width_sp
         self._split.set_min_sidebar_width(width_sp)
         self._split.set_max_sidebar_width(width_sp)
-        self._apply_window_min_width()
         return False
-
-    def _on_split_collapsed_changed(self, *_args: object) -> None:
-        self._apply_window_min_width()
-
-    def _apply_window_min_width(self) -> None:
-        content_min = _ALBUM_GRID_MIN_CONTENT_WIDTH
-        if self._split.get_collapsed():
-            min_width = content_min
-        else:
-            sidebar = self._sidebar_width_sp or self._split.get_max_sidebar_width()
-            min_width = int(sidebar) + content_min
-        _min_w, min_h = self.get_size_request()
-        if min_h < 0:
-            min_h = 400
-        self.set_size_request(min_width, min_h)
 
     def _replace_root_page(
         self,
