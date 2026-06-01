@@ -8,7 +8,7 @@ live here.
 
 | Item | Choice |
 |------|--------|
-| Display name | **Tunes** |
+| Display name | **Tunes** (rename candidates: [docs/NAMING.md](NAMING.md)) |
 | Package / CLI / icon name | **tunes-player** |
 | GTK / D-Bus app ID | `tunes.player` |
 | License | **GPL-3.0-or-later** (see [License rationale](#license-rationale)) |
@@ -63,9 +63,13 @@ use the same no-extra-DSP path but are not “hi-res” sources.
 
 Other formats may play via mpv later without full library indexing until explicitly added.
 
+### Naming
 
-“Music” was avoided: GNOME ships **Music** (`gnome-music`). **Tunes** is distinct;
-`iTunes` echo is acceptable for a FOSS niche player.
+**Music** was avoided: GNOME ships **Music** (`gnome-music`). **Tunes** is distinct;
+`iTunes` echo is acceptable for a FOSS niche player for now.
+
+Possible renames (e.g. **Panmelos**, **Allmusic**, **Holoplay**, **Sourcebox**, and
+others) with rationale and collisions are in **[docs/NAMING.md](NAMING.md)**.
 
 ---
 

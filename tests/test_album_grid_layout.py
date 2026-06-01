@@ -12,6 +12,7 @@ from tunes_player.ui.gtk.album_grid import (
     album_grid_inner_width,
     album_grid_layout,
     album_grid_min_content_width,
+    album_grid_resolve_inner_width,
 )
 
 
@@ -29,12 +30,32 @@ class AlbumGridLayoutTests(unittest.TestCase):
         )
         self.assertEqual(album_grid_inner_width(100, sidebar_width=180, horizontal_padding=36), 0)
 
-    def test_inner_width_from_allocation(self) -> None:
+    def test_inner_width_from_parent_outer_width(self) -> None:
         self.assertEqual(
-            album_grid_content_inner_width(500, margin_start=18, margin_end=18),
-            464,
+            album_grid_content_inner_width(1000, margin_start=18, margin_end=18),
+            964,
         )
         self.assertEqual(album_grid_content_inner_width(0), 0)
+
+    def test_resolve_inner_width_growing(self) -> None:
+        inner, last_vp, last_win = album_grid_resolve_inner_width(
+            viewport_inner=520,
+            window_inner=964,
+            last_viewport_inner=520,
+            last_window_inner=520,
+        )
+        self.assertEqual(inner, 964)
+        self.assertEqual((last_vp, last_win), (520, 964))
+
+    def test_resolve_inner_width_shrinking(self) -> None:
+        inner, last_vp, last_win = album_grid_resolve_inner_width(
+            viewport_inner=484,
+            window_inner=960,
+            last_viewport_inner=964,
+            last_window_inner=960,
+        )
+        self.assertEqual(inner, 484)
+        self.assertEqual((last_vp, last_win), (484, 960))
 
     def test_narrow_single_column_at_min(self) -> None:
         columns, edge = album_grid_layout(100)

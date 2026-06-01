@@ -30,15 +30,55 @@ def album_grid_inner_width(
 
 
 def album_grid_content_inner_width(
-    allocated_width: int,
+    outer_width: int,
     *,
     margin_start: int = 0,
     margin_end: int = 0,
 ) -> int:
-    """Width for tile rows from the grid widget's own allocation (not the window)."""
-    if allocated_width < 1:
+    """Tile row width from a parent box width (subtract margins once).
+
+    GTK 4 ``Widget.get_width()`` on a margined child is already the content
+    width inside those margins — do not pass that value through this helper.
+    """
+    if outer_width < 1:
         return 0
-    return max(0, allocated_width - margin_start - margin_end)
+    return max(0, outer_width - margin_start - margin_end)
+
+
+def album_grid_resolve_inner_width(
+    *,
+    viewport_inner: int,
+    window_inner: int,
+    last_viewport_inner: int = 0,
+    last_window_inner: int = 0,
+) -> tuple[int, int, int]:
+    """Choose tile row width for relayout.
+
+    Viewport width (GtkScrolledWindow) tracks shrink while the window can lag
+    behind wide tiles. Window width tracks grow while the scroll viewport can
+    lag behind a narrow child. Use direction of change to pick the leading edge.
+    Returns ``(inner_width, last_viewport_inner, last_window_inner)``.
+    """
+    vp = max(0, viewport_inner)
+    win = max(0, window_inner)
+    if vp < 1 and win < 1:
+        return 0, vp, win
+    if vp < 1:
+        return win, vp, win
+    if win < 1:
+        return vp, vp, win
+
+    growing = win > last_window_inner + 2
+    shrinking = vp < last_viewport_inner - 2
+    if growing:
+        inner = win
+    elif shrinking:
+        inner = vp
+    elif vp < win - 4:
+        inner = vp
+    else:
+        inner = win
+    return inner, vp, win
 
 
 def album_grid_layout(inner_width: int) -> tuple[int, int]:

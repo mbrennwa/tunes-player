@@ -36,7 +36,8 @@ The **core** is UI- and engine-agnostic so other frontends (e.g. Qt on macOS) an
 shared **mpv** backend can be added without rewriting library or playback logic.
 
 **Architecture, roadmap, and TODO (handoff for contributors/agents):**
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) —
+possible rename candidates: [docs/NAMING.md](docs/NAMING.md)
 
 ## Requirements (Linux)
 

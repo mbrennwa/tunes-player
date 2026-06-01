@@ -25,7 +25,11 @@ from tunes_player.ui.gtk.views import (
     QueueSheet,
     SearchResultsView,
 )
-from tunes_player.ui.gtk.album_grid import album_grid_min_content_width
+from tunes_player.ui.gtk.album_grid import (
+    ALBUM_GRID_VIEW_MARGIN,
+    SEARCH_VIEW_HORIZONTAL_MARGIN,
+    album_grid_min_content_width,
+)
 
 _DEFAULT_SIZE = (960, 640)
 _SIDEBAR_WIDTH_PADDING_SP = 16.0
@@ -211,6 +215,24 @@ class TunesWindow(Adw.ApplicationWindow):
         max_width = self._split.get_max_sidebar_width()
         return int(max_width) if max_width > 0 else 0
 
+    def _album_grid_inner_width(self) -> int:
+        window_width = self.get_width()
+        if window_width < 64:
+            return 0
+        return max(
+            0,
+            window_width - self._sidebar_width_pixels() - 2 * ALBUM_GRID_VIEW_MARGIN,
+        )
+
+    def _search_grid_inner_width(self) -> int:
+        window_width = self.get_width()
+        if window_width < 64:
+            return 0
+        return max(
+            0,
+            window_width - self._sidebar_width_pixels() - 2 * SEARCH_VIEW_HORIZONTAL_MARGIN,
+        )
+
     def _replace_root_page(
         self,
         nav: Adw.NavigationView,
@@ -240,6 +262,7 @@ class TunesWindow(Adw.ApplicationWindow):
             on_album_activated=self._open_album,
             empty_message=empty_message,
             art_loader=self._art_loader,
+            window_inner_width_fn=self._album_grid_inner_width,
         )
         self._replace_root_page(
             self._albums_nav,
@@ -299,6 +322,7 @@ class TunesWindow(Adw.ApplicationWindow):
             albums=albums,
             on_album_activated=self._open_album,
             art_loader=self._art_loader,
+            window_inner_width_fn=self._album_grid_inner_width,
         )
         page = Adw.NavigationPage(title=escape_markup(title), child=view, tag=artist_id)
         if self._artists_nav.get_visible_page() is not None and self._artists_nav.get_visible_page().get_tag() != "artists-root":
@@ -364,6 +388,7 @@ class TunesWindow(Adw.ApplicationWindow):
             query=text,
             on_album_activated=self._open_album,
             art_loader=self._art_loader,
+            window_inner_width_fn=self._search_grid_inner_width,
         )
         self._replace_root_page(
             self._search_nav,

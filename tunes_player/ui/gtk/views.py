@@ -16,9 +16,11 @@ from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.album_grid import (
     ALBUM_GRID_SPACING,
     ALBUM_GRID_VIEW_MARGIN,
+    SEARCH_VIEW_HORIZONTAL_MARGIN,
     album_grid_content_inner_width,
     album_grid_layout,
     album_grid_min_content_width,
+    album_grid_resolve_inner_width,
     search_grid_min_content_width,
 )
 from tunes_player.ui.gtk.art import ArtLoader
@@ -44,10 +46,15 @@ class AlbumGridView(Gtk.ScrolledWindow):
         on_album_activated: Callable[[str], None],
         empty_message: str | None = None,
         art_loader: ArtLoader | None = None,
+        window_inner_width_fn: Callable[[], int] | None = None,
     ) -> None:
         super().__init__(vexpand=True, hscrollbar_policy=Gtk.PolicyType.AUTOMATIC)
         self.set_propagate_natural_width(False)
         self.add_css_class("view")
+        self._window_inner_width_fn = window_inner_width_fn
+        self._last_viewport_inner = 0
+        self._last_window_inner = 0
+        self._root_width_notify_id = 0
 
         if not albums and empty_message:
             label = Gtk.Label(label=empty_message, vexpand=True, justify=Gtk.Justification.CENTER)
@@ -60,7 +67,7 @@ class AlbumGridView(Gtk.ScrolledWindow):
             self.set_child(label)
             return
 
-        grid = AlbumTileGrid()
+        grid = AlbumTileGrid(inner_width_fn=self._album_tile_inner_width)
         grid.set_margin_top(ALBUM_GRID_VIEW_MARGIN)
         grid.set_margin_bottom(ALBUM_GRID_VIEW_MARGIN)
         grid.set_margin_start(ALBUM_GRID_VIEW_MARGIN)
@@ -68,6 +75,10 @@ class AlbumGridView(Gtk.ScrolledWindow):
         shell = _FixedMinWidthShell(album_grid_min_content_width())
         shell.append(grid)
         self.set_child(shell)
+        self._tile_grid = grid
+        self.connect("notify::width", self._on_viewport_width_changed)
+        self.connect("map", self._on_view_map)
+        self.connect("unmap", self._on_view_unmap)
 
         AlbumGridView._populate_albums(
             grid,
@@ -111,6 +122,47 @@ class AlbumGridView(Gtk.ScrolledWindow):
         else:
             GLib.idle_add(grid._sync_layout_idle)
 
+    def _viewport_inner_width(self) -> int:
+        width = self.get_width()
+        if width < 1:
+            width = self.get_allocation().width
+        if width < 1:
+            return 0
+        return album_grid_content_inner_width(
+            width,
+            margin_start=ALBUM_GRID_VIEW_MARGIN,
+            margin_end=ALBUM_GRID_VIEW_MARGIN,
+        )
+
+    def _album_tile_inner_width(self) -> int:
+        viewport = self._viewport_inner_width()
+        window = self._window_inner_width_fn() if self._window_inner_width_fn else 0
+        inner, self._last_viewport_inner, self._last_window_inner = album_grid_resolve_inner_width(
+            viewport_inner=viewport,
+            window_inner=window,
+            last_viewport_inner=self._last_viewport_inner,
+            last_window_inner=self._last_window_inner,
+        )
+        return inner
+
+    def _on_view_map(self, *_args: object) -> None:
+        root = self.get_root()
+        if root is not None and not self._root_width_notify_id:
+            self._root_width_notify_id = root.connect(
+                "notify::width",
+                self._on_viewport_width_changed,
+            )
+
+    def _on_view_unmap(self, *_args: object) -> None:
+        if self._root_width_notify_id:
+            root = self.get_root()
+            if root is not None:
+                root.disconnect(self._root_width_notify_id)
+            self._root_width_notify_id = 0
+
+    def _on_viewport_width_changed(self, *_args: object) -> None:
+        GLib.idle_add(self._tile_grid._sync_layout_idle)
+
 
 class ArtistListView(Gtk.ScrolledWindow):
     def __init__(
@@ -151,10 +203,15 @@ class SearchResultsView(Gtk.ScrolledWindow):
         query: str,
         on_album_activated: Callable[[str], None],
         art_loader: ArtLoader | None = None,
+        window_inner_width_fn: Callable[[], int] | None = None,
     ) -> None:
         super().__init__(vexpand=True, hscrollbar_policy=Gtk.PolicyType.AUTOMATIC)
         self.set_propagate_natural_width(False)
         self.add_css_class("view")
+        self._window_inner_width_fn = window_inner_width_fn
+        self._last_viewport_inner = 0
+        self._last_window_inner = 0
+        self._root_width_notify_id = 0
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, vexpand=True)
         box.set_hexpand(True)
@@ -164,6 +221,10 @@ class SearchResultsView(Gtk.ScrolledWindow):
         box.set_margin_start(12)
         box.set_margin_end(12)
         self.set_child(box)
+        self._results_box = box
+        self.connect("notify::width", self._on_viewport_width_changed)
+        self.connect("map", self._on_view_map)
+        self.connect("unmap", self._on_view_unmap)
 
         results = service.search(query)
         if not results.albums and not results.tracks:
@@ -174,12 +235,13 @@ class SearchResultsView(Gtk.ScrolledWindow):
 
         if results.albums:
             box.append(_section_label("Albums"))
-            album_grid = AlbumTileGrid()
+            album_grid = AlbumTileGrid(inner_width_fn=self._search_album_tile_inner_width)
             album_grid.set_hexpand(True)
             album_grid.set_halign(Gtk.Align.FILL)
             album_shell = _FixedMinWidthShell(search_grid_min_content_width())
             album_shell.append(album_grid)
             box.append(album_shell)
+            self._search_album_grid = album_grid
             for album in results.albums:
                 album_grid.append_album(
                     album,
@@ -208,6 +270,49 @@ class SearchResultsView(Gtk.ScrolledWindow):
                     lambda _row, track_id=track.id: service.play_track(track_id),
                 )
                 track_list.append(row)
+
+    def _viewport_inner_width(self) -> int:
+        width = self.get_width()
+        if width < 1:
+            width = self.get_allocation().width
+        if width < 1:
+            return 0
+        return album_grid_content_inner_width(
+            width,
+            margin_start=SEARCH_VIEW_HORIZONTAL_MARGIN,
+            margin_end=SEARCH_VIEW_HORIZONTAL_MARGIN,
+        )
+
+    def _search_album_tile_inner_width(self) -> int:
+        viewport = self._viewport_inner_width()
+        window = self._window_inner_width_fn() if self._window_inner_width_fn else 0
+        inner, self._last_viewport_inner, self._last_window_inner = album_grid_resolve_inner_width(
+            viewport_inner=viewport,
+            window_inner=window,
+            last_viewport_inner=self._last_viewport_inner,
+            last_window_inner=self._last_window_inner,
+        )
+        return inner
+
+    def _on_view_map(self, *_args: object) -> None:
+        root = self.get_root()
+        if root is not None and not self._root_width_notify_id:
+            self._root_width_notify_id = root.connect(
+                "notify::width",
+                self._on_viewport_width_changed,
+            )
+
+    def _on_view_unmap(self, *_args: object) -> None:
+        if self._root_width_notify_id:
+            root = self.get_root()
+            if root is not None:
+                root.disconnect(self._root_width_notify_id)
+            self._root_width_notify_id = 0
+
+    def _on_viewport_width_changed(self, *_args: object) -> None:
+        grid = getattr(self, "_search_album_grid", None)
+        if grid is not None:
+            GLib.idle_add(grid._sync_layout_idle)
 
 
 class QueueSheet(Adw.Dialog):
@@ -520,33 +625,16 @@ class AlbumTileGrid(Gtk.Box):
             self.relayout(inner)
 
     def _available_inner_width(self) -> int:
-        inner = album_grid_content_inner_width(
-            self._allocated_width(),
-            margin_start=self.get_margin_start(),
-            margin_end=self.get_margin_end(),
-        )
-        if inner > 0:
-            return inner
         if self._inner_width_fn is not None:
-            return self._inner_width_fn()
-        return 0
-
-    def _allocated_width(self) -> int:
+            inner = self._inner_width_fn()
+            if inner > 0:
+                return inner
         width = self.get_width()
         if width >= 1:
             return width
-        alloc = self.get_allocation()
-        if alloc.width >= 1:
-            return alloc.width
-        parent = self.get_parent()
-        while parent is not None:
-            width = parent.get_width()
-            if width >= 1:
-                return width
-            alloc = parent.get_allocation()
-            if alloc.width >= 1:
-                return alloc.width
-            parent = parent.get_parent()
+        alloc_w = self.get_allocation().width
+        if alloc_w >= 1:
+            return alloc_w
         return 0
 
     def _on_unmap(self, *_args: object) -> None:
