@@ -102,8 +102,8 @@ class PreferencesWindow(Adw.PreferencesWindow):
         tidal_group = Adw.PreferencesGroup(
             title="Streaming",
             description=(
-                "Requires your own TIDAL subscription. Sign in via the device link "
-                "(link.tidal.com) for full-length playback."
+                "Requires your own TIDAL subscription. Sign in with your browser "
+                "for full-length playback."
             ),
         )
         tidal_group.add(self._tidal_status_row)
@@ -114,6 +114,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self.add(audio_page)
 
         self._tidal_oauth_poll_id = 0
+        self._tidal_sign_in_dialog: Adw.AlertDialog | None = None
         self._reload_folders()
         self._reload_tidal_status()
         service.subscribe(lambda event: GLib.idle_add(self._on_service_event, event))
@@ -274,11 +275,14 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._scan_button.set_sensitive(True)
         self._scan_row.set_subtitle(f"Scan failed: {exc}")
 
-    def _copy_log_path(self, log_path: object) -> None:
+    def _copy_text(self, text: str) -> None:
         display = Gdk.Display.get_default()
         if display is None:
             return
-        display.get_clipboard().set(Gdk.ContentProvider.new_for_string(str(log_path)))
+        display.get_clipboard().set(Gdk.ContentProvider.new_for_string(text))
+
+    def _copy_log_path(self, log_path: object) -> None:
+        self._copy_text(str(log_path))
 
     def _on_service_event(self, event: str) -> bool:
         if event == "sources_changed":
@@ -309,10 +313,27 @@ class PreferencesWindow(Adw.PreferencesWindow):
 
     def _on_tidal_sign_in_clicked(self, *_args: object) -> None:
         try:
-            url, expires_in, user_code = self._service.tidal_begin_login()
+            url, expires_in, _user_code = self._service.tidal_begin_login()
         except Exception as exc:
             self._tidal_status_row.set_subtitle(f"Sign-in failed: {exc}")
             return
+
+        opened, open_err = open_external_uri(url)
+        expires_msg = f"Finish within about {int(expires_in)} seconds."
+        if opened:
+            body = (
+                "Your browser should open for TIDAL sign-in. "
+                "Log in and approve access; this window updates when you are done. "
+                f"{expires_msg}"
+            )
+        else:
+            err_hint = f" ({open_err})" if open_err else ""
+            body = (
+                "Log in and approve access; this window updates when you are done. "
+                f"{expires_msg}\n\n"
+                f"We could not open the browser automatically{err_hint}. "
+                "Use Copy link or Open in browser."
+            )
 
         self._tidal_status_row.set_subtitle("Waiting for browser sign-in…")
         if self._tidal_oauth_poll_id == 0:
@@ -320,27 +341,27 @@ class PreferencesWindow(Adw.PreferencesWindow):
 
         dialog = Adw.AlertDialog(
             heading="Sign in to TIDAL",
-            body=(
-                "Open the link below, log in, and approve access. "
-                f"Code: {user_code} (expires in about {int(expires_in)} seconds).\n\n"
-                f"{url}\n\n"
-                "Use this device-link flow for full-length tracks. "
-                "The paste-URL browser login only provides ~30s previews."
-            ),
+            body=body,
         )
         dialog.add_response("cancel", "Cancel")
+        dialog.add_response("copy", "Copy link")
         dialog.add_response("open", "Open in browser")
         dialog.set_response_appearance("open", Adw.ResponseAppearance.SUGGESTED)
         dialog.set_default_response("open")
         dialog.set_close_response("cancel")
+        self._tidal_sign_in_dialog = dialog
 
         def on_response(_dlg: Adw.AlertDialog, response: str) -> None:
             if response == "cancel":
+                self._tidal_sign_in_dialog = None
                 if self._tidal_oauth_poll_id != 0:
                     GLib.source_remove(self._tidal_oauth_poll_id)
                     self._tidal_oauth_poll_id = 0
                 self._service.tidal_cancel_login()
                 self._reload_tidal_status()
+                return
+            if response == "copy":
+                self._copy_text(url)
                 return
             if response == "open":
                 ok, err = open_external_uri(url)
@@ -355,15 +376,23 @@ class PreferencesWindow(Adw.PreferencesWindow):
         dialog.connect("response", on_response)
         dialog.present(self)
 
+    def _dismiss_tidal_sign_in_dialog(self) -> None:
+        dialog = self._tidal_sign_in_dialog
+        if dialog is not None:
+            dialog.close()
+            self._tidal_sign_in_dialog = None
+
     def _poll_tidal_oauth(self) -> bool:
         status = self._service.tidal_poll_login()
         if status == "pending":
             return True
         self._tidal_oauth_poll_id = 0
         if status == "success":
+            self._dismiss_tidal_sign_in_dialog()
             self._reload_tidal_status()
             self._service.notify_sources_changed()
         elif status == "failed":
+            self._dismiss_tidal_sign_in_dialog()
             err = self._service.tidal_oauth_error()
             self._tidal_status_row.set_subtitle(err or "Sign-in failed or timed out")
             self._reload_tidal_status()
