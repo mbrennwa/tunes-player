@@ -318,22 +318,14 @@ class PreferencesWindow(Adw.PreferencesWindow):
             self._tidal_status_row.set_subtitle(f"Sign-in failed: {exc}")
             return
 
-        opened, open_err = open_external_uri(url)
         expires_msg = f"Finish within about {int(expires_in)} seconds."
-        if opened:
-            body = (
-                "Your browser should open for TIDAL sign-in. "
-                "Log in and approve access; this window updates when you are done. "
-                f"{expires_msg}"
-            )
-        else:
-            err_hint = f" ({open_err})" if open_err else ""
-            body = (
-                "Log in and approve access; this window updates when you are done. "
-                f"{expires_msg}\n\n"
-                f"We could not open the browser automatically{err_hint}. "
-                "Use Copy link or Open in browser."
-            )
+        body = (
+            "Choose Open in browser, then log in with your TIDAL account and "
+            "approve access. This window updates when you are done.\n\n"
+            "If the TIDAL page shows a letter code, you can ignore it—no need to "
+            "type it into tunes-player. "
+            f"{expires_msg}"
+        )
 
         self._tidal_status_row.set_subtitle("Waiting for browser sign-in…")
         if self._tidal_oauth_poll_id == 0:
