@@ -128,7 +128,7 @@ class PlayerService:
         items = self._store.list_recently_added_items(within_days=within_days)
         if self._tidal.is_logged_in():
             try:
-                tidal_items = self._tidal.list_new_release_items(within_days=within_days)
+                tidal_items = self._tidal.list_new_release_items()
                 items = [*items, *tidal_items]
             except TidalUnavailableError:
                 pass

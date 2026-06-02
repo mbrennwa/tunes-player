@@ -8,6 +8,7 @@ import contextlib
 import json
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -38,6 +39,25 @@ def _quiet_tidalapi_page_warnings():
 
 _STREAM_CACHE_TTL_SEC = 120
 _STREAM_RETRY_ATTEMPTS = 4
+_NEW_RELEASE_TITLE_HINTS = (
+    "new",
+    "neu",
+    "neue",
+    "release",
+    "releases",
+    "erschein",
+    "recent",
+    "latest",
+    "just added",
+    "fresh",
+    "out now",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _CollectedTidalObject:
+    raw: object
+    from_new_release_rail: bool
 
 
 class TidalUnavailableError(RuntimeError):
@@ -236,55 +256,59 @@ class TidalClient:
     def list_new_release_items(
         self,
         *,
-        within_days: int = 30,
-        limit: int = 80,
+        limit: int = 120,
     ) -> list[RecentlyAddedItem]:
-        """New-release albums and tracks from the TIDAL home page."""
+        """Albums from TIDAL new-release style curated rails (expanded view-all lists)."""
         if not self.is_logged_in():
             return []
         session = self._require_login()
-        cutoff_ns = time.time_ns() - int(within_days * 86_400 * 1_000_000_000)
         items: list[RecentlyAddedItem] = []
+        seen_album_ids: set[str] = set()
         try:
             import tidalapi.album as tidal_album_mod
             import tidalapi.media as tidal_media_mod
 
+            visited_pages: set[int] = set()
+            collected: list[_CollectedTidalObject] = []
             with _quiet_tidalapi_page_warnings():
-                page = session.home()
-                home_items = list(page)
-            for raw in home_items:
+                pages: list[object] = [session.home()]
+                for loader in (
+                    lambda: session.home(use_legacy_endpoint=True),
+                    session.explore,
+                ):
+                    try:
+                        pages.append(loader())
+                    except Exception:
+                        log.debug("TIDAL page %s unavailable", loader, exc_info=True)
+                for page in pages:
+                    collected.extend(
+                        _collect_tidal_page_objects(
+                            session,
+                            page,
+                            visited=visited_pages,
+                        )
+                    )
+
+            for entry in collected:
+                if not entry.from_new_release_rail:
+                    continue
                 try:
-                    added_ns = time.time_ns()
-                    if isinstance(raw, tidal_album_mod.Album):
-                        release = (
-                            getattr(raw, "available_release_date", None)
-                            or getattr(raw, "release_date", None)
-                            or getattr(raw, "tidal_release_date", None)
+                    for raw in _expand_tidal_mix_contents(entry.raw):
+                        item = _recently_added_from_tidal_object(
+                            session,
+                            raw,
+                            tidal_album_mod=tidal_album_mod,
+                            tidal_media_mod=tidal_media_mod,
+                            apply_date_filter=False,
                         )
-                        if release is not None:
-                            added_ns = int(release.timestamp() * 1_000_000_000)
-                        if added_ns < cutoff_ns:
+                        if item is None or item.release.id in seen_album_ids:
                             continue
-                        tidal_release = convert.release_from_tidal(session, raw)
-                        items.append(
-                            RecentlyAddedItem(added_ns=added_ns, release=tidal_release)
-                        )
-                    elif isinstance(raw, tidal_media_mod.Track):
-                        release_date = _tidal_track_release_date(raw)
-                        if release_date is not None:
-                            added_ns = int(release_date.timestamp() * 1_000_000_000)
-                        if added_ns < cutoff_ns:
-                            continue
-                        if raw.album is None:
-                            continue
-                        tidal_release = convert.release_from_tidal(session, raw.album)
-                        items.append(
-                            RecentlyAddedItem(added_ns=added_ns, release=tidal_release)
-                        )
+                        seen_album_ids.add(item.release.id)
+                        items.append(item)
                 except Exception:
                     log.debug(
-                        "Skipping TIDAL home item %s",
-                        type(raw).__name__,
+                        "Skipping TIDAL new-release item %s",
+                        type(entry.raw).__name__,
                         exc_info=True,
                     )
         except Exception:
@@ -524,6 +548,215 @@ class TidalClient:
         self._oauth_executor = None
         if executor is not None:
             executor.shutdown(wait=wait, cancel_futures=True)
+
+
+def _tidal_album_added_ns(album: object) -> int:
+    """When an album became 'new' on TIDAL (stream start), not original release year."""
+    for attr in ("tidal_release_date", "user_date_added", "release_date"):
+        dt = getattr(album, attr, None)
+        if dt is not None:
+            return int(dt.timestamp() * 1_000_000_000)
+    return time.time_ns()
+
+
+def _tidal_album_within_cutoff(album: object, cutoff_ns: int) -> bool:
+    """Apply the window only when TIDAL provides a stream-start or added date."""
+    for attr in ("tidal_release_date", "user_date_added"):
+        dt = getattr(album, attr, None)
+        if dt is not None:
+            return int(dt.timestamp() * 1_000_000_000) >= cutoff_ns
+    release = getattr(album, "release_date", None)
+    if release is not None:
+        return int(release.timestamp() * 1_000_000_000) >= cutoff_ns
+    # Curated module placement without dates — keep the album.
+    return True
+
+
+def _category_is_new_release_rail(category: object) -> bool:
+    title = (getattr(category, "title", None) or "").lower()
+    if any(hint in title for hint in _NEW_RELEASE_TITLE_HINTS):
+        return True
+    mix_type = getattr(category, "mix_type", None)
+    if mix_type is not None:
+        name = mix_type.name if hasattr(mix_type, "name") else str(mix_type)
+        if "new_release" in name.lower():
+            return True
+    return False
+
+
+def _category_has_album_item(category: object) -> bool:
+    items = getattr(category, "items", None) or []
+    if not items:
+        return False
+    try:
+        import tidalapi.album as tidal_album_mod
+    except ImportError:
+        return False
+    return any(isinstance(item, tidal_album_mod.Album) for item in items)
+
+
+def _should_expand_tidal_category(category: object, *, new_release_rail: bool) -> bool:
+    if getattr(category, "_more", None) is None:
+        return False
+    if new_release_rail or _category_is_new_release_rail(category):
+        return True
+    return _category_has_album_item(category)
+
+
+def _tidal_fetch_module_page(session: Any, category: object) -> object | None:
+    """Fetch a module's view-all page (v1 pages/* or v2 home/* paths)."""
+    more = getattr(category, "_more", None)
+    if more is None:
+        return None
+    api_path = getattr(more, "api_path", None)
+    if not api_path:
+        return None
+    return _tidal_fetch_page_at_path(session, str(api_path))
+
+
+def _tidal_fetch_page_at_path(session: Any, api_path: str) -> object | None:
+    page_root = getattr(session, "page", None)
+    request = getattr(session, "request", None)
+    config = getattr(session, "config", None)
+    if page_root is None or request is None or config is None:
+        return None
+
+    path = api_path.strip()
+    base_url = config.api_v1_location
+    params: dict[str, str] = {"deviceType": "BROWSER"}
+
+    if path.startswith("http://") or path.startswith("https://"):
+        for marker, base in (
+            ("api.tidal.com/v2/", config.api_v2_location),
+            ("api.tidal.com/v1/", config.api_v1_location),
+        ):
+            if marker in path:
+                path = path.split(marker, 1)[1]
+                base_url = base
+                break
+    elif not path.startswith("pages/"):
+        base_url = config.api_v2_location
+        params["locale"] = getattr(session, "locale", "en_US") or "en_US"
+        params["platform"] = "WEB"
+
+    try:
+        response = request.request("GET", path, params=params, base_url=base_url)
+        return page_root.parse(response.json())
+    except Exception:
+        log.debug("TIDAL fetch failed for %s (base=%s)", path, base_url, exc_info=True)
+        return None
+
+
+def _collect_tidal_page_objects(
+    session: Any,
+    page: object,
+    *,
+    visited: set[int],
+    depth: int = 0,
+    max_depth: int = 4,
+    new_release_rail: bool = False,
+) -> list[_CollectedTidalObject]:
+    page_key = id(page)
+    if page_key in visited:
+        return []
+    visited.add(page_key)
+
+    collected: list[_CollectedTidalObject] = []
+    categories = getattr(page, "categories", None)
+    if categories:
+        for category in categories:
+            title = getattr(category, "title", None) or ""
+            rail = new_release_rail or _category_is_new_release_rail(category)
+            for item in getattr(category, "items", None) or []:
+                if item is not None:
+                    collected.append(_CollectedTidalObject(item, rail))
+            if depth < max_depth and _should_expand_tidal_category(
+                category,
+                new_release_rail=rail,
+            ):
+                more_page = _tidal_fetch_module_page(session, category)
+                if more_page is not None:
+                    collected.extend(
+                        _collect_tidal_page_objects(
+                            session,
+                            more_page,
+                            visited=visited,
+                            depth=depth + 1,
+                            max_depth=max_depth,
+                            new_release_rail=rail,
+                        )
+                    )
+        return collected
+
+    try:
+        for item in page:
+            if item is not None:
+                collected.append(_CollectedTidalObject(item, new_release_rail))
+    except TypeError:
+        pass
+    return collected
+
+
+def _expand_tidal_mix_contents(raw: object) -> list[object]:
+    """Expand TIDAL mixes (e.g. NEW_RELEASE_MIX) into their tracks."""
+    try:
+        import tidalapi.mix as tidal_mix_mod
+    except ImportError:
+        return [raw]
+    if isinstance(raw, (tidal_mix_mod.Mix, tidal_mix_mod.MixV2)):
+        try:
+            return list(raw.items())
+        except Exception:
+            log.debug("Could not load TIDAL mix items", exc_info=True)
+            return []
+    return [raw]
+
+
+def _recently_added_from_tidal_object(
+    session: Any,
+    raw: object,
+    *,
+    tidal_album_mod: type,
+    tidal_media_mod: type,
+    apply_date_filter: bool,
+    within_days: int = 30,
+) -> RecentlyAddedItem | None:
+    cutoff_ns = time.time_ns() - int(within_days * 86_400 * 1_000_000_000)
+    if isinstance(raw, tidal_album_mod.Album):
+        if apply_date_filter and not _tidal_album_within_cutoff(raw, cutoff_ns):
+            return None
+        added_ns = _tidal_album_added_ns(raw)
+        return RecentlyAddedItem(
+            added_ns=added_ns,
+            release=convert.release_from_tidal(session, raw),
+        )
+    if isinstance(raw, tidal_media_mod.Track):
+        release_date = _tidal_track_release_date(raw)
+        added_ns = (
+            int(release_date.timestamp() * 1_000_000_000)
+            if release_date is not None
+            else time.time_ns()
+        )
+        if apply_date_filter and added_ns < cutoff_ns:
+            return None
+        if raw.album is None:
+            return None
+        return RecentlyAddedItem(
+            added_ns=added_ns,
+            release=convert.release_from_tidal(session, raw.album),
+        )
+    page_item_type = getattr(raw, "type", None)
+    if page_item_type == "ALBUM" and callable(getattr(raw, "get", None)):
+        album = raw.get()
+        return _recently_added_from_tidal_object(
+            session,
+            album,
+            tidal_album_mod=tidal_album_mod,
+            tidal_media_mod=tidal_media_mod,
+            apply_date_filter=apply_date_filter,
+            within_days=within_days,
+        )
+    return None
 
 
 def _tidal_track_release_date(track: object) -> object | None:
