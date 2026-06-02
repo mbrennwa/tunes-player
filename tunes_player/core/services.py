@@ -55,6 +55,7 @@ class PlaybackState:
     device_volume: bool
     position_sec: float
     duration_sec: float | None
+    playback_epoch: int
 
 
 class PlayerService:
@@ -88,6 +89,7 @@ class PlayerService:
         self._position_sec = 0.0
         self._position_synced_at: float | None = None
         self._duration_sec: float | None = None
+        self._playback_epoch = 0
         self._engine: PlaybackEngine | None = None
         self._engine_error: str | None = None
         self._engine_events: Queue[EngineEvent] = Queue()
@@ -484,6 +486,7 @@ class PlayerService:
             device_volume=self._device_volume,
             position_sec=self._playback_position(),
             duration_sec=self._duration_sec,
+            playback_epoch=self._playback_epoch,
         )
 
     def play_track(self, track_id: str) -> None:
@@ -900,6 +903,7 @@ class PlayerService:
         return None
 
     def _set_current_track(self, track: Track) -> None:
+        self._playback_epoch += 1
         self._current_track = track
         if track.source.value == "tidal":
             self._quality_hint = "TIDAL"

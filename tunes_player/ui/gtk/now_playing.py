@@ -189,6 +189,7 @@ class NowPlayingBar(Gtk.Box):
         self._pending_seek: float | None = None
         self._seek_apply_id: int | None = None
         self._progress_track_id: str | None = None
+        self._progress_playback_epoch = -1
         self._progress_duration_sec: float | None = None
         self._shown_sec = 0.0
         service.subscribe(self._on_service_event)
@@ -405,6 +406,7 @@ class NowPlayingBar(Gtk.Box):
         if track is None:
             if self._progress_track_id is not None:
                 self._progress_track_id = None
+                self._progress_playback_epoch = -1
                 self._shown_sec = 0.0
                 self._set_progress_fraction(0.0, allow_decrease=True)
                 self._progress.set_sensitive(False)
@@ -425,7 +427,11 @@ class NowPlayingBar(Gtk.Box):
             self._progress.set_sensitive(True)
 
         track_id = track.id if hasattr(track, "id") else None
-        if track_id != self._progress_track_id:
+        if (
+            state.playback_epoch != self._progress_playback_epoch
+            or track_id != self._progress_track_id
+        ):
+            self._progress_playback_epoch = state.playback_epoch
             self._progress_track_id = track_id
             self._shown_sec = 0.0
             self._set_progress_fraction(0.0, allow_decrease=True)
