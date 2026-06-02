@@ -5,7 +5,12 @@ from __future__ import annotations
 import unittest
 
 from tunes_player.core.backends.qobuz import ids as qobuz_ids
-from tunes_player.core.backends.qobuz.client import _album_added_ns, sign_get_file_url
+from tunes_player.core.backends.qobuz.client import (
+    _SUGGESTION_FEATURE_TYPES,
+    _album_added_ns,
+    sign_get_file_url,
+)
+from tunes_player.core.backends.qobuz.client import QobuzClient
 from tunes_player.core.backends.qobuz.convert import cover_url, release_from_qobuz
 from tunes_player.core.models import Source
 
@@ -70,6 +75,46 @@ class TestAlbumAddedNs(unittest.TestCase):
         after = time.time_ns()
         self.assertGreaterEqual(ns, before)
         self.assertLessEqual(ns, after)
+
+
+class TestQobuzSuggestionFeatureTypes(unittest.TestCase):
+    def test_suggestion_types_disjoint_from_new_releases(self) -> None:
+        from tunes_player.core.backends.qobuz.client import _NEW_RELEASE_FEATURE_TYPES
+
+        overlap = set(_SUGGESTION_FEATURE_TYPES) & set(_NEW_RELEASE_FEATURE_TYPES)
+        self.assertEqual(overlap, set())
+
+
+class TestQobuzListSuggestionItems(unittest.TestCase):
+    def test_flattens_featured_albums(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "qobuz.json"
+            client = QobuzClient(session, app_id="1", app_secret="secret")
+            client._user_auth_token = "token"  # noqa: SLF001
+
+            album = {
+                "id": "99",
+                "title": "Editor Pick",
+                "artist": {"name": "Band"},
+                "tracks_count": 1,
+            }
+
+            def fake_api_get(endpoint: str, params: dict | None = None, **kwargs: object):
+                assert endpoint == "album/getFeatured"
+                feature_type = (params or {}).get("type")
+                if feature_type in _SUGGESTION_FEATURE_TYPES:
+                    return {"albums": {"items": [album]}}
+                return {"albums": {"items": []}}
+
+            with patch.object(client, "_api_get", side_effect=fake_api_get):
+                items = client.list_suggestion_items(limit=50)
+
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0].release.id, "qobuz:album:99")
 
 
 class TestReleaseFromQobuz(unittest.TestCase):

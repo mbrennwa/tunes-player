@@ -7,7 +7,13 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from tunes_player.core.home import RecentlyAddedItem
+from tunes_player.core.home import (
+    SUGGESTIONS_LOCAL_CONTINUE_LIMIT,
+    SUGGESTIONS_LOCAL_REDISCOVER_LIMIT,
+    SUGGESTIONS_RECENT_GENRE_DAYS,
+    SUGGESTIONS_REDISCOVER_IDLE_MONTHS,
+    RecentlyAddedItem,
+)
 from tunes_player.core.library import ids
 from tunes_player.core.library.db import connect
 from tunes_player.core.library.release_logic import infer_release_metadata
@@ -268,6 +274,113 @@ class LibraryStore:
                 (row["release_id"],),
             ).fetchone()
             added_ns = int(added_row["added_ns"]) if added_row else 0
+            items.append(RecentlyAddedItem(added_ns=added_ns, release=release))
+        return items
+
+    def record_play(
+        self,
+        *,
+        track_id: str,
+        release_id: str,
+        source: str,
+        played_at_ns: int | None = None,
+    ) -> None:
+        when = played_at_ns if played_at_ns is not None else time.time_ns()
+        self._connection.execute(
+            """
+            INSERT INTO play_history(track_id, release_id, source, played_at_ns)
+            VALUES (?, ?, ?, ?)
+            """,
+            (track_id, release_id, source, when),
+        )
+        self._connection.commit()
+
+    def last_play_at_ns(self, track_id: str) -> int | None:
+        row = self._connection.execute(
+            """
+            SELECT played_at_ns FROM play_history
+            WHERE track_id = ?
+            ORDER BY played_at_ns DESC
+            LIMIT 1
+            """,
+            (track_id,),
+        ).fetchone()
+        return None if row is None else int(row["played_at_ns"])
+
+    def list_continue_listening_entries(
+        self,
+        *,
+        limit: int = SUGGESTIONS_LOCAL_CONTINUE_LIMIT,
+    ) -> list[tuple[str, int]]:
+        """Recently played release ids (any source), newest first."""
+        rows = self._connection.execute(
+            """
+            SELECT release_id, MAX(played_at_ns) AS last_played_ns
+            FROM play_history
+            GROUP BY release_id
+            ORDER BY last_played_ns DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [(str(row["release_id"]), int(row["last_played_ns"])) for row in rows]
+
+    def list_rediscover_items(
+        self,
+        *,
+        limit: int = SUGGESTIONS_LOCAL_REDISCOVER_LIMIT,
+        idle_months: int = SUGGESTIONS_REDISCOVER_IDLE_MONTHS,
+        recent_genre_days: int = SUGGESTIONS_RECENT_GENRE_DAYS,
+    ) -> list[RecentlyAddedItem]:
+        genre_cutoff_ns = time.time_ns() - int(recent_genre_days * 86_400 * 1_000_000_000)
+        idle_cutoff_ns = time.time_ns() - int(idle_months * 30 * 86_400 * 1_000_000_000)
+        genre_rows = self._connection.execute(
+            """
+            SELECT DISTINCT t.genre AS genre
+            FROM play_history ph
+            JOIN tracks t ON t.id = ph.track_id
+            WHERE ph.source = ?
+              AND ph.played_at_ns >= ?
+              AND t.genre IS NOT NULL
+              AND trim(t.genre) != ''
+            """,
+            (Source.LOCAL.value, genre_cutoff_ns),
+        ).fetchall()
+        genres = [str(row["genre"]) for row in genre_rows if row["genre"]]
+        if not genres:
+            return []
+        placeholders = ",".join("?" * len(genres))
+        rows = self._connection.execute(
+            f"""
+            {_RELEASE_GROUP_SELECT}
+            WHERE t.genre IN ({placeholders})
+              AND t.album_id NOT IN (
+                  SELECT release_id
+                  FROM play_history
+                  WHERE played_at_ns >= ?
+              )
+            GROUP BY t.album_id, t.album, t.album_artist
+            ORDER BY RANDOM()
+            LIMIT ?
+            """,
+            (*genres, idle_cutoff_ns, limit),
+        ).fetchall()
+        items: list[RecentlyAddedItem] = []
+        for row in rows:
+            release_id = str(row["release_id"])
+            release = self._row_to_release(
+                row,
+                art_uri=self._art_uri_for_release(release_id),
+            )
+            last_row = self._connection.execute(
+                """
+                SELECT MAX(played_at_ns) AS last_played_ns
+                FROM play_history
+                WHERE release_id = ?
+                """,
+                (release_id,),
+            ).fetchone()
+            added_ns = int(last_row["last_played_ns"]) if last_row and last_row["last_played_ns"] else 0
             items.append(RecentlyAddedItem(added_ns=added_ns, release=release))
         return items
 

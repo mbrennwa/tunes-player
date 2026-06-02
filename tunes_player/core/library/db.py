@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -85,6 +85,18 @@ WHERE trim(album) = ''
    OR lower(trim(album)) = 'unknown album';
 """
 
+_MIGRATION_V6_PLAY_HISTORY = """
+CREATE TABLE IF NOT EXISTS play_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_id TEXT NOT NULL,
+    release_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    played_at_ns INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at_ns DESC);
+CREATE INDEX IF NOT EXISTS idx_play_history_release ON play_history(release_id);
+"""
+
 
 def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
     rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
@@ -147,6 +159,8 @@ def _migrate(connection: sqlite3.Connection) -> None:
         connection.executescript(_MIGRATION_V4)
     if stored_version < 5:
         _migrate_v5(connection)
+    if stored_version < 6:
+        connection.executescript(_MIGRATION_V6_PLAY_HISTORY)
     if stored_version < SCHEMA_VERSION:
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",

@@ -24,14 +24,15 @@ live here.
   soft gain.
 - **Media keys** — play/pause, skip, volume, mute from keyboard and OS (see
   [Media keys](#media-keys-requirement)).
-- Eventually integrate **streaming** (Tidal, Deezer, Qobuz) via provider-specific APIs
+- Integrate **streaming** (Tidal, Deezer, Qobuz) via provider-specific APIs
   (official developer paths where available; see [Streaming](#streaming)).
+  **TIDAL** and **Qobuz** are implemented; **Deezer** is not started.
 - Present sources as **one searchable library** (see [Unified catalog](#unified-catalog)).
 - **Simple** Libadwaita GUI; native GNOME look (not Qt on Linux).
 
 ### Out of scope for v0.1
 
-- Streaming auth and playback.
+- **Deezer** streaming backend.
 - Unified cross-source deduplication (beyond basic federated search).
 - **Playlists** (create, edit, browse) — see [Main window layout](#main-window-layout-minimal).
 - macOS / Windows UI.
@@ -546,6 +547,23 @@ Local library can fully populate the core rails with basic heuristics:
 
 Start with these before implementing sophisticated recommendations.
 
+### Discover → Suggestions (implemented v1)
+
+**Suggestions** is a single merged album grid (same UX as **New Music** — no labeled
+sections). `PlayerService.list_suggestion_items()` concatenates provider lists, dedupes
+by `release.id` (keeping the highest sort key), and caps the result.
+
+Items are collected from TIDAL track radio (when playing TIDAL), **continue listening**
+(`play_history`), TIDAL / Qobuz editorial catalogs, and local **rediscover**, then deduped
+by `release.id` (same provider once; different providers stay separate).
+
+**Sort order** (higher `added_ns` first): all **local** releases, then streaming by source
+name — **Deezer**, **Qobuz**, **TIDAL** (when each is implemented / signed in). Within
+each group, recent plays or catalog order apply.
+
+LLM-based recommendations are out of scope. **Last.fm** (optional later): scrobble from
+`play_history`, similar-artist API, opt-in credentials in Settings.
+
 ---
 
 ## Streaming
@@ -684,6 +702,11 @@ instead of mpv). **AGPL** is unnecessary for a desktop app.
 ## TODO
 
 Trackable open items. Ordered milestones are in [Roadmap](#roadmap-ordered) above.
+
+### Discover / recommendations
+
+- [ ] **Last.fm (optional)** — opt-in scrobbling from `play_history`; use Last.fm
+  similar-artist / recommendation APIs to enrich Suggestions without LLM.
 
 ### Control / integration
 

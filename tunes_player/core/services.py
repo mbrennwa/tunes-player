@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import threading
 import time
 from dataclasses import dataclass
 from queue import Empty, Queue
@@ -17,11 +18,13 @@ from tunes_player.core.home import (
     NEW_MUSIC_LOCAL_LIMIT,
     NEW_MUSIC_MERGE_LIMIT,
     NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
+    SUGGESTIONS_MERGE_LIMIT,
     RecentlyAddedItem,
+    suggestion_added_ns,
 )
 from tunes_player.core.library import LibraryStore, ScanResult
 from tunes_player.core.library.scan_worker import create_scan_process
-from tunes_player.core.models import Album, Release, Track
+from tunes_player.core.models import Album, Release, Source, Track
 from tunes_player.core.playback.engine import EngineEvent, PlaybackEngine
 from tunes_player.core.volume import VolumeController, VolumeEndpoint
 
@@ -93,6 +96,9 @@ class PlayerService:
         self._scan_on_progress: Callable[[int, int, str], None] | None = None
         self._scan_on_finished: Callable[[ScanResult], None] | None = None
         self._scan_on_error: Callable[[Exception], None] | None = None
+        self._last_recorded_track_id: str | None = None
+        self._last_recorded_at_ns = 0
+        self._discover_fetch_lock = threading.Lock()
         data_dir = self._config_manager.data_dir
         self._tidal = TidalClient(
             data_dir / "tidal-session.json",
@@ -142,6 +148,10 @@ class PlayerService:
         return self.list_releases()
 
     def list_recently_added_items(self) -> list[RecentlyAddedItem]:
+        with self._discover_fetch_lock:
+            return self._list_recently_added_items_locked()
+
+    def _list_recently_added_items_locked(self) -> list[RecentlyAddedItem]:
         within_days = self._config_manager.config.new_music_within_days
         items = self._store.list_recently_added_items(
             within_days=within_days,
@@ -174,6 +184,89 @@ class PlayerService:
             key=lambda item: (-item.added_ns, item.release.title.casefold()),
         )
         return deduped[:NEW_MUSIC_MERGE_LIMIT]
+
+    def list_suggestion_items(self) -> list[RecentlyAddedItem]:
+        with self._discover_fetch_lock:
+            return self._list_suggestion_items_locked()
+
+    def _list_suggestion_items_locked(self) -> list[RecentlyAddedItem]:
+        items: list[RecentlyAddedItem] = []
+        track = self._current_track
+        if track is not None and track.id.startswith("tidal:") and self._tidal.is_logged_in():
+            try:
+                for index, item in enumerate(self._tidal.list_similar_items(track.id)):
+                    items.append(
+                        RecentlyAddedItem(
+                            added_ns=suggestion_added_ns(
+                                Source.TIDAL,
+                                index=index,
+                            ),
+                            release=item.release,
+                        ),
+                    )
+            except TidalUnavailableError:
+                pass
+        for release_id, played_ns in self._store.list_continue_listening_entries():
+            release = self.get_release(release_id)
+            if release is None:
+                continue
+            items.append(
+                RecentlyAddedItem(
+                    added_ns=suggestion_added_ns(
+                        release.source,
+                        played_at_ns=played_ns,
+                    ),
+                    release=release,
+                ),
+            )
+        if self._tidal.is_logged_in():
+            try:
+                for index, item in enumerate(self._tidal.list_suggestion_items()):
+                    items.append(
+                        RecentlyAddedItem(
+                            added_ns=suggestion_added_ns(
+                                Source.TIDAL,
+                                index=index,
+                            ),
+                            release=item.release,
+                        ),
+                    )
+            except TidalUnavailableError:
+                pass
+        if self._qobuz.is_logged_in():
+            try:
+                for index, item in enumerate(self._qobuz.list_suggestion_items()):
+                    items.append(
+                        RecentlyAddedItem(
+                            added_ns=suggestion_added_ns(
+                                Source.QOBUZ,
+                                index=index,
+                            ),
+                            release=item.release,
+                        ),
+                    )
+            except QobuzUnavailableError:
+                pass
+        for index, item in enumerate(self._store.list_rediscover_items()):
+            items.append(
+                RecentlyAddedItem(
+                    added_ns=suggestion_added_ns(
+                        Source.LOCAL,
+                        index=index,
+                    ),
+                    release=item.release,
+                ),
+            )
+        by_release_id: dict[str, RecentlyAddedItem] = {}
+        for item in items:
+            existing = by_release_id.get(item.release.id)
+            if existing is None or item.added_ns > existing.added_ns:
+                by_release_id[item.release.id] = item
+        deduped = sorted(
+            by_release_id.values(),
+            key=lambda item: (-item.added_ns, item.release.title.casefold()),
+        )
+        return deduped[:SUGGESTIONS_MERGE_LIMIT]
 
     def get_release(self, release_id: str) -> Release | None:
         if release_id.startswith("tidal:"):
@@ -761,11 +854,50 @@ class PlayerService:
             return
         self._engine_error = None
         self._set_current_track(track)
+        self._record_playback(track)
         engine.load(source.playback_target, start_sec=source.start_sec)
         if not resume:
             engine.pause()
         self._sync_from_engine()
         self._emit("playback_changed", "queue_changed")
+
+    def _record_playback(self, track: Track) -> None:
+        now_ns = time.time_ns()
+        if (
+            track.id == self._last_recorded_track_id
+            and (now_ns - self._last_recorded_at_ns) < 30_000_000_000
+        ):
+            return
+        release_id = self._release_id_for_playback(track)
+        if release_id is None:
+            return
+        self._store.record_play(
+            track_id=track.id,
+            release_id=release_id,
+            source=track.source.value,
+            played_at_ns=now_ns,
+        )
+        self._last_recorded_track_id = track.id
+        self._last_recorded_at_ns = now_ns
+
+    def _release_id_for_playback(self, track: Track) -> str | None:
+        if track.id.startswith("local:"):
+            return self._store.release_id_for_track(track.id)
+        if track.id.startswith("tidal:"):
+            if not self._tidal.is_logged_in():
+                return None
+            try:
+                return self._tidal.release_id_for_track(track.id)
+            except TidalUnavailableError:
+                return None
+        if track.id.startswith("qobuz:"):
+            if not self._qobuz.is_logged_in():
+                return None
+            try:
+                return self._qobuz.release_id_for_track(track.id)
+            except QobuzUnavailableError:
+                return None
+        return None
 
     def _set_current_track(self, track: Track) -> None:
         self._current_track = track

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import threading
+
 import gi
 
 gi.require_version("Adw", "1")
@@ -10,6 +13,7 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.config import ConfigManager
+from tunes_player.core.home import RecentlyAddedItem
 from tunes_player.core.logging_config import configure_logging
 from tunes_player.core.services import PlayerService
 from tunes_player.platform.linux.audio import create_volume_controller
@@ -19,6 +23,7 @@ from tunes_player.ui.gtk.now_playing import NowPlayingBar, attach_media_keys
 from tunes_player.ui.gtk.preferences import PreferencesWindow
 from tunes_player.ui.gtk.util import escape_markup, load_app_css
 from tunes_player.ui.gtk.views import (
+    LoadingDiscoverView,
     PlaceholderView,
     QueueSheet,
     RecentlyAddedGridView,
@@ -38,15 +43,14 @@ _DISCOVER_SECTION_TITLES = {
     "new-music": "New Music",
     "suggestions": "Suggestions",
 }
-_SUGGESTIONS_PLACEHOLDER = (
-    "Suggestions from your library and streaming services will appear here."
-)
 _NAV_ROOT_TAGS = frozenset({"releases-root", "search-root", "discover-root"})
 _NAV_ROOT_TITLES = {
     "releases-root": "Browse",
     "search-root": "Search",
     "discover-root": "Discover",
 }
+
+log = logging.getLogger(__name__)
 
 
 class TunesWindow(Adw.ApplicationWindow):
@@ -57,6 +61,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._search_active = False
         self._discover_current_title = ""
         self._discover_active_section_id: str | None = None
+        self._discover_load_token = 0
         self._preferences: PreferencesWindow | None = None
         self._queue_sheet: QueueSheet | None = None
         self.set_default_size(*_DEFAULT_SIZE)
@@ -354,32 +359,112 @@ class TunesWindow(Adw.ApplicationWindow):
         title = _DISCOVER_SECTION_TITLES.get(section_id, "Discover")
         self._discover_current_title = title
         self._discover_active_section_id = section_id
+        if section_id in ("new-music", "suggestions"):
+            loading_message = (
+                "Loading New Music…"
+                if section_id == "new-music"
+                else "Loading Suggestions…"
+            )
+            self._replace_root_page(
+                self._discover_nav,
+                title=title,
+                tag="discover-root",
+                child=LoadingDiscoverView(message=loading_message),
+            )
+            self._start_discover_load(section_id)
+            return
+        view = PlaceholderView(
+            title=title,
+            message="Not implemented yet.",
+        )
+        self._replace_root_page(
+            self._discover_nav,
+            title=title,
+            tag="discover-root",
+            child=view,
+        )
+
+    def _start_discover_load(self, section_id: str) -> None:
+        self._discover_load_token += 1
+        token = self._discover_load_token
+
+        def work() -> None:
+            try:
+                if section_id == "new-music":
+                    items = self._service.list_recently_added_items()
+                else:
+                    items = self._service.list_suggestion_items()
+                GLib.idle_add(
+                    self._finish_discover_load,
+                    token,
+                    section_id,
+                    items,
+                    None,
+                )
+            except Exception as exc:
+                log.exception("Discover load failed for %s", section_id)
+                GLib.idle_add(
+                    self._finish_discover_load,
+                    token,
+                    section_id,
+                    None,
+                    exc,
+                )
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _discover_empty_message(
+        self,
+        section_id: str,
+        *,
+        items: list[RecentlyAddedItem],
+    ) -> str | None:
+        if items:
+            return None
         if section_id == "new-music":
-            items = self._service.list_recently_added_items()
             days = self._service.config.config.new_music_within_days
-            empty_message = (
+            return (
                 f"Nothing new in the last {days} days.\n"
                 "Scan your library in Settings → Sources, or sign in to TIDAL or Qobuz "
                 "for new releases."
-                if not items
-                else None
             )
-            view = RecentlyAddedGridView(
-                items=items,
-                on_release_activated=self._open_release,
-                empty_message=empty_message,
-                art_loader=self._art_loader,
-                window_inner_width_fn=self._album_grid_inner_width,
+        return (
+            "Play music to build suggestions from your library, or sign in to "
+            "TIDAL or Qobuz in Settings → Sources."
+        )
+
+    def _finish_discover_load(
+        self,
+        token: int,
+        section_id: str,
+        items: list[RecentlyAddedItem] | None,
+        error: BaseException | None,
+    ) -> bool:
+        if token != self._discover_load_token:
+            return False
+        if self._discover_active_section_id != section_id:
+            return False
+        if self._content_stack.get_visible_child_name() != "discover":
+            return False
+
+        title = _DISCOVER_SECTION_TITLES.get(section_id, "Discover")
+        if error is not None:
+            show_error_toast(
+                self._toast_overlay,
+                f"Could not load {title}. Check your connection and sign-in.",
             )
-        elif section_id == "suggestions":
             view = PlaceholderView(
                 title=title,
-                message=_SUGGESTIONS_PLACEHOLDER,
+                message=f"Could not load {title}. Try again in a moment.",
             )
         else:
-            view = PlaceholderView(
-                title=title,
-                message="Not implemented yet.",
+            loaded = items or []
+            view = RecentlyAddedGridView(
+                items=loaded,
+                on_release_activated=self._open_release,
+                empty_message=self._discover_empty_message(section_id, items=loaded),
+                art_loader=self._art_loader,
+                window_inner_width_fn=self._album_grid_inner_width,
             )
         self._replace_root_page(
             self._discover_nav,
@@ -387,6 +472,7 @@ class TunesWindow(Adw.ApplicationWindow):
             tag="discover-root",
             child=view,
         )
+        return False
 
     def _search_for_artist(self, artist_name: str) -> None:
         self._search_entry.set_text(artist_name)
@@ -477,11 +563,10 @@ class TunesWindow(Adw.ApplicationWindow):
         return False
 
     def _refresh_discover_if_needed(self) -> bool:
-        if (
-            self._content_stack.get_visible_child_name() == "discover"
-            and self._discover_active_section_id == "new-music"
-        ):
-            self._show_discover_root("new-music")
+        if self._content_stack.get_visible_child_name() != "discover":
+            return False
+        if self._discover_active_section_id in ("new-music", "suggestions"):
+            self._show_discover_root(self._discover_active_section_id)
         return False
 
     def _open_queue_sheet(self, *_args: object) -> None:

@@ -64,6 +64,40 @@ class PlaceholderView(Gtk.Box):
         box.append(label)
 
 
+class LoadingDiscoverView(Gtk.Box):
+    def __init__(self, *, message: str) -> None:
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
+        self.add_css_class("view")
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, vexpand=True)
+        box.set_valign(Gtk.Align.CENTER)
+        box.set_halign(Gtk.Align.CENTER)
+        box.set_margin_top(24)
+        box.set_margin_bottom(24)
+        box.set_margin_start(24)
+        box.set_margin_end(24)
+        self.append(box)
+
+        self._spinner = Gtk.Spinner()
+        self._spinner.set_halign(Gtk.Align.CENTER)
+        box.append(self._spinner)
+
+        label = Gtk.Label(label=message, justify=Gtk.Justification.CENTER)
+        label.add_css_class("dim-label")
+        label.set_wrap(True)
+        label.set_max_width_chars(52)
+        box.append(label)
+
+        self.connect("map", self._on_map)
+        self.connect("unmap", self._on_unmap)
+
+    def _on_map(self, *_args: object) -> None:
+        self._spinner.start()
+
+    def _on_unmap(self, *_args: object) -> None:
+        self._spinner.stop()
+
+
 def _format_release_track_count(release: Release) -> str | None:
     if release.expected_track_count and release.track_count < release.expected_track_count:
         return f"{release.track_count} / {release.expected_track_count} tracks"

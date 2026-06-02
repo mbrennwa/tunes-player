@@ -15,7 +15,11 @@ from typing import Any
 
 from tunes_player.core.backends.playable import PlayableSource
 from tunes_player.core.backends.qobuz import convert, ids as qobuz_ids
-from tunes_player.core.home import NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT, RecentlyAddedItem
+from tunes_player.core.home import (
+    NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
+    SUGGESTIONS_STREAMING_PER_SOURCE_LIMIT,
+    RecentlyAddedItem,
+)
 from tunes_player.core.models import Release, Track
 
 log = logging.getLogger(__name__)
@@ -28,6 +32,7 @@ VALID_FORMAT_IDS = frozenset({5, 6, 7, 27})
 
 # album/getFeatured types that surface new music (see Qobuz API / streamrip).
 _NEW_RELEASE_FEATURE_TYPES = ("new-releases", "recent-releases")
+_SUGGESTION_FEATURE_TYPES = ("editor-picks", "most-featured")
 
 
 class QobuzUnavailableError(RuntimeError):
@@ -210,6 +215,74 @@ class QobuzClient:
             return []
         items.sort(key=lambda item: item.added_ns, reverse=True)
         return items[:limit]
+
+    def list_suggestion_items(
+        self,
+        *,
+        limit: int = SUGGESTIONS_STREAMING_PER_SOURCE_LIMIT,
+    ) -> list[RecentlyAddedItem]:
+        """Albums from Qobuz editorial / featured rails (not new releases)."""
+        if not self.is_logged_in():
+            return []
+        items: list[RecentlyAddedItem] = []
+        seen: set[str] = set()
+        rank_base = time.time_ns()
+        rank = 0
+        page_size = 100
+        try:
+            for feature_type in _SUGGESTION_FEATURE_TYPES:
+                offset = 0
+                while len(items) < limit:
+                    data = self._api_get(
+                        "album/getFeatured",
+                        {
+                            "type": feature_type,
+                            "limit": min(page_size, limit - len(items)),
+                            "offset": offset,
+                        },
+                    )
+                    albums = data.get("albums") if isinstance(data, dict) else None
+                    if not isinstance(albums, dict):
+                        break
+                    batch = albums.get("items") or []
+                    if not batch:
+                        break
+                    for raw in batch:
+                        if not isinstance(raw, dict):
+                            continue
+                        release = convert.release_from_qobuz(raw)
+                        if release.id in seen:
+                            continue
+                        seen.add(release.id)
+                        items.append(
+                            RecentlyAddedItem(added_ns=rank_base - rank, release=release),
+                        )
+                        rank += 1
+                        if len(items) >= limit:
+                            break
+                    if len(batch) < page_size:
+                        break
+                    offset += page_size
+        except QobuzUnavailableError:
+            raise
+        except Exception:
+            log.exception("Failed to load Qobuz suggestions")
+            return []
+        return items[:limit]
+
+    def release_id_for_track(self, track_id: str) -> str | None:
+        numeric = qobuz_ids.parse_prefixed_id(track_id, "track")
+        if numeric is None:
+            return None
+        try:
+            self._require_login()
+            data = self._api_get("track/get", {"track_id": numeric})
+            album_obj = data.get("album") if isinstance(data, dict) else None
+            if isinstance(album_obj, dict) and album_obj.get("id") is not None:
+                return qobuz_ids.album_id(album_obj["id"])
+        except Exception:
+            log.debug("Could not resolve Qobuz release for track %s", track_id, exc_info=True)
+        return None
 
     def get_release(self, release_id: str) -> Release | None:
         album_id = qobuz_ids.parse_prefixed_id(release_id, "album")
