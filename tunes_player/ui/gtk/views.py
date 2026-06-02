@@ -427,6 +427,7 @@ class ReleaseDetailView(Gtk.Box):
         service: PlayerService,
         release: Release,
         art_loader: ArtLoader | None = None,
+        on_artist_search: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
         self.add_css_class("view")
@@ -479,11 +480,17 @@ class ReleaseDetailView(Gtk.Box):
         title.set_halign(Gtk.Align.START)
         details_text.append(title)
 
-        artist = Gtk.Label(label=release.artist_name, xalign=0.0, ellipsize=3)
-        artist.add_css_class("title-4")
-        artist.add_css_class("dim-label")
-        artist.set_wrap(False)
-        artist.set_halign(Gtk.Align.START)
+        if on_artist_search is not None:
+            artist = _artist_name_link(
+                release.artist_name,
+                on_activate=lambda name=release.artist_name: on_artist_search(name),
+            )
+        else:
+            artist = Gtk.Label(label=release.artist_name, xalign=0.0, ellipsize=3)
+            artist.add_css_class("title-4")
+            artist.add_css_class("dim-label")
+            artist.set_wrap(False)
+            artist.set_halign(Gtk.Align.START)
         details_text.append(artist)
 
         year = str(release.year) if release.year else None
@@ -855,6 +862,24 @@ def _square_art(
         art.set_paintable(None)
     frame.append(art)
     return frame
+
+
+def _artist_name_link(name: str, *, on_activate: Callable[[], None]) -> Gtk.Button:
+    label = Gtk.Label(label=name, xalign=0.0, ellipsize=3)
+    label.add_css_class("title-4")
+    label.add_css_class("dim-label")
+    label.set_wrap(False)
+    label.set_halign(Gtk.Align.START)
+
+    button = Gtk.Button()
+    button.add_css_class("flat")
+    button.add_css_class("artist-link")
+    button.set_child(label)
+    button.set_halign(Gtk.Align.START)
+    button.set_tooltip_text("Search for releases by this artist")
+    button.set_cursor_from_name("pointer")
+    button.connect("clicked", lambda *_args: on_activate())
+    return button
 
 
 def _overlay_label(text: str, *, extra_classes: tuple[str, ...] = ()) -> Gtk.Label:

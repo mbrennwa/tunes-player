@@ -335,6 +335,7 @@ class TunesWindow(Adw.ApplicationWindow):
             service=self._service,
             release=release,
             art_loader=self._art_loader,
+            on_artist_search=self._search_for_artist,
         )
         page = Adw.NavigationPage(
             title=escape_markup(release.title),
@@ -429,6 +430,11 @@ class TunesWindow(Adw.ApplicationWindow):
             tag="discover-root",
             child=view,
         )
+
+    def _search_for_artist(self, artist_name: str) -> None:
+        self._search_entry.set_text(artist_name)
+        if not self._search_active:
+            self._search_button.set_active(True)
 
     def _on_search_toggled(self, button: Gtk.ToggleButton) -> None:
         active = button.get_active()
