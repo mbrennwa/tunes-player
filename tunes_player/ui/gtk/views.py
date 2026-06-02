@@ -415,16 +415,19 @@ class AlbumDetailView(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
         self.add_css_class("view")
 
-        header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
         header.set_margin_top(16)
         header.set_margin_bottom(12)
         header.set_margin_start(18)
         header.set_margin_end(18)
+        header.set_halign(Gtk.Align.START)
+        header.set_hexpand(True)
         self.append(header)
 
         art_box = Gtk.Box()
         art_box.add_css_class("card")
-        art_box.set_halign(Gtk.Align.CENTER)
+        art_box.set_halign(Gtk.Align.START)
+        art_box.set_valign(Gtk.Align.START)
         art_box.append(
             _square_art(
                 album,
@@ -435,39 +438,36 @@ class AlbumDetailView(Gtk.Box):
         )
         header.append(art_box)
 
-        title = Gtk.Label(label=album.title, xalign=0.5, ellipsize=3)
+        details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        details.set_hexpand(False)
+        details.set_halign(Gtk.Align.START)
+        details.set_valign(Gtk.Align.START)
+        header.append(details)
+
+        title = Gtk.Label(label=album.title, xalign=0.0, ellipsize=3)
         title.add_css_class("title-1")
         title.set_wrap(False)
-        title.set_halign(Gtk.Align.CENTER)
-        header.append(title)
+        title.set_halign(Gtk.Align.START)
+        details.append(title)
 
-        artist = Gtk.Label(label=album.artist_name, xalign=0.5, ellipsize=3)
+        artist = Gtk.Label(label=album.artist_name, xalign=0.0, ellipsize=3)
         artist.add_css_class("title-4")
         artist.add_css_class("dim-label")
         artist.set_wrap(False)
-        artist.set_halign(Gtk.Align.CENTER)
-        header.append(artist)
+        artist.set_halign(Gtk.Align.START)
+        details.append(artist)
 
         year = str(album.year) if album.year else None
         track_count = f"{album.track_count} tracks" if album.track_count else None
         info = Gtk.Label(
             label=join_detail(source_label(album.source), year, track_count),
-            xalign=0.5,
+            xalign=0.0,
             ellipsize=3,
         )
         info.add_css_class("dim-label")
         info.set_wrap(False)
-        info.set_halign(Gtk.Align.CENTER)
-        header.append(info)
-
-        play_btn = Gtk.Button()
-        play_btn.set_icon_name("media-playback-start-symbolic")
-        play_btn.add_css_class("suggested-action")
-        play_btn.add_css_class("circular")
-        play_btn.set_halign(Gtk.Align.CENTER)
-        play_btn.set_tooltip_text("Play album")
-        play_btn.connect("clicked", lambda *_: service.play_album(album.id))
-        header.append(play_btn)
+        info.set_halign(Gtk.Align.START)
+        details.append(info)
 
         scrolled = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         self.append(scrolled)
