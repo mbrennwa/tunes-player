@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import concurrent.futures
+import contextlib
 import json
 import logging
 import time
@@ -22,6 +23,18 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 OAuthStatus = Literal["unavailable", "idle", "pending", "success", "failed"]
+
+
+@contextlib.contextmanager
+def _quiet_tidalapi_page_warnings():
+    """tidalapi logs WARNING for home-page item types it does not parse (e.g. TASK)."""
+    page_log = logging.getLogger("tidalapi.page")
+    previous = page_log.level
+    page_log.setLevel(logging.ERROR)
+    try:
+        yield
+    finally:
+        page_log.setLevel(previous)
 
 _STREAM_CACHE_TTL_SEC = 120
 _STREAM_RETRY_ATTEMPTS = 4
@@ -236,8 +249,10 @@ class TidalClient:
             import tidalapi.album as tidal_album_mod
             import tidalapi.media as tidal_media_mod
 
-            page = session.home()
-            for raw in page:
+            with _quiet_tidalapi_page_warnings():
+                page = session.home()
+                home_items = list(page)
+            for raw in home_items:
                 try:
                     added_ns = time.time_ns()
                     if isinstance(raw, tidal_album_mod.Album):

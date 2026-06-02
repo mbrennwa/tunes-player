@@ -35,18 +35,19 @@ from tunes_player.ui.gtk.album_grid import (
 
 _DEFAULT_SIZE = (960, 640)
 _SIDEBAR_WIDTH_PADDING_SP = 16.0
-_HOME_ROOT_TITLES = {
-    "home-continue": "Continue listening",
-    "home-recently-added": "Recently added",
-    "home-favorites": "Favorites",
-    "home-suggested": "Suggested",
+_DISCOVER_SECTION_TITLES = {
+    "new-music": "New Music",
+    "suggestions": "Suggestions",
 }
-_NAV_ROOT_TAGS = frozenset({"releases-root", "artists-root", "search-root", "home-root"})
+_SUGGESTIONS_PLACEHOLDER = (
+    "Suggestions from your library and streaming services will appear here."
+)
+_NAV_ROOT_TAGS = frozenset({"releases-root", "artists-root", "search-root", "discover-root"})
 _NAV_ROOT_TITLES = {
     "releases-root": "Releases",
     "artists-root": "Artists",
     "search-root": "Search",
-    "home-root": "Home",
+    "discover-root": "Discover",
 }
 
 
@@ -56,8 +57,8 @@ class TunesWindow(Adw.ApplicationWindow):
         self._service = service
         self._art_loader = ArtLoader(service.config.data_dir)
         self._search_active = False
-        self._home_current_title = "Home"
-        self._home_active_section_id: str | None = None
+        self._discover_current_title = ""
+        self._discover_active_section_id: str | None = None
         self._preferences: PreferencesWindow | None = None
         self._queue_sheet: QueueSheet | None = None
         self.set_default_size(*_DEFAULT_SIZE)
@@ -128,68 +129,6 @@ class TunesWindow(Adw.ApplicationWindow):
         self._sidebar_shell.append(self._sidebar_box)
 
         self._sidebar_rows: dict[str, Gtk.ListBoxRow] = {}
-        self._sidebar_last_selected: str = "releases"
-
-        self._sidebar_home_list = Gtk.ListBox()
-        self._sidebar_home_list.add_css_class("navigation-sidebar")
-        self._sidebar_home_list.set_selection_mode(Gtk.SelectionMode.NONE)
-        self._sidebar_box.append(self._sidebar_home_list)
-
-        home_row = Adw.ActionRow(title="Home")
-        home_row.set_activatable(True)
-        home_row.add_prefix(Gtk.Image.new_from_icon_name("go-home-symbolic"))
-        self._sidebar_home_list.append(home_row)
-
-        self._home_children_revealer = Gtk.Revealer()
-        self._home_children_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
-        self._home_children_revealer.set_reveal_child(False)
-        self._sidebar_box.append(self._home_children_revealer)
-
-        self._home_children_list = Gtk.ListBox()
-        self._home_children_list.add_css_class("navigation-sidebar")
-        self._home_children_list.add_css_class("home-subnav")
-        self._home_children_list.set_selection_mode(Gtk.SelectionMode.NONE)
-        self._home_children_revealer.set_child(self._home_children_list)
-
-        def add_home_child(*, section_id: str, title: str, icon: str) -> None:
-            row = Adw.ActionRow(title=title)
-            row.set_activatable(True)
-            row.add_css_class("home-subnav-row")
-            row.add_prefix(Gtk.Image.new_from_icon_name(icon))
-            self._home_children_list.append(row)
-            self._sidebar_rows[section_id] = row
-            row.connect("activated", lambda _row, sid=section_id: self._on_sidebar_activated(sid))
-
-        add_home_child(
-            section_id="home-continue",
-            title=_HOME_ROOT_TITLES["home-continue"],
-            icon="media-playback-start-symbolic",
-        )
-        add_home_child(
-            section_id="home-recently-added",
-            title=_HOME_ROOT_TITLES["home-recently-added"],
-            icon="list-add-symbolic",
-        )
-        add_home_child(
-            section_id="home-favorites",
-            title=_HOME_ROOT_TITLES["home-favorites"],
-            icon="starred-symbolic",
-        )
-        add_home_child(
-            section_id="home-suggested",
-            title=_HOME_ROOT_TITLES["home-suggested"],
-            icon="applications-science-symbolic",
-        )
-
-        def toggle_home(_row: Adw.ActionRow) -> None:
-            self._home_children_revealer.set_reveal_child(
-                not self._home_children_revealer.get_reveal_child()
-            )
-            # Home does not navigate; restore selection to the last real section.
-            self._sidebar_nav_list.select_row(self._sidebar_rows.get(self._sidebar_last_selected))
-            GLib.idle_add(self._apply_fixed_sidebar_width)
-
-        home_row.connect("activated", toggle_home)
 
         self._sidebar_nav_list = Gtk.ListBox()
         self._sidebar_nav_list.add_css_class("navigation-sidebar")
@@ -198,9 +137,10 @@ class TunesWindow(Adw.ApplicationWindow):
         self._sidebar_box.append(self._sidebar_nav_list)
 
         for section_id, label, icon in (
+            ("new-music", "New Music", "list-add-symbolic"),
+            ("suggestions", "Suggestions", "applications-science-symbolic"),
             ("releases", "Releases", "media-optical-symbolic"),
             ("artists", "Artists", "avatar-default-symbolic"),
-            ("queue", "Queue", "view-list-symbolic"),
         ):
             row = Adw.ActionRow(title=label)
             row.set_activatable(True)
@@ -230,14 +170,14 @@ class TunesWindow(Adw.ApplicationWindow):
         self._content_stack.set_vexpand(True)
         self._releases_nav = Adw.NavigationView()
         self._artists_nav = Adw.NavigationView()
-        self._home_nav = Adw.NavigationView()
-        for nav in (self._releases_nav, self._artists_nav, self._home_nav):
+        self._discover_nav = Adw.NavigationView()
+        for nav in (self._releases_nav, self._artists_nav, self._discover_nav):
             nav.connect("notify::visible-page", self._on_nav_visible_page_changed)
         self._search_nav = Adw.NavigationView()
         self._search_nav.connect("notify::visible-page", self._on_nav_visible_page_changed)
         self._content_stack.add_named(self._releases_nav, "releases")
         self._content_stack.add_named(self._artists_nav, "artists")
-        self._content_stack.add_named(self._home_nav, "home")
+        self._content_stack.add_named(self._discover_nav, "discover")
         self._content_stack.add_named(self._search_nav, "search")
 
         content_page = Adw.NavigationPage(title="", child=self._content_stack, tag="content")
@@ -272,14 +212,7 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _compute_sidebar_width_sp(self) -> float:
         max_nat = 0
-        list_boxes: list[Gtk.ListBox] = [
-            self._sidebar_home_list,
-            self._sidebar_nav_list,
-            self._sidebar_settings_list,
-        ]
-        if self._home_children_revealer.get_reveal_child():
-            list_boxes.insert(1, self._home_children_list)
-        for list_box in list_boxes:
+        for list_box in (self._sidebar_nav_list, self._sidebar_settings_list):
             row = list_box.get_first_child()
             while row is not None:
                 _min_w, nat_w, _min_baseline, _nat_baseline = row.measure(
@@ -417,6 +350,9 @@ class TunesWindow(Adw.ApplicationWindow):
         elif visible == "artists":
             nav = self._artists_nav
             self._pop_to_root(nav)
+        elif visible == "discover":
+            nav = self._discover_nav
+            self._pop_to_root(nav)
         else:
             nav = self._releases_nav
             self._pop_to_root(nav)
@@ -441,35 +377,30 @@ class TunesWindow(Adw.ApplicationWindow):
         self._sync_header_with_nav()
 
     def _on_sidebar_activated(self, section_id: str) -> None:
-        if section_id == "queue":
-            self._open_queue_sheet()
-            return
-        if section_id in _HOME_ROOT_TITLES:
+        if section_id in _DISCOVER_SECTION_TITLES:
             if self._search_active:
                 self._search_button.set_active(False)
-            self._show_home_root(section_id)
-            self._content_stack.set_visible_child_name("home")
+            self._show_discover_root(section_id)
+            self._content_stack.set_visible_child_name("discover")
             self._sync_header_with_nav()
             return
         if self._search_active:
             self._search_button.set_active(False)
         if section_id == "releases":
-            self._sidebar_last_selected = "releases"
             self._pop_to_root(self._releases_nav)
         elif section_id == "artists":
-            self._sidebar_last_selected = "artists"
             self._pop_to_root(self._artists_nav)
         self._content_stack.set_visible_child_name(section_id)
         self._sync_header_with_nav()
 
-    def _show_home_root(self, section_id: str) -> None:
-        title = _HOME_ROOT_TITLES.get(section_id, "Home")
-        self._home_current_title = title
-        self._home_active_section_id = section_id
-        if section_id == "home-recently-added":
+    def _show_discover_root(self, section_id: str) -> None:
+        title = _DISCOVER_SECTION_TITLES.get(section_id, "Discover")
+        self._discover_current_title = title
+        self._discover_active_section_id = section_id
+        if section_id == "new-music":
             items = self._service.list_recently_added_items()
             empty_message = (
-                "Nothing added recently.\n"
+                "Nothing new in the last 30 days.\n"
                 "Scan your library in Settings → Sources, or sign in to TIDAL for new releases."
                 if not items
                 else None
@@ -481,15 +412,20 @@ class TunesWindow(Adw.ApplicationWindow):
                 art_loader=self._art_loader,
                 window_inner_width_fn=self._album_grid_inner_width,
             )
+        elif section_id == "suggestions":
+            view = PlaceholderView(
+                title=title,
+                message=_SUGGESTIONS_PLACEHOLDER,
+            )
         else:
             view = PlaceholderView(
                 title=title,
                 message="Not implemented yet.",
             )
         self._replace_root_page(
-            self._home_nav,
+            self._discover_nav,
             title=title,
-            tag="home-root",
+            tag="discover-root",
             child=view,
         )
 
@@ -566,7 +502,7 @@ class TunesWindow(Adw.ApplicationWindow):
         if event == "library_updated":
             GLib.idle_add(self._refresh_library_after_scan)
         elif event == "sources_changed":
-            GLib.idle_add(self._refresh_home_if_needed)
+            GLib.idle_add(self._refresh_discover_if_needed)
         return False
 
     def _refresh_library_after_scan(self) -> bool:
@@ -578,15 +514,15 @@ class TunesWindow(Adw.ApplicationWindow):
         self._show_artists_root()
         if self._search_active:
             self._refresh_search()
-        GLib.idle_add(self._refresh_home_if_needed)
+        GLib.idle_add(self._refresh_discover_if_needed)
         return False
 
-    def _refresh_home_if_needed(self) -> bool:
+    def _refresh_discover_if_needed(self) -> bool:
         if (
-            self._content_stack.get_visible_child_name() == "home"
-            and self._home_active_section_id == "home-recently-added"
+            self._content_stack.get_visible_child_name() == "discover"
+            and self._discover_active_section_id == "new-music"
         ):
-            self._show_home_root("home-recently-added")
+            self._show_discover_root("new-music")
         return False
 
     def _open_queue_sheet(self, *_args: object) -> None:
@@ -609,8 +545,8 @@ class TunesWindow(Adw.ApplicationWindow):
             return self._releases_nav
         if section == "artists":
             return self._artists_nav
-        if section == "home":
-            return self._home_nav
+        if section == "discover":
+            return self._discover_nav
         return None
 
     def _nav_at_root(self, nav: Adw.NavigationView) -> bool:
@@ -643,8 +579,8 @@ class TunesWindow(Adw.ApplicationWindow):
             self._window_title.set_title("Tunes")
             return
         if at_root:
-            if self._content_stack.get_visible_child_name() == "home":
-                self._window_title.set_title(self._home_current_title or "Home")
+            if self._content_stack.get_visible_child_name() == "discover":
+                self._window_title.set_title(self._discover_current_title or "Discover")
             else:
                 self._window_title.set_title(_NAV_ROOT_TITLES.get(page.get_tag(), "Tunes"))
             return

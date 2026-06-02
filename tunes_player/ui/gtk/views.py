@@ -39,27 +39,6 @@ _ALBUM_DETAIL_ART_SIZE = 220
 _ALBUM_TILE_DEFAULT_EDGE = 200
 
 
-class RecentlyAddedGridView(Gtk.ScrolledWindow):
-    def __init__(
-        self,
-        *,
-        items: list[RecentlyAddedItem],
-        on_release_activated: Callable[[str], None],
-        empty_message: str | None = None,
-        art_loader: ArtLoader | None = None,
-        window_inner_width_fn: Callable[[], int] | None = None,
-    ) -> None:
-        releases = [item.release for item in items]
-        ReleaseGridView.__init__(
-            self,
-            releases=releases,
-            on_release_activated=on_release_activated,
-            empty_message=empty_message,
-            art_loader=art_loader,
-            window_inner_width_fn=window_inner_width_fn,
-        )
-
-
 class PlaceholderView(Gtk.Box):
     def __init__(self, *, title: str, message: str) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
@@ -156,7 +135,6 @@ class ReleaseGridView(Gtk.ScrolledWindow):
         grid: ReleaseTileGrid,
         releases: list[Release],
         on_release_activated: Callable[[str], None],
-        *,
         art_loader: ArtLoader | None = None,
         start: int = 0,
         batch_size: int = 24,
@@ -172,15 +150,16 @@ class ReleaseGridView(Gtk.ScrolledWindow):
             )
 
         if end < len(releases):
+            # GLib.idle_add only forwards positional arguments to the callback.
             GLib.idle_add(
                 ReleaseGridView._populate_releases,
                 grid,
                 releases,
                 on_release_activated,
                 art_loader,
-                start=end,
-                batch_size=batch_size,
-                small=small,
+                end,
+                batch_size,
+                small,
             )
             GLib.idle_add(grid._sync_layout_idle)
         else:
@@ -226,6 +205,25 @@ class ReleaseGridView(Gtk.ScrolledWindow):
 
     def _on_viewport_width_changed(self, *_args: object) -> None:
         GLib.idle_add(self._tile_grid._sync_layout_idle)
+
+
+class RecentlyAddedGridView(ReleaseGridView):
+    def __init__(
+        self,
+        *,
+        items: list[RecentlyAddedItem],
+        on_release_activated: Callable[[str], None],
+        empty_message: str | None = None,
+        art_loader: ArtLoader | None = None,
+        window_inner_width_fn: Callable[[], int] | None = None,
+    ) -> None:
+        super().__init__(
+            releases=[item.release for item in items],
+            on_release_activated=on_release_activated,
+            empty_message=empty_message,
+            art_loader=art_loader,
+            window_inner_width_fn=window_inner_width_fn,
+        )
 
 
 class ArtistListView(Gtk.ScrolledWindow):

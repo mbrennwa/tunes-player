@@ -42,12 +42,3 @@
   color: rgba(255, 255, 255, 0.88);
   font-size: 0.75em;
 }
-
-/* Sidebar: Home sub-navigation should read as nested items */
-.home-subnav {
-  margin-left: 14px;
-}
-
-.home-subnav-row {
-  opacity: 0.92;
-}
