@@ -121,6 +121,7 @@ class ReleaseGridView(Gtk.ScrolledWindow):
         *,
         releases: list[Release],
         on_release_activated: Callable[[str], None],
+        on_release_play: Callable[[str], None],
         empty_message: str | None = None,
         art_loader: ArtLoader | None = None,
         window_inner_width_fn: Callable[[], int] | None = None,
@@ -161,6 +162,7 @@ class ReleaseGridView(Gtk.ScrolledWindow):
             grid,
             releases,
             on_release_activated,
+            on_release_play,
             art_loader=art_loader,
         )
 
@@ -169,6 +171,7 @@ class ReleaseGridView(Gtk.ScrolledWindow):
         grid: ReleaseTileGrid,
         releases: list[Release],
         on_release_activated: Callable[[str], None],
+        on_release_play: Callable[[str], None],
         art_loader: ArtLoader | None = None,
         start: int = 0,
         batch_size: int = 24,
@@ -179,6 +182,7 @@ class ReleaseGridView(Gtk.ScrolledWindow):
             grid.append_release(
                 release,
                 on_activate=lambda release_id=release.id: on_release_activated(release_id),
+                on_play=lambda release_id=release.id: on_release_play(release_id),
                 art_loader=art_loader,
                 small=small,
             )
@@ -190,6 +194,7 @@ class ReleaseGridView(Gtk.ScrolledWindow):
                 grid,
                 releases,
                 on_release_activated,
+                on_release_play,
                 art_loader,
                 end,
                 batch_size,
@@ -247,6 +252,7 @@ class RecentlyAddedGridView(ReleaseGridView):
         *,
         items: list[RecentlyAddedItem],
         on_release_activated: Callable[[str], None],
+        on_release_play: Callable[[str], None],
         empty_message: str | None = None,
         art_loader: ArtLoader | None = None,
         window_inner_width_fn: Callable[[], int] | None = None,
@@ -258,6 +264,7 @@ class RecentlyAddedGridView(ReleaseGridView):
         super().__init__(
             releases=[item.release for item in newest_first],
             on_release_activated=on_release_activated,
+            on_release_play=on_release_play,
             empty_message=empty_message,
             art_loader=art_loader,
             window_inner_width_fn=window_inner_width_fn,
@@ -314,6 +321,9 @@ class SearchResultsView(Gtk.ScrolledWindow):
             release_grid.append_release(
                 release,
                 on_activate=lambda release_id=release.id: on_release_activated(release_id),
+                on_play=lambda release_id=release.id: service.play_release(
+                    release_id, start_index=0
+                ),
                 art_loader=art_loader,
                 small=True,
             )
@@ -459,12 +469,16 @@ class ReleaseDetailView(Gtk.Box):
         art_box.add_css_class("card")
         art_box.set_halign(Gtk.Align.START)
         art_box.set_valign(Gtk.Align.START)
+        tracks = service.get_release_tracks(release.id)
+
         art_box.append(
-            _square_art(
+            _square_art_with_play(
                 release,
                 size=_ALBUM_DETAIL_ART_SIZE,
                 art_loader=art_loader,
                 css_class="album-detail-art",
+                on_play=lambda: service.play_release(release.id, start_index=0),
+                playable=bool(tracks),
             )
         )
         header_row.append(art_box)
@@ -474,7 +488,6 @@ class ReleaseDetailView(Gtk.Box):
         details_column.set_vexpand(False)
         details_column.set_halign(Gtk.Align.START)
         details_column.set_valign(Gtk.Align.START)
-        details_column.set_size_request(-1, _ALBUM_DETAIL_ART_SIZE)
         header_row.append(details_column)
 
         details_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -526,25 +539,6 @@ class ReleaseDetailView(Gtk.Box):
             status.add_css_class("dim-label")
             status.set_halign(Gtk.Align.START)
             details_text.append(status)
-
-        tracks = service.get_release_tracks(release.id)
-
-        details_spacer = Gtk.Box()
-        details_spacer.set_vexpand(True)
-        details_column.append(details_spacer)
-
-        play_btn = Gtk.Button()
-        play_btn.add_css_class("suggested-action")
-        play_btn.add_css_class("circular")
-        play_btn.set_icon_name("media-playback-start-symbolic")
-        play_btn.set_halign(Gtk.Align.START)
-        play_btn.set_tooltip_text("Play release")
-        play_btn.set_sensitive(bool(tracks))
-        play_btn.connect(
-            "clicked",
-            lambda *_: service.play_release(release.id, start_index=0),
-        )
-        details_column.append(play_btn)
 
         scrolled = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         scrolled.set_margin_top(0)
@@ -764,11 +758,13 @@ class ReleaseTileGrid(Gtk.Box):
         release: Release,
         *,
         on_activate: Callable[[], None],
+        on_play: Callable[[], None],
         art_loader: ArtLoader | None,
         small: bool = False,
     ) -> None:
         card = _release_card(
             release,
+            on_play=on_play,
             art_loader=art_loader,
             small=small,
             edge=self._tile_edge,
@@ -830,29 +826,90 @@ def _apply_album_tile_size(card: Gtk.Widget, edge: int) -> None:
     card.set_size_request(edge, edge)
 
 
+def _picked_is_release_art_play(widget: Gtk.Widget, x: float, y: float) -> bool:
+    picked = widget.pick(x, y, Gtk.PickFlags.DEFAULT)
+    while picked is not None:
+        if picked.has_css_class("release-art-play"):
+            return True
+        picked = picked.get_parent()
+    return False
+
+
 def _attach_album_card_activate(tile: Gtk.Widget, callback: Callable[[], None]) -> None:
     gesture = Gtk.GestureClick()
-    gesture.connect("released", lambda *_args: callback())
+
+    def _on_released(_gesture: Gtk.GestureClick, _n_press: int, x: float, y: float) -> None:
+        if _picked_is_release_art_play(tile, x, y):
+            return
+        callback()
+
+    gesture.connect("released", _on_released)
     tile.add_controller(gesture)
     tile.set_focusable(True)
     tile.set_cursor_from_name("pointer")
 
 
-def _square_art(
+def _create_release_art_play_button(
+    *,
+    on_play: Callable[[], None],
+    playable: bool,
+    compact: bool = False,
+) -> Gtk.Button:
+    btn = Gtk.Button()
+    btn.add_css_class("circular")
+    btn.add_css_class("suggested-action")
+    btn.add_css_class("release-art-play")
+    if compact:
+        btn.add_css_class("release-art-play-compact")
+    btn.set_icon_name("media-playback-start-symbolic")
+    btn.set_tooltip_text("Play release")
+    btn.set_focusable(True)
+    btn.set_sensitive(playable)
+    btn.set_halign(Gtk.Align.START)
+    btn.set_valign(Gtk.Align.START)
+    btn.set_margin_start(8)
+    btn.set_margin_top(8)
+    btn.connect("clicked", lambda *_args: on_play())
+    return btn
+
+
+def _attach_release_art_play(
+    overlay: Gtk.Overlay,
+    *,
+    on_play: Callable[[], None],
+    playable: bool,
+    compact: bool = False,
+) -> Gtk.Button:
+    btn = _create_release_art_play_button(on_play=on_play, playable=playable, compact=compact)
+    overlay.add_overlay(btn)
+    return btn
+
+
+def _square_art_with_play(
     release: Release,
     *,
     size: int,
     art_loader: ArtLoader | None,
     css_class: str = "album-card-art",
+    on_play: Callable[[], None] | None = None,
+    playable: bool = True,
 ) -> Gtk.Widget:
-    """Fixed square cover for release detail header (fills with cover art)."""
+    """Fixed square cover with optional top-left play overlay."""
     frame = Gtk.Box()
     frame.add_css_class(css_class)
+    frame.add_css_class("release-art-shell")
     frame.set_size_request(size, size)
     frame.set_halign(Gtk.Align.FILL)
     frame.set_valign(Gtk.Align.START)
     frame.set_hexpand(False)
     frame.set_vexpand(False)
+
+    overlay = Gtk.Overlay()
+    overlay.set_halign(Gtk.Align.FILL)
+    overlay.set_valign(Gtk.Align.FILL)
+    overlay.set_hexpand(False)
+    overlay.set_vexpand(False)
+    frame.append(overlay)
 
     art = Gtk.Picture()
     art.set_halign(Gtk.Align.FILL)
@@ -867,7 +924,11 @@ def _square_art(
         art_loader.set_picture(art, release.art_uri, pixel_size=size)
     else:
         art.set_paintable(None)
-    frame.append(art)
+    overlay.set_child(art)
+
+    if on_play is not None:
+        _attach_release_art_play(overlay, on_play=on_play, playable=playable, compact=False)
+
     return frame
 
 
@@ -901,6 +962,7 @@ def _overlay_label(text: str, *, extra_classes: tuple[str, ...] = ()) -> Gtk.Lab
 def _release_card(
     release: Release,
     *,
+    on_play: Callable[[], None],
     small: bool = False,
     art_loader: ArtLoader | None = None,
     edge: int = _ALBUM_TILE_DEFAULT_EDGE,
@@ -945,6 +1007,13 @@ def _release_card(
     load_pixels = _ALBUM_TILE_ART_PIXELS_SMALL if small else _ALBUM_TILE_ART_PIXELS
     if art_loader is not None:
         art_loader.set_picture(picture, release.art_uri, pixel_size=load_pixels)
+
+    _attach_release_art_play(
+        overlay,
+        on_play=on_play,
+        playable=release.track_count > 0,
+        compact=True,
+    )
 
     labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
     labels.add_css_class("album-card-overlay")

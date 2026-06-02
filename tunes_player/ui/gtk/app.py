@@ -298,6 +298,9 @@ class TunesWindow(Adw.ApplicationWindow):
         view = ReleaseGridView(
             releases=releases,
             on_release_activated=self._open_release,
+            on_release_play=lambda release_id: self._service.play_release(
+                release_id, start_index=0
+            ),
             empty_message=empty_message,
             art_loader=self._art_loader,
             window_inner_width_fn=self._album_grid_inner_width,
@@ -462,6 +465,9 @@ class TunesWindow(Adw.ApplicationWindow):
             view = RecentlyAddedGridView(
                 items=loaded,
                 on_release_activated=self._open_release,
+                on_release_play=lambda release_id: self._service.play_release(
+                    release_id, start_index=0
+                ),
                 empty_message=self._discover_empty_message(section_id, items=loaded),
                 art_loader=self._art_loader,
                 window_inner_width_fn=self._album_grid_inner_width,

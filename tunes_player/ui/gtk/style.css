@@ -53,3 +53,23 @@ button.artist-link {
 button.artist-link:hover label {
   text-decoration: underline;
 }
+
+/* Play-on-art: hidden until hover or keyboard focus within shell */
+.album-card-shell .release-art-play,
+.release-art-shell .release-art-play {
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+
+.album-card-shell:hover .release-art-play,
+.album-card-shell:focus-within .release-art-play,
+.release-art-shell:hover .release-art-play,
+.release-art-shell:focus-within .release-art-play {
+  opacity: 1;
+}
+
+.release-art-play-compact {
+  padding: 6px;
+  min-width: 32px;
+  min-height: 32px;
+}
