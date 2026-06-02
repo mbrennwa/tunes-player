@@ -415,9 +415,9 @@ class AlbumDetailView(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
         self.add_css_class("view")
 
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
-        header.set_margin_top(16)
-        header.set_margin_bottom(12)
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        header.set_margin_top(12)
+        header.set_margin_bottom(6)
         header.set_margin_start(18)
         header.set_margin_end(18)
         header.set_halign(Gtk.Align.START)
@@ -470,11 +470,14 @@ class AlbumDetailView(Gtk.Box):
         details.append(info)
 
         scrolled = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        scrolled.set_margin_top(0)
         self.append(scrolled)
 
         list_box = Gtk.ListBox()
         list_box.add_css_class("boxed-list")
         list_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        list_box.set_valign(Gtk.Align.START)
+        list_box.set_vexpand(False)
         list_box.connect(
             "row-activated",
             lambda _box, row: service.play_track(row.track_id),
@@ -765,23 +768,28 @@ def _square_art(
     art_loader: ArtLoader | None,
     css_class: str = "album-card-art",
 ) -> Gtk.Widget:
-    """Fixed square cover for album detail header."""
+    """Fixed square cover for album detail header (fills with cover art)."""
     frame = Gtk.Box()
     frame.add_css_class(css_class)
     frame.set_size_request(size, size)
     frame.set_halign(Gtk.Align.FILL)
     frame.set_valign(Gtk.Align.START)
+    frame.set_hexpand(False)
+    frame.set_vexpand(False)
 
-    art = Gtk.Image.new_from_icon_name("audio-x-generic-symbolic")
+    art = Gtk.Picture()
     art.set_halign(Gtk.Align.FILL)
     art.set_valign(Gtk.Align.FILL)
-    art.set_hexpand(True)
-    art.set_vexpand(True)
-    art.set_size_request(size, size)
+    # Critical: do not let the cover expand horizontally in the header row.
+    # The frame has a fixed square size; expanding here would push album details away.
+    art.set_hexpand(False)
+    art.set_vexpand(False)
+    art.set_can_shrink(True)
+    art.set_content_fit(Gtk.ContentFit.COVER)
     if art_loader is not None:
-        art_loader.set_image(art, album.art_uri, pixel_size=size)
+        art_loader.set_picture(art, album.art_uri, pixel_size=size)
     else:
-        art.set_pixel_size(size)
+        art.set_paintable(None)
     frame.append(art)
     return frame
 
