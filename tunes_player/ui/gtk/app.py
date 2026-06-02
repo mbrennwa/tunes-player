@@ -137,9 +137,9 @@ class TunesWindow(Adw.ApplicationWindow):
         self._sidebar_box.append(self._sidebar_nav_list)
 
         for section_id, label, icon in (
-            ("new-music", "New Music", "list-add-symbolic"),
-            ("suggestions", "Suggestions", "applications-science-symbolic"),
             ("releases", "Browse", "media-optical-symbolic"),
+            ("new-music", "New Music", "starred-symbolic"),
+            ("suggestions", "Suggestions", "dialog-question-symbolic"),
             ("artists", "Artists", "avatar-default-symbolic"),
         ):
             row = Adw.ActionRow(title=label)
