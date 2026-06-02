@@ -205,11 +205,28 @@ lyrics, streaming source badges in browse views.
 `AdwPreferencesWindow` with one page per concern — **not** one flat list. Streaming
 accounts do **not** belong under **Library → Music folders** (local scan paths only).
 
+**Unifying principle:** Local files and streaming services are both **sources** of music.
+Settings should reflect the same mental model as the app: one library surface, multiple
+providers. Avoid a UI where local vs remote feels like separate “modes”.
+
 | Page | v0.1 | Later |
 |------|------|-------|
 | **Library** | Music folders, scan options | Watch folders, rescan |
 | **Sources** | — | Tidal, Deezer, Qobuz: per-service connect/disconnect; see [Settings](#settings-preferences-window) |
 | **Audio** | Bit-perfect toggle, output device (placeholders today) | Local sink (PipeWire/ALSA), UPnP renderer, endpoint volume |
+
+**Suggested GUI structure (unified, scalable):**
+
+- **Library**: where the user’s music comes from
+  - **Local files** (group): folders, scan/rescan, watch folders (later)
+  - **Streaming services** (group): one row per provider with connect/disconnect and
+    status (“connected as …”), plus enable/disable toggles
+- **Playback & audio**: output device, endpoint volume behavior, bit-perfect profile
+- **Appearance**: UI preferences (later)
+- **Advanced / Diagnostics**: logs, cache size, reset library index (later)
+
+This keeps “Library” as the user’s mental entry point while still separating filesystem
+paths from account credentials inside the page via **PreferencesGroup** sections.
 
 **Sources page (when streaming lands):**
 
@@ -468,6 +485,66 @@ UI never polls mpv properties directly.
 
 **Prefer local:** when the same album exists locally and on a service, default play
 local file (match on normalized artist/title or MBID later).
+
+---
+
+## Home content (local + streaming)
+
+Tunes should not copy any one provider’s “home” page. Instead, the UI presents a set
+of generic **Home rails** (sections) populated by multiple **providers** (Local,
+Tidal, Deezer, Qobuz).
+
+### Rails (v1 shape)
+
+Each provider can implement any subset:
+
+- **Continue listening** — recently played tracks/albums.
+- **Recently added** — local imports, and/or service new releases.
+- **Favorites** — starred/liked content.
+- **New releases** — service catalog rails (not applicable to local).
+- **Featured / editorial** — service picks (not applicable to local).
+- **Recommendations** — optional later; service API or local heuristics.
+
+### Provider interface (conceptual)
+
+Backends expose a small, optional “home” surface (in addition to search and
+`PlayableSource` resolution):
+
+- `get_recently_played()`
+- `get_recently_added()`
+- `get_favorites()`
+- `get_new_releases()` (service-only)
+- `get_featured()` (service-only)
+- `get_recommendations()` (later)
+
+Items returned are normalized to core models and use opaque IDs:
+`local:…`, `tidal:…`, `deezer:…`, `qobuz:…`.
+
+### Aggregation rules
+
+Home is an aggregation layer in `core/catalog/` (or a dedicated `core/home/` module),
+not something implemented separately per UI.
+
+- **Normalize** to common item types (track/album/playlist), `art_uri: str`, and
+  `provider_id`.
+- **Deduplicate** where possible:
+  - Strong: MusicBrainz IDs / ISRC / UPC (phase C work).
+  - Fallback: normalized artist/title/year string match (phase B).
+- **Rank** simply (v1): recency (played/added), user preference signals (likes, play
+  count), and an optional “available locally” boost.
+- **Badge source** in UI so users can see why an item appears (Local/Tidal/Deezer/Qobuz).
+
+### Local rails (easy wins; no recommender needed)
+
+Local library can fully populate the core rails with basic heuristics:
+
+- **Continue listening (local)**: last played items from local playback history.
+- **Recently added (local)**: albums imported in the last \(N\) days.
+- **Favorites (local)**: starred items (or rating threshold if implemented).
+- **Rediscover (local)**: highly-rated items not played recently (e.g.
+  `rating >= 4 AND last_played < now-18months`).
+
+Start with these before implementing sophisticated recommendations.
 
 ---
 
