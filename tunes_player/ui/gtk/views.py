@@ -431,14 +431,21 @@ class ReleaseDetailView(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
         self.add_css_class("view")
 
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
         header.set_margin_top(12)
         header.set_margin_bottom(6)
         header.set_margin_start(18)
         header.set_margin_end(18)
-        header.set_halign(Gtk.Align.START)
+        header.set_vexpand(False)
         header.set_hexpand(True)
         self.append(header)
+
+        header_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        header_row.set_halign(Gtk.Align.START)
+        header_row.set_valign(Gtk.Align.START)
+        header_row.set_hexpand(False)
+        header_row.set_vexpand(False)
+        header.append(header_row)
 
         art_box = Gtk.Box()
         art_box.add_css_class("card")
@@ -452,26 +459,32 @@ class ReleaseDetailView(Gtk.Box):
                 css_class="album-detail-art",
             )
         )
-        header.append(art_box)
+        header_row.append(art_box)
 
-        details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        details.set_hexpand(False)
-        details.set_halign(Gtk.Align.START)
-        details.set_valign(Gtk.Align.START)
-        header.append(details)
+        details_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        details_column.set_hexpand(False)
+        details_column.set_vexpand(False)
+        details_column.set_halign(Gtk.Align.START)
+        details_column.set_valign(Gtk.Align.START)
+        details_column.set_size_request(-1, _ALBUM_DETAIL_ART_SIZE)
+        header_row.append(details_column)
+
+        details_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        details_text.set_halign(Gtk.Align.START)
+        details_column.append(details_text)
 
         title = Gtk.Label(label=release.title, xalign=0.0, ellipsize=3)
         title.add_css_class("title-1")
         title.set_wrap(False)
         title.set_halign(Gtk.Align.START)
-        details.append(title)
+        details_text.append(title)
 
         artist = Gtk.Label(label=release.artist_name, xalign=0.0, ellipsize=3)
         artist.add_css_class("title-4")
         artist.add_css_class("dim-label")
         artist.set_wrap(False)
         artist.set_halign(Gtk.Align.START)
-        details.append(artist)
+        details_text.append(artist)
 
         year = str(release.year) if release.year else None
         genre = release.genre
@@ -491,14 +504,33 @@ class ReleaseDetailView(Gtk.Box):
         info.add_css_class("dim-label")
         info.set_wrap(False)
         info.set_halign(Gtk.Align.START)
-        details.append(info)
+        details_text.append(info)
 
         completeness = _release_completeness_label(release)
         if completeness:
             status = Gtk.Label(label=completeness, xalign=0.0, ellipsize=3)
             status.add_css_class("dim-label")
             status.set_halign(Gtk.Align.START)
-            details.append(status)
+            details_text.append(status)
+
+        tracks = service.get_release_tracks(release.id)
+
+        details_spacer = Gtk.Box()
+        details_spacer.set_vexpand(True)
+        details_column.append(details_spacer)
+
+        play_btn = Gtk.Button()
+        play_btn.add_css_class("suggested-action")
+        play_btn.add_css_class("circular")
+        play_btn.set_icon_name("media-playback-start-symbolic")
+        play_btn.set_halign(Gtk.Align.START)
+        play_btn.set_tooltip_text("Play release")
+        play_btn.set_sensitive(bool(tracks))
+        play_btn.connect(
+            "clicked",
+            lambda *_: service.play_release(release.id, start_index=0),
+        )
+        details_column.append(play_btn)
 
         scrolled = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         scrolled.set_margin_top(0)
@@ -515,7 +547,7 @@ class ReleaseDetailView(Gtk.Box):
         )
         scrolled.set_child(list_box)
 
-        for index, track in enumerate(service.get_release_tracks(release.id)):
+        for index, track in enumerate(tracks):
             list_box.append(_compact_track_row(track, index=index))
 
 

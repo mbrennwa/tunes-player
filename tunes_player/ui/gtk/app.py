@@ -44,7 +44,7 @@ _SUGGESTIONS_PLACEHOLDER = (
 )
 _NAV_ROOT_TAGS = frozenset({"releases-root", "artists-root", "search-root", "discover-root"})
 _NAV_ROOT_TITLES = {
-    "releases-root": "Releases",
+    "releases-root": "Browse",
     "artists-root": "Artists",
     "search-root": "Search",
     "discover-root": "Discover",
@@ -84,7 +84,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._header = Adw.HeaderBar()
         self._toolbar.add_top_bar(self._header)
 
-        self._window_title = Adw.WindowTitle(title="Releases", subtitle="")
+        self._window_title = Adw.WindowTitle(title="Browse", subtitle="")
         self._title_center = Gtk.Box()
         self._title_center.set_halign(Gtk.Align.CENTER)
         self._title_center.append(self._window_title)
@@ -139,7 +139,7 @@ class TunesWindow(Adw.ApplicationWindow):
         for section_id, label, icon in (
             ("new-music", "New Music", "list-add-symbolic"),
             ("suggestions", "Suggestions", "applications-science-symbolic"),
-            ("releases", "Releases", "media-optical-symbolic"),
+            ("releases", "Browse", "media-optical-symbolic"),
             ("artists", "Artists", "avatar-default-symbolic"),
         ):
             row = Adw.ActionRow(title=label)
@@ -305,7 +305,7 @@ class TunesWindow(Adw.ApplicationWindow):
         )
         self._replace_root_page(
             self._releases_nav,
-            title="Releases",
+            title="Browse",
             tag="releases-root",
             child=view,
         )
