@@ -103,7 +103,7 @@ class LibraryScanner:
                 seen_paths.add(path_str)
 
                 existing = connection.execute(
-                    "SELECT id, mtime_ns, size_bytes FROM files WHERE path = ?",
+                    "SELECT id, mtime_ns, size_bytes, indexed_at_ns FROM files WHERE path = ?",
                     (path_str,),
                 ).fetchone()
                 if (
@@ -111,6 +111,16 @@ class LibraryScanner:
                     and int(existing["mtime_ns"]) == stat.st_mtime_ns
                     and int(existing["size_bytes"]) == stat.st_size
                 ):
+                    if self._should_bump_indexed_at(
+                        path_str=path_str,
+                        indexed_at_ns=int(existing["indexed_at_ns"]),
+                        mtime_ns=int(existing["mtime_ns"]),
+                        file_mtime_ns=stat.st_mtime_ns,
+                    ):
+                        connection.execute(
+                            "UPDATE files SET indexed_at_ns = ? WHERE id = ?",
+                            (time.time_ns(), int(existing["id"])),
+                        )
                     skipped += 1
                     continue
 
@@ -123,7 +133,7 @@ class LibraryScanner:
                 if existing is not None:
                     connection.execute("DELETE FROM files WHERE id = ?", (existing["id"],))
 
-                file_id = self._insert_file(connection, parsed)
+                file_id = self._insert_file(connection, parsed, indexed_at_ns=time.time_ns())
                 self._insert_track(connection, parsed, file_id)
                 index_album_art_for_file(
                     connection,
@@ -156,6 +166,31 @@ class LibraryScanner:
             art_indexed=art_indexed,
         )
 
+    def _should_bump_indexed_at(
+        self,
+        *,
+        path_str: str,
+        indexed_at_ns: int,
+        mtime_ns: int,
+        file_mtime_ns: int,
+    ) -> bool:
+        if indexed_at_ns != 0 and indexed_at_ns != mtime_ns:
+            return False
+        folder = self._folder_for_path(path_str)
+        if folder is not None:
+            added_at = self._config.music_folder_added_at.get(folder)
+            if added_at is not None and time.time() - added_at <= 30 * 86_400:
+                return True
+        cutoff_ns = time.time_ns() - 30 * 86_400 * 1_000_000_000
+        return indexed_at_ns == 0 and file_mtime_ns >= cutoff_ns
+
+    def _folder_for_path(self, path_str: str) -> str | None:
+        for folder in self._config.music_folders:
+            folder_resolved = str(Path(folder).resolve())
+            if path_str == folder_resolved or path_str.startswith(folder_resolved + os.sep):
+                return folder_resolved
+        return None
+
     def _collect_candidates(self, *, progress: ProgressCallback | None = None) -> list[Path]:
         paths: list[Path] = []
         seen = 0
@@ -177,18 +212,24 @@ class LibraryScanner:
         return paths
 
     @staticmethod
-    def _insert_file(connection: sqlite3.Connection, parsed: _ParsedTrack) -> int:
+    def _insert_file(
+        connection: sqlite3.Connection,
+        parsed: _ParsedTrack,
+        *,
+        indexed_at_ns: int,
+    ) -> int:
         cursor = connection.execute(
             """
             INSERT INTO files(
-                path, mtime_ns, size_bytes, codec, duration_sec,
+                path, mtime_ns, size_bytes, indexed_at_ns, codec, duration_sec,
                 sample_rate, bit_depth, channels
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 parsed.path,
                 parsed.mtime_ns,
                 parsed.size_bytes,
+                indexed_at_ns,
                 parsed.codec,
                 parsed.duration_sec,
                 parsed.sample_rate,

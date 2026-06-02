@@ -24,6 +24,7 @@ from tunes_player.ui.gtk.views import (
     ArtistListView,
     PlaceholderView,
     QueueSheet,
+    RecentlyAddedListView,
     SearchResultsView,
 )
 from tunes_player.ui.gtk.album_grid import (
@@ -56,6 +57,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._art_loader = ArtLoader(service.config.data_dir)
         self._search_active = False
         self._home_current_title = "Home"
+        self._home_active_section_id: str | None = None
         self._preferences: PreferencesWindow | None = None
         self._queue_sheet: QueueSheet | None = None
         self.set_default_size(*_DEFAULT_SIZE)
@@ -459,10 +461,26 @@ class TunesWindow(Adw.ApplicationWindow):
     def _show_home_root(self, section_id: str) -> None:
         title = _HOME_ROOT_TITLES.get(section_id, "Home")
         self._home_current_title = title
-        view = PlaceholderView(
-            title=title,
-            message="Not implemented yet.",
-        )
+        self._home_active_section_id = section_id
+        if section_id == "home-recently-added":
+            items = self._service.list_recently_added_items()
+            empty_message = (
+                "Nothing added recently.\n"
+                "Scan your library in Settings → Sources, or sign in to TIDAL for new releases."
+                if not items
+                else None
+            )
+            view = RecentlyAddedListView(
+                items=items,
+                on_album_activated=self._open_album,
+                on_track_activated=self._service.play_track,
+                empty_message=empty_message,
+            )
+        else:
+            view = PlaceholderView(
+                title=title,
+                message="Not implemented yet.",
+            )
         self._replace_root_page(
             self._home_nav,
             title=title,
@@ -542,6 +560,8 @@ class TunesWindow(Adw.ApplicationWindow):
     def _on_service_event(self, event: str) -> bool:
         if event == "library_updated":
             GLib.idle_add(self._refresh_library_after_scan)
+        elif event == "sources_changed":
+            GLib.idle_add(self._refresh_home_if_needed)
         return False
 
     def _refresh_library_after_scan(self) -> bool:
@@ -553,6 +573,15 @@ class TunesWindow(Adw.ApplicationWindow):
         self._show_artists_root()
         if self._search_active:
             self._refresh_search()
+        GLib.idle_add(self._refresh_home_if_needed)
+        return False
+
+    def _refresh_home_if_needed(self) -> bool:
+        if (
+            self._content_stack.get_visible_child_name() == "home"
+            and self._home_active_section_id == "home-recently-added"
+        ):
+            self._show_home_root("home-recently-added")
         return False
 
     def _open_queue_sheet(self, *_args: object) -> None:

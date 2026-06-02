@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,6 +15,8 @@ APP_NAME = "tunes-player"
 @dataclass
 class AppConfig:
     music_folders: list[str] = field(default_factory=list)
+    # Unix seconds when each folder was added (or re-added) in Settings.
+    music_folder_added_at: dict[str, float] = field(default_factory=dict)
     bit_perfect: bool = True
     output_sink_id: str | None = None
 
@@ -41,9 +44,20 @@ class ConfigManager:
             return self._config
 
         raw = json.loads(self._path.read_text(encoding="utf-8"))
-        folders = raw.get("music_folders", [])
+        folders = [str(item) for item in raw.get("music_folders", []) if item]
+        added_raw = raw.get("music_folder_added_at", {})
+        added_at: dict[str, float] = {}
+        if isinstance(added_raw, dict):
+            for key, value in added_raw.items():
+                if not key:
+                    continue
+                try:
+                    added_at[str(Path(key).expanduser().resolve())] = float(value)
+                except (TypeError, ValueError):
+                    continue
         self._config = AppConfig(
-            music_folders=[str(item) for item in folders if item],
+            music_folders=folders,
+            music_folder_added_at=added_at,
             bit_perfect=bool(raw.get("bit_perfect", True)),
             output_sink_id=raw.get("output_sink_id") or None,
         )
@@ -53,6 +67,7 @@ class ConfigManager:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "music_folders": list(self._config.music_folders),
+            "music_folder_added_at": dict(self._config.music_folder_added_at),
             "bit_perfect": self._config.bit_perfect,
             "output_sink_id": self._config.output_sink_id,
         }
@@ -66,9 +81,11 @@ class ConfigManager:
         path = str(Path(folder).expanduser().resolve())
         if path not in self._config.music_folders:
             self._config.music_folders.append(path)
-            self.save()
+        self._config.music_folder_added_at[path] = time.time()
+        self.save()
 
     def remove_music_folder(self, folder: str) -> None:
         path = str(Path(folder).expanduser().resolve())
         self._config.music_folders = [item for item in self._config.music_folders if item != path]
+        self._config.music_folder_added_at.pop(path, None)
         self.save()

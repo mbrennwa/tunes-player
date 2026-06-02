@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from tunes_player.core.backends.playable import PlayableSource
 from tunes_player.core.backends.tidal import convert, ids as tidal_ids
+from tunes_player.core.home import RecentlyAddedItem
 from tunes_player.core.models import Album, Track
 
 if TYPE_CHECKING:
@@ -210,6 +211,62 @@ class TidalClient:
         for item in results.get("tracks", []):
             tracks.append(convert.track_from_tidal(session, item))
         return albums, tracks
+
+    def list_new_release_items(
+        self,
+        *,
+        within_days: int = 30,
+        limit: int = 80,
+    ) -> list[RecentlyAddedItem]:
+        """New-release albums and tracks from the TIDAL home page."""
+        if not self.is_logged_in():
+            return []
+        session = self._require_login()
+        cutoff_ns = time.time_ns() - int(within_days * 86_400 * 1_000_000_000)
+        items: list[RecentlyAddedItem] = []
+        try:
+            import tidalapi.album as tidal_album_mod
+            import tidalapi.media as tidal_media_mod
+
+            page = session.home()
+            for raw in page:
+                try:
+                    added_ns = time.time_ns()
+                    if isinstance(raw, tidal_album_mod.Album):
+                        release = (
+                            getattr(raw, "available_release_date", None)
+                            or getattr(raw, "release_date", None)
+                            or getattr(raw, "tidal_release_date", None)
+                        )
+                        if release is not None:
+                            added_ns = int(release.timestamp() * 1_000_000_000)
+                        if added_ns < cutoff_ns:
+                            continue
+                        album = convert.album_from_tidal(session, raw)
+                        items.append(
+                            RecentlyAddedItem(kind="album", added_ns=added_ns, album=album)
+                        )
+                    elif isinstance(raw, tidal_media_mod.Track):
+                        release = _tidal_track_release_date(raw)
+                        if release is not None:
+                            added_ns = int(release.timestamp() * 1_000_000_000)
+                        if added_ns < cutoff_ns:
+                            continue
+                        track = convert.track_from_tidal(session, raw)
+                        items.append(
+                            RecentlyAddedItem(kind="track", added_ns=added_ns, track=track)
+                        )
+                except Exception:
+                    log.debug(
+                        "Skipping TIDAL home item %s",
+                        type(raw).__name__,
+                        exc_info=True,
+                    )
+        except Exception:
+            log.exception("Failed to load TIDAL new releases")
+            return []
+        items.sort(key=lambda item: item.added_ns, reverse=True)
+        return items[:limit]
 
     def get_album(self, album_id: str) -> Album | None:
         numeric = tidal_ids.parse_prefixed_id(album_id, "album")
@@ -416,6 +473,26 @@ class TidalClient:
         self._oauth_executor = None
         if executor is not None:
             executor.shutdown(wait=wait, cancel_futures=True)
+
+
+def _tidal_track_release_date(track: object) -> object | None:
+    for attr in (
+        "tidal_release_date",
+        "stream_start_date",
+        "date_added",
+        "user_date_added",
+    ):
+        value = getattr(track, attr, None)
+        if value is not None:
+            return value
+    album = getattr(track, "album", None)
+    if album is not None:
+        return (
+            getattr(album, "available_release_date", None)
+            or getattr(album, "release_date", None)
+            or getattr(album, "tidal_release_date", None)
+        )
+    return None
 
 
 def _normalize_oauth_url(url: str) -> str:

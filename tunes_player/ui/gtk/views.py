@@ -11,6 +11,7 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
+from tunes_player.core.home import RecentlyAddedItem
 from tunes_player.core.models import Album, Artist, Track
 from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.album_grid import (
@@ -36,6 +37,76 @@ _ALBUM_TILE_ART_PIXELS = 512
 _ALBUM_TILE_ART_PIXELS_SMALL = 384
 _ALBUM_DETAIL_ART_SIZE = 220
 _ALBUM_TILE_DEFAULT_EDGE = 200
+
+
+class RecentlyAddedListView(Gtk.ScrolledWindow):
+    def __init__(
+        self,
+        *,
+        items: list[RecentlyAddedItem],
+        on_album_activated: Callable[[str], None],
+        on_track_activated: Callable[[str], None],
+        empty_message: str | None = None,
+    ) -> None:
+        super().__init__(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        self.set_propagate_natural_width(False)
+        self.add_css_class("view")
+
+        if not items and empty_message:
+            label = Gtk.Label(label=empty_message, vexpand=True, justify=Gtk.Justification.CENTER)
+            label.add_css_class("dim-label")
+            label.set_valign(Gtk.Align.CENTER)
+            label.set_margin_top(24)
+            label.set_margin_bottom(24)
+            label.set_margin_start(24)
+            label.set_margin_end(24)
+            self.set_child(label)
+            return
+
+        list_box = Gtk.ListBox()
+        list_box.add_css_class("boxed-list")
+        list_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        list_box.set_valign(Gtk.Align.START)
+        list_box.set_vexpand(False)
+        self.set_child(list_box)
+
+        for item in items:
+            if item.kind == "album" and item.album is not None:
+                album = item.album
+                row = Adw.ActionRow(
+                    title=escape_markup(album.title),
+                    subtitle=escape_markup(
+                        join_detail("Album", source_label(album.source), album.artist_name)
+                    ),
+                )
+                row.set_activatable(True)
+                row.add_prefix(Gtk.Image.new_from_icon_name("media-optical-symbolic"))
+                row.connect(
+                    "activated",
+                    lambda _row, album_id=album.id: on_album_activated(album_id),
+                )
+                list_box.append(row)
+            elif item.kind == "track" and item.track is not None:
+                track = item.track
+                row = Adw.ActionRow(
+                    title=escape_markup(track.title),
+                    subtitle=escape_markup(
+                        join_detail(
+                            "Track",
+                            source_label(track.source),
+                            track.artist_name,
+                            track.album_title,
+                            format_duration(track.duration_sec),
+                        )
+                    ),
+                )
+                row.set_activatable(True)
+                row.add_prefix(Gtk.Image.new_from_icon_name("audio-x-generic-symbolic"))
+                row.connect(
+                    "activated",
+                    lambda _row, track_id=track.id: on_track_activated(track_id),
+                )
+                list_box.append(row)
 
 
 class PlaceholderView(Gtk.Box):

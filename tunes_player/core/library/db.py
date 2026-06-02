@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS files (
     path TEXT NOT NULL UNIQUE,
     mtime_ns INTEGER NOT NULL,
     size_bytes INTEGER NOT NULL,
+    indexed_at_ns INTEGER NOT NULL DEFAULT 0,
     codec TEXT,
     duration_sec REAL,
     sample_rate INTEGER,
@@ -61,6 +62,15 @@ CREATE TABLE IF NOT EXISTS album_art (
 );
 """
 
+_MIGRATION_V3 = """
+ALTER TABLE files ADD COLUMN indexed_at_ns INTEGER NOT NULL DEFAULT 0;
+UPDATE files SET indexed_at_ns = mtime_ns WHERE indexed_at_ns = 0;
+"""
+
+_MIGRATION_V4 = """
+UPDATE files SET indexed_at_ns = 0 WHERE indexed_at_ns = mtime_ns;
+"""
+
 
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -89,8 +99,14 @@ def _migrate(connection: sqlite3.Connection) -> None:
     version = int(row["value"])
     if version < 2:
         connection.executescript(_MIGRATION_V2)
+        version = 2
+    if version < 3:
+        connection.executescript(_MIGRATION_V3)
+        version = 3
+    if version < 4:
+        connection.executescript(_MIGRATION_V4)
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
-            ("2",),
+            ("4",),
         )
         connection.commit()

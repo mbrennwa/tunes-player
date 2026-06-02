@@ -12,6 +12,7 @@ from typing import Callable
 from tunes_player.core.backends.resolve import resolve_track
 from tunes_player.core.backends.tidal import TidalClient, TidalUnavailableError
 from tunes_player.core.config import ConfigManager
+from tunes_player.core.home import RecentlyAddedItem
 from tunes_player.core.library import LibraryStore, ScanResult
 from tunes_player.core.library.scan_worker import create_scan_process
 from tunes_player.core.models import Album, Artist, Track
@@ -117,6 +118,17 @@ class PlayerService:
     def list_artists(self) -> list[Artist]:
         return self._store.list_artists()
 
+    def list_recently_added_items(self, *, within_days: int = 30) -> list[RecentlyAddedItem]:
+        items = self._store.list_recently_added_items(within_days=within_days)
+        if self._tidal.is_logged_in():
+            try:
+                tidal_items = self._tidal.list_new_release_items(within_days=within_days)
+                items = [*items, *tidal_items]
+            except TidalUnavailableError:
+                pass
+        items.sort(key=lambda item: item.added_ns, reverse=True)
+        return items[:120]
+
     def get_album(self, album_id: str) -> Album | None:
         if album_id.startswith("tidal:"):
             if not self._tidal.is_logged_in():
@@ -198,6 +210,7 @@ class PlayerService:
         self._scan_process, self._scan_queue = create_scan_process(
             db_path=self._config_manager.database_path,
             music_folders=self._config_manager.config.music_folders,
+            music_folder_added_at=self._config_manager.config.music_folder_added_at,
         )
         self._scan_process.start()
 

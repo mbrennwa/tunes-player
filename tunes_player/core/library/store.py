@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from tunes_player.core.home import RecentlyAddedItem
 from tunes_player.core.library import ids
 from tunes_player.core.library.db import connect
 from tunes_player.core.models import Album, Artist, Source, Track
@@ -242,6 +244,77 @@ class LibraryStore:
         ]
         tracks = [self._row_to_track(row) for row in track_rows]
         return albums, tracks
+
+    def list_recently_added_items(
+        self,
+        *,
+        within_days: int = 30,
+        album_limit: int = 40,
+        track_limit: int = 80,
+    ) -> list[RecentlyAddedItem]:
+        cutoff_ns = time.time_ns() - int(within_days * 86_400 * 1_000_000_000)
+        album_rows = self._connection.execute(
+            """
+            SELECT
+                t.album_id,
+                t.album,
+                t.album_artist,
+                MIN(t.year) AS year,
+                COUNT(*) AS track_count,
+                MAX(f.indexed_at_ns) AS added_ns
+            FROM tracks t
+            JOIN files f ON f.id = t.file_id
+            GROUP BY t.album_id, t.album, t.album_artist
+            HAVING added_ns >= ?
+            ORDER BY added_ns DESC
+            LIMIT ?
+            """,
+            (cutoff_ns, album_limit),
+        ).fetchall()
+        track_rows = self._connection.execute(
+            """
+            SELECT
+                t.id,
+                t.title,
+                t.artist,
+                t.album,
+                t.album_artist,
+                t.disc_number,
+                t.track_number,
+                f.duration_sec,
+                aa.art_uri,
+                f.indexed_at_ns AS added_ns
+            FROM tracks t
+            JOIN files f ON f.id = t.file_id
+            LEFT JOIN album_art aa ON aa.album_id = t.album_id
+            WHERE f.indexed_at_ns >= ?
+            ORDER BY f.indexed_at_ns DESC
+            LIMIT ?
+            """,
+            (cutoff_ns, track_limit),
+        ).fetchall()
+        art_by_album = self._art_uri_map([row["album_id"] for row in album_rows])
+        items: list[RecentlyAddedItem] = []
+        for row in album_rows:
+            album = self._row_to_album(row, art_uri=art_by_album.get(row["album_id"]))
+            items.append(
+                RecentlyAddedItem(
+                    kind="album",
+                    added_ns=int(row["added_ns"]),
+                    album=album,
+                )
+            )
+        for row in track_rows:
+            track = self._row_to_track(row)
+            items.append(
+                RecentlyAddedItem(
+                    kind="track",
+                    added_ns=int(row["added_ns"]),
+                    track=track,
+                )
+            )
+        items.sort(key=lambda item: item.added_ns, reverse=True)
+        return items
 
     @staticmethod
     def quality_hint(metadata: FileMetadata | None) -> str:
