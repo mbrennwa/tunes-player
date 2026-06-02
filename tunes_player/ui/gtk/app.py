@@ -19,7 +19,6 @@ from tunes_player.ui.gtk.now_playing import NowPlayingBar, attach_media_keys
 from tunes_player.ui.gtk.preferences import PreferencesWindow
 from tunes_player.ui.gtk.util import escape_markup, load_app_css
 from tunes_player.ui.gtk.views import (
-    ArtistListView,
     PlaceholderView,
     QueueSheet,
     RecentlyAddedGridView,
@@ -42,10 +41,9 @@ _DISCOVER_SECTION_TITLES = {
 _SUGGESTIONS_PLACEHOLDER = (
     "Suggestions from your library and streaming services will appear here."
 )
-_NAV_ROOT_TAGS = frozenset({"releases-root", "artists-root", "search-root", "discover-root"})
+_NAV_ROOT_TAGS = frozenset({"releases-root", "search-root", "discover-root"})
 _NAV_ROOT_TITLES = {
     "releases-root": "Browse",
-    "artists-root": "Artists",
     "search-root": "Search",
     "discover-root": "Discover",
 }
@@ -140,7 +138,6 @@ class TunesWindow(Adw.ApplicationWindow):
             ("releases", "Browse", "media-optical-symbolic"),
             ("new-music", "New Music", "starred-symbolic"),
             ("suggestions", "Suggestions", "dialog-question-symbolic"),
-            ("artists", "Artists", "avatar-default-symbolic"),
         ):
             row = Adw.ActionRow(title=label)
             row.set_activatable(True)
@@ -169,14 +166,12 @@ class TunesWindow(Adw.ApplicationWindow):
         self._content_stack.set_size_request(-1, -1)
         self._content_stack.set_vexpand(True)
         self._releases_nav = Adw.NavigationView()
-        self._artists_nav = Adw.NavigationView()
         self._discover_nav = Adw.NavigationView()
-        for nav in (self._releases_nav, self._artists_nav, self._discover_nav):
+        for nav in (self._releases_nav, self._discover_nav):
             nav.connect("notify::visible-page", self._on_nav_visible_page_changed)
         self._search_nav = Adw.NavigationView()
         self._search_nav.connect("notify::visible-page", self._on_nav_visible_page_changed)
         self._content_stack.add_named(self._releases_nav, "releases")
-        self._content_stack.add_named(self._artists_nav, "artists")
         self._content_stack.add_named(self._discover_nav, "discover")
         self._content_stack.add_named(self._search_nav, "search")
 
@@ -185,7 +180,6 @@ class TunesWindow(Adw.ApplicationWindow):
 
         self._sidebar_width_sp = 0.0
         self._show_releases_root()
-        self._show_artists_root()
         self._sidebar_nav_list.select_row(self._sidebar_rows["releases"])
 
     def _release_id_for_current_view(self) -> str | None:
@@ -310,23 +304,6 @@ class TunesWindow(Adw.ApplicationWindow):
             child=view,
         )
 
-    def _show_artists_root(self) -> None:
-        artists = self._service.list_artists()
-        empty_message = None
-        if not artists:
-            empty_message = "No artists indexed yet. Scan your library in Settings."
-        view = ArtistListView(
-            artists=artists,
-            on_artist_activated=self._open_artist,
-            empty_message=empty_message,
-        )
-        self._replace_root_page(
-            self._artists_nav,
-            title="Artists",
-            tag="artists-root",
-            child=view,
-        )
-
     def _open_release(self, release_id: str) -> None:
         release = self._service.get_release(release_id)
         if release is None:
@@ -348,9 +325,6 @@ class TunesWindow(Adw.ApplicationWindow):
             nav = self._search_nav
             if not self._nav_at_root(nav):
                 nav.pop()
-        elif visible == "artists":
-            nav = self._artists_nav
-            self._pop_to_root(nav)
         elif visible == "discover":
             nav = self._discover_nav
             self._pop_to_root(nav)
@@ -359,22 +333,6 @@ class TunesWindow(Adw.ApplicationWindow):
             self._pop_to_root(nav)
 
         nav.push(page)
-        self._sync_header_with_nav()
-
-    def _open_artist(self, artist_id: str) -> None:
-        releases = self._service.get_artist_releases(artist_id)
-        artist = next((item for item in self._service.list_artists() if item.id == artist_id), None)
-        title = artist.name if artist else "Artist"
-        view = ReleaseGridView(
-            releases=releases,
-            on_release_activated=self._open_release,
-            art_loader=self._art_loader,
-            window_inner_width_fn=self._album_grid_inner_width,
-        )
-        page = Adw.NavigationPage(title=escape_markup(title), child=view, tag=artist_id)
-        if self._artists_nav.get_visible_page() is not None and self._artists_nav.get_visible_page().get_tag() != "artists-root":
-            self._artists_nav.pop()
-        self._artists_nav.push(page)
         self._sync_header_with_nav()
 
     def _on_sidebar_activated(self, section_id: str) -> None:
@@ -389,8 +347,6 @@ class TunesWindow(Adw.ApplicationWindow):
             self._search_button.set_active(False)
         if section_id == "releases":
             self._pop_to_root(self._releases_nav)
-        elif section_id == "artists":
-            self._pop_to_root(self._artists_nav)
         self._content_stack.set_visible_child_name(section_id)
         self._sync_header_with_nav()
 
@@ -400,8 +356,9 @@ class TunesWindow(Adw.ApplicationWindow):
         self._discover_active_section_id = section_id
         if section_id == "new-music":
             items = self._service.list_recently_added_items()
+            days = self._service.config.config.new_music_within_days
             empty_message = (
-                "Nothing new in the last 30 days.\n"
+                f"Nothing new in the last {days} days.\n"
                 "Scan your library in Settings → Sources, or sign in to TIDAL or Qobuz "
                 "for new releases."
                 if not items
@@ -514,11 +471,6 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _refresh_library_after_scan(self) -> bool:
         self._show_releases_root()
-        GLib.idle_add(self._refresh_artists_after_scan)
-        return False
-
-    def _refresh_artists_after_scan(self) -> bool:
-        self._show_artists_root()
         if self._search_active:
             self._refresh_search()
         GLib.idle_add(self._refresh_discover_if_needed)
@@ -550,8 +502,6 @@ class TunesWindow(Adw.ApplicationWindow):
         section = self._content_stack.get_visible_child_name()
         if section == "releases":
             return self._releases_nav
-        if section == "artists":
-            return self._artists_nav
         if section == "discover":
             return self._discover_nav
         return None
@@ -569,9 +519,6 @@ class TunesWindow(Adw.ApplicationWindow):
         release = self._service.get_release(tag)
         if release is not None:
             return release.title
-        for artist in self._service.list_artists():
-            if artist.id == tag:
-                return artist.name
         return None
 
     def _sync_header_with_nav(self) -> None:

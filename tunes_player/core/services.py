@@ -13,10 +13,15 @@ from tunes_player.core.backends.qobuz import QobuzClient, QobuzUnavailableError
 from tunes_player.core.backends.resolve import resolve_track
 from tunes_player.core.backends.tidal import TidalClient, TidalUnavailableError
 from tunes_player.core.config import ConfigManager
-from tunes_player.core.home import RecentlyAddedItem
+from tunes_player.core.home import (
+    NEW_MUSIC_LOCAL_LIMIT,
+    NEW_MUSIC_MERGE_LIMIT,
+    NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
+    RecentlyAddedItem,
+)
 from tunes_player.core.library import LibraryStore, ScanResult
 from tunes_player.core.library.scan_worker import create_scan_process
-from tunes_player.core.models import Album, Artist, Release, Track
+from tunes_player.core.models import Album, Release, Track
 from tunes_player.core.playback.engine import EngineEvent, PlaybackEngine
 from tunes_player.core.volume import VolumeController, VolumeEndpoint
 
@@ -136,32 +141,39 @@ class PlayerService:
     def list_albums(self) -> list[Album]:
         return self.list_releases()
 
-    def list_artists(self) -> list[Artist]:
-        return self._store.list_artists()
-
-    def list_recently_added_items(self, *, within_days: int = 30) -> list[RecentlyAddedItem]:
-        items = self._store.list_recently_added_items(within_days=within_days)
+    def list_recently_added_items(self) -> list[RecentlyAddedItem]:
+        within_days = self._config_manager.config.new_music_within_days
+        items = self._store.list_recently_added_items(
+            within_days=within_days,
+            limit=NEW_MUSIC_LOCAL_LIMIT,
+        )
         if self._tidal.is_logged_in():
             try:
-                tidal_items = self._tidal.list_new_release_items()
+                tidal_items = self._tidal.list_new_release_items(
+                    limit=NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
+                )
                 items = [*items, *tidal_items]
             except TidalUnavailableError:
                 pass
         if self._qobuz.is_logged_in():
             try:
-                qobuz_items = self._qobuz.list_new_release_items(within_days=within_days)
+                qobuz_items = self._qobuz.list_new_release_items(
+                    limit=NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
+                    within_days=within_days,
+                )
                 items = [*items, *qobuz_items]
             except QobuzUnavailableError:
                 pass
-        items.sort(key=lambda item: item.added_ns, reverse=True)
-        deduped: list[RecentlyAddedItem] = []
-        seen_release_ids: set[str] = set()
+        by_release_id: dict[str, RecentlyAddedItem] = {}
         for item in items:
-            if item.release.id in seen_release_ids:
-                continue
-            seen_release_ids.add(item.release.id)
-            deduped.append(item)
-        return deduped[:120]
+            existing = by_release_id.get(item.release.id)
+            if existing is None or item.added_ns > existing.added_ns:
+                by_release_id[item.release.id] = item
+        deduped = sorted(
+            by_release_id.values(),
+            key=lambda item: (-item.added_ns, item.release.title.casefold()),
+        )
+        return deduped[:NEW_MUSIC_MERGE_LIMIT]
 
     def get_release(self, release_id: str) -> Release | None:
         if release_id.startswith("tidal:"):
@@ -202,12 +214,6 @@ class PlayerService:
 
     def get_album_tracks(self, album_id: str) -> list[Track]:
         return self.get_release_tracks(album_id)
-
-    def get_artist_releases(self, artist_id: str) -> list[Release]:
-        return self._store.get_artist_releases(artist_id)
-
-    def get_artist_albums(self, artist_id: str) -> list[Album]:
-        return self.get_artist_releases(artist_id)
 
     def search(self, query: str) -> SearchResults:
         needle = query.strip()

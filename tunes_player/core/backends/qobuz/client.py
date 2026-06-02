@@ -15,7 +15,7 @@ from typing import Any
 
 from tunes_player.core.backends.playable import PlayableSource
 from tunes_player.core.backends.qobuz import convert, ids as qobuz_ids
-from tunes_player.core.home import RecentlyAddedItem
+from tunes_player.core.home import NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT, RecentlyAddedItem
 from tunes_player.core.models import Release, Track
 
 log = logging.getLogger(__name__)
@@ -159,7 +159,7 @@ class QobuzClient:
     def list_new_release_items(
         self,
         *,
-        limit: int = 120,
+        limit: int = NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
         within_days: int = 30,
     ) -> list[RecentlyAddedItem]:
         """Albums from Qobuz new-release featured rails."""
@@ -168,27 +168,41 @@ class QobuzClient:
         cutoff_ns = time.time_ns() - int(within_days * 86_400 * 1_000_000_000)
         items: list[RecentlyAddedItem] = []
         seen: set[str] = set()
-        per_type = max(limit // len(_NEW_RELEASE_FEATURE_TYPES), 25)
+        page_size = 100
         try:
             for feature_type in _NEW_RELEASE_FEATURE_TYPES:
-                data = self._api_get(
-                    "album/getFeatured",
-                    {"type": feature_type, "limit": per_type, "offset": 0},
-                )
-                albums = data.get("albums") if isinstance(data, dict) else None
-                if not isinstance(albums, dict):
-                    continue
-                for raw in albums.get("items") or []:
-                    if not isinstance(raw, dict):
-                        continue
-                    added_ns = _album_added_ns(raw)
-                    if added_ns < cutoff_ns:
-                        continue
-                    release = convert.release_from_qobuz(raw)
-                    if release.id in seen:
-                        continue
-                    seen.add(release.id)
-                    items.append(RecentlyAddedItem(added_ns=added_ns, release=release))
+                offset = 0
+                while len(items) < limit:
+                    data = self._api_get(
+                        "album/getFeatured",
+                        {
+                            "type": feature_type,
+                            "limit": min(page_size, limit - len(items)),
+                            "offset": offset,
+                        },
+                    )
+                    albums = data.get("albums") if isinstance(data, dict) else None
+                    if not isinstance(albums, dict):
+                        break
+                    batch = albums.get("items") or []
+                    if not batch:
+                        break
+                    for raw in batch:
+                        if not isinstance(raw, dict):
+                            continue
+                        added_ns = _album_added_ns(raw)
+                        if added_ns < cutoff_ns:
+                            continue
+                        release = convert.release_from_qobuz(raw)
+                        if release.id in seen:
+                            continue
+                        seen.add(release.id)
+                        items.append(RecentlyAddedItem(added_ns=added_ns, release=release))
+                        if len(items) >= limit:
+                            break
+                    if len(batch) < page_size:
+                        break
+                    offset += page_size
         except QobuzUnavailableError:
             raise
         except Exception:

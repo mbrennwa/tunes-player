@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from tunes_player.core.backends.playable import PlayableSource
 from tunes_player.core.backends.tidal import convert, ids as tidal_ids
-from tunes_player.core.home import RecentlyAddedItem
+from tunes_player.core.home import NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT, RecentlyAddedItem
 from tunes_player.core.models import Release, Track
 
 if TYPE_CHECKING:
@@ -51,6 +51,11 @@ _NEW_RELEASE_TITLE_HINTS = (
     "just added",
     "fresh",
     "out now",
+    "spotlight",
+    "dropped",
+    "debut",
+    "this week",
+    "aktuell",
 )
 
 
@@ -256,7 +261,7 @@ class TidalClient:
     def list_new_release_items(
         self,
         *,
-        limit: int = 120,
+        limit: int = NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
     ) -> list[RecentlyAddedItem]:
         """Albums from TIDAL new-release style curated rails (expanded view-all lists)."""
         if not self.is_logged_in():
@@ -275,6 +280,7 @@ class TidalClient:
                 for loader in (
                     lambda: session.home(use_legacy_endpoint=True),
                     session.explore,
+                    session.for_you,
                 ):
                     try:
                         pages.append(loader())

@@ -12,7 +12,7 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.home import RecentlyAddedItem
-from tunes_player.core.models import Artist, Release, ReleaseCompleteness, Track
+from tunes_player.core.models import Release, ReleaseCompleteness, Track
 from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.album_grid import (
     ALBUM_GRID_SPACING,
@@ -217,44 +217,17 @@ class RecentlyAddedGridView(ReleaseGridView):
         art_loader: ArtLoader | None = None,
         window_inner_width_fn: Callable[[], int] | None = None,
     ) -> None:
+        newest_first = sorted(
+            items,
+            key=lambda item: (-item.added_ns, item.release.title.casefold()),
+        )
         super().__init__(
-            releases=[item.release for item in items],
+            releases=[item.release for item in newest_first],
             on_release_activated=on_release_activated,
             empty_message=empty_message,
             art_loader=art_loader,
             window_inner_width_fn=window_inner_width_fn,
         )
-
-
-class ArtistListView(Gtk.ScrolledWindow):
-    def __init__(
-        self,
-        *,
-        artists: list[Artist],
-        on_artist_activated: Callable[[str], None],
-        empty_message: str | None = None,
-    ) -> None:
-        super().__init__(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
-        self.set_propagate_natural_width(False)
-        self.add_css_class("view")
-
-        if not artists and empty_message:
-            label = Gtk.Label(label=empty_message, vexpand=True, justify=Gtk.Justification.CENTER)
-            label.add_css_class("dim-label")
-            label.set_valign(Gtk.Align.CENTER)
-            self.set_child(label)
-            return
-
-        list_box = Gtk.ListBox()
-        list_box.add_css_class("navigation-sidebar")
-        list_box.set_selection_mode(Gtk.SelectionMode.NONE)
-        self.set_child(list_box)
-
-        for artist in artists:
-            row = Adw.ActionRow(title=artist.name)
-            row.set_activatable(True)
-            row.connect("activated", lambda _row, aid=artist.id: on_artist_activated(aid))
-            list_box.append(row)
 
 
 class SearchResultsView(Gtk.ScrolledWindow):

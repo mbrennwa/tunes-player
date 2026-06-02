@@ -92,6 +92,36 @@ class PreferencesWindow(Adw.PreferencesWindow):
         audio_page = Adw.PreferencesPage(title="Audio", icon_name="audio-speakers-symbolic")
         audio_page.add(audio)
 
+        application_group = Adw.PreferencesGroup(
+            title="New Music",
+            description=(
+                "How far back to look for recently added local files and Qobuz "
+                "featured releases. TIDAL new-release rails are not filtered by this window."
+            ),
+        )
+        days = service.config.config.new_music_within_days
+        self._new_music_days_adj = Gtk.Adjustment.new(
+            days,
+            1,
+            365,
+            1,
+            7,
+            0,
+        )
+        self._new_music_days_row = Adw.SpinRow(
+            title="New cutoff",
+            subtitle="Days to include in the New Music view",
+            adjustment=self._new_music_days_adj,
+        )
+        self._new_music_days_adj.connect("value-changed", self._on_new_music_within_days_changed)
+        application_group.add(self._new_music_days_row)
+
+        application_page = Adw.PreferencesPage(
+            title="Application",
+            icon_name="applications-system-symbolic",
+        )
+        application_page.add(application_group)
+
         self._tidal_status_row = Adw.ActionRow(title="TIDAL")
         self._tidal_sign_in_btn = Gtk.Button(label="Sign in")
         self._tidal_sign_in_btn.connect("clicked", self._on_tidal_sign_in_clicked)
@@ -167,6 +197,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         )
         diagnostics_page.add(diagnostics_group)
 
+        self.add(application_page)
         self.add(sources_page)
         self.add(audio_page)
         self.add(diagnostics_page)
@@ -233,6 +264,13 @@ class PreferencesWindow(Adw.PreferencesWindow):
     def _on_bit_perfect_changed(self, row: Adw.SwitchRow, *_args: object) -> None:
         self._service.set_bit_perfect(row.get_active())
         row.set_subtitle(self._volume_mode_subtitle())
+
+    def _on_new_music_within_days_changed(self, adjustment: Gtk.Adjustment) -> None:
+        days = int(adjustment.get_value())
+        if days == self._service.config.config.new_music_within_days:
+            return
+        self._service.config.set_new_music_within_days(days)
+        self._service.notify_sources_changed()
 
     def _volume_mode_subtitle(self) -> str:
         state = self._service.get_playback_state()

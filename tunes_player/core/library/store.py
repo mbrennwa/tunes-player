@@ -11,7 +11,7 @@ from tunes_player.core.home import RecentlyAddedItem
 from tunes_player.core.library import ids
 from tunes_player.core.library.db import connect
 from tunes_player.core.library.release_logic import infer_release_metadata
-from tunes_player.core.models import Album, Artist, Release, Source, Track
+from tunes_player.core.models import Album, Release, Source, Track
 
 _RELEASE_GROUP_SELECT = """
     SELECT
@@ -74,20 +74,6 @@ class LibraryStore:
     def list_albums(self) -> list[Album]:
         return self.list_releases()
 
-    def list_artists(self) -> list[Artist]:
-        rows = self._connection.execute(
-            """
-            SELECT DISTINCT album_artist AS name
-            FROM tracks
-            WHERE album_artist != ''
-            ORDER BY name COLLATE NOCASE
-            """,
-        ).fetchall()
-        return [
-            Artist(id=ids.artist_id(row["name"]), name=row["name"], source=Source.LOCAL)
-            for row in rows
-        ]
-
     def get_release(self, release_id: str) -> Release | None:
         row = self._connection.execute(
             f"""
@@ -129,30 +115,6 @@ class LibraryStore:
 
     def get_album_tracks(self, album_id: str) -> list[Track]:
         return self.get_release_tracks(album_id)
-
-    def get_artist(self, artist_id: str) -> Artist | None:
-        for artist in self.list_artists():
-            if artist.id == artist_id:
-                return artist
-        return None
-
-    def get_artist_releases(self, artist_id: str) -> list[Release]:
-        artist = self.get_artist(artist_id)
-        if artist is None:
-            return []
-        rows = self._connection.execute(
-            f"""
-            {_RELEASE_GROUP_SELECT}
-            WHERE t.album_artist = ?
-            GROUP BY t.album_id, t.album, t.album_artist
-            ORDER BY t.album COLLATE NOCASE
-            """,
-            (artist.name,),
-        ).fetchall()
-        return self._rows_to_releases(rows)
-
-    def get_artist_albums(self, artist_id: str) -> list[Album]:
-        return self.get_artist_releases(artist_id)
 
     def get_track(self, track_id: str) -> Track | None:
         row = self._connection.execute(

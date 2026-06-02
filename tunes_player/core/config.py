@@ -9,7 +9,21 @@ from pathlib import Path
 
 from platformdirs import user_config_dir, user_data_dir
 
+from tunes_player.core.home import (
+    NEW_MUSIC_LOCAL_WITHIN_DAYS_DEFAULT,
+    NEW_MUSIC_LOCAL_WITHIN_DAYS_MAX,
+    NEW_MUSIC_LOCAL_WITHIN_DAYS_MIN,
+)
+
 APP_NAME = "tunes-player"
+
+
+def normalize_new_music_within_days(value: object) -> int:
+    try:
+        days = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return NEW_MUSIC_LOCAL_WITHIN_DAYS_DEFAULT
+    return max(NEW_MUSIC_LOCAL_WITHIN_DAYS_MIN, min(NEW_MUSIC_LOCAL_WITHIN_DAYS_MAX, days))
 
 
 @dataclass
@@ -22,6 +36,7 @@ class AppConfig:
     qobuz_app_id: str | None = None
     qobuz_app_secret: str | None = None
     qobuz_stream_format_id: int = 27
+    new_music_within_days: int = NEW_MUSIC_LOCAL_WITHIN_DAYS_DEFAULT
 
 
 class ConfigManager:
@@ -75,6 +90,9 @@ class ConfigManager:
             qobuz_app_id=str(app_id).strip() if app_id else None,
             qobuz_app_secret=str(app_secret).strip() if app_secret else None,
             qobuz_stream_format_id=format_id,
+            new_music_within_days=normalize_new_music_within_days(
+                raw.get("new_music_within_days", NEW_MUSIC_LOCAL_WITHIN_DAYS_DEFAULT),
+            ),
         )
         return self._config
 
@@ -88,6 +106,7 @@ class ConfigManager:
             "qobuz_app_id": self._config.qobuz_app_id,
             "qobuz_app_secret": self._config.qobuz_app_secret,
             "qobuz_stream_format_id": self._config.qobuz_stream_format_id,
+            "new_music_within_days": self._config.new_music_within_days,
         }
         self._path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
@@ -106,4 +125,8 @@ class ConfigManager:
         path = str(Path(folder).expanduser().resolve())
         self._config.music_folders = [item for item in self._config.music_folders if item != path]
         self._config.music_folder_added_at.pop(path, None)
+        self.save()
+
+    def set_new_music_within_days(self, days: int) -> None:
+        self._config.new_music_within_days = normalize_new_music_within_days(days)
         self.save()
