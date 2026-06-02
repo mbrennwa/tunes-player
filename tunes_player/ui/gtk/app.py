@@ -401,7 +401,8 @@ class TunesWindow(Adw.ApplicationWindow):
             items = self._service.list_recently_added_items()
             empty_message = (
                 "Nothing new in the last 30 days.\n"
-                "Scan your library in Settings → Sources, or sign in to TIDAL for new releases."
+                "Scan your library in Settings → Sources, or sign in to TIDAL or Qobuz "
+                "for new releases."
                 if not items
                 else None
             )

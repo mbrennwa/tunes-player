@@ -77,9 +77,10 @@ tunes-player
 Tunes is **not affiliated with Tidal, Deezer, Qobuz, or any other streaming provider**.
 Streaming requires your own paid subscriptions where applicable. Integrations may use
 official developer APIs (e.g. Tidal, Deezer) or user-supplied credentials (Qobuz App ID
-and App Secret — Tunes does not ship or distribute Qobuz keys). Features can break when
-providers change authentication or terms. Use at your own responsibility and in compliance
-with each service's terms of use.
+and App Secret — Tunes does not ship or distribute Qobuz keys). For Qobuz, open
+**Settings → Sources**, enter and save your App ID and App Secret, then sign in with your
+Qobuz account email and password. Features can break when providers change authentication
+or terms. Use at your own responsibility and in compliance with each service's terms of use.
 
 ## License
 

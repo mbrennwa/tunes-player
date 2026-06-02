@@ -112,6 +112,55 @@ class PreferencesWindow(Adw.PreferencesWindow):
         tidal_group.add(self._tidal_status_row)
         sources_page.add(tidal_group)
 
+        qobuz_group = Adw.PreferencesGroup(
+            title="Qobuz",
+            description=(
+                "Requires your own Qobuz subscription, App ID, and App Secret "
+                "(Tunes does not ship Qobuz credentials). Obtain them from Qobuz "
+                "or for personal use from your own web-player inspection."
+            ),
+        )
+        cfg = service.config.config
+        self._qobuz_app_id_row = Adw.EntryRow(title="App ID")
+        if cfg.qobuz_app_id:
+            self._qobuz_app_id_row.set_text(cfg.qobuz_app_id)
+        qobuz_group.add(self._qobuz_app_id_row)
+
+        self._qobuz_app_secret_row = Adw.PasswordEntryRow(title="App Secret")
+        if cfg.qobuz_app_secret:
+            self._qobuz_app_secret_row.set_text(cfg.qobuz_app_secret)
+        qobuz_group.add(self._qobuz_app_secret_row)
+
+        self._qobuz_save_creds_row = Adw.ActionRow(
+            title="Save Qobuz credentials",
+            subtitle="Required before sign-in",
+        )
+        qobuz_save_btn = Gtk.Button(label="Save")
+        qobuz_save_btn.set_valign(Gtk.Align.CENTER)
+        qobuz_save_btn.connect("clicked", self._on_qobuz_save_credentials_clicked)
+        self._qobuz_save_creds_row.add_suffix(qobuz_save_btn)
+        self._qobuz_save_creds_row.set_activatable_widget(qobuz_save_btn)
+        qobuz_group.add(self._qobuz_save_creds_row)
+
+        self._qobuz_email_row = Adw.EntryRow(title="Email")
+        qobuz_group.add(self._qobuz_email_row)
+
+        self._qobuz_password_row = Adw.PasswordEntryRow(title="Password")
+        qobuz_group.add(self._qobuz_password_row)
+
+        self._qobuz_status_row = Adw.ActionRow(title="Account")
+        self._qobuz_sign_in_btn = Gtk.Button(label="Sign in")
+        self._qobuz_sign_in_btn.connect("clicked", self._on_qobuz_sign_in_clicked)
+        self._qobuz_sign_out_btn = Gtk.Button(label="Sign out")
+        self._qobuz_sign_out_btn.connect("clicked", self._on_qobuz_sign_out_clicked)
+        qobuz_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        qobuz_btn_box.append(self._qobuz_sign_in_btn)
+        qobuz_btn_box.append(self._qobuz_sign_out_btn)
+        qobuz_btn_box.set_valign(Gtk.Align.CENTER)
+        self._qobuz_status_row.add_suffix(qobuz_btn_box)
+        qobuz_group.add(self._qobuz_status_row)
+        sources_page.add(qobuz_group)
+
         diagnostics_page = Adw.PreferencesPage(
             title="Diagnostics",
             icon_name="utilities-terminal-symbolic",
@@ -127,6 +176,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._tidal_sign_in_dialog_presented = False
         self._reload_folders()
         self._reload_tidal_status()
+        self._reload_qobuz_status()
         service.subscribe(lambda event: GLib.idle_add(self._on_service_event, event))
 
     def _reload_folders(self) -> None:
@@ -297,6 +347,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
     def _on_service_event(self, event: str) -> bool:
         if event == "sources_changed":
             self._reload_tidal_status()
+            self._reload_qobuz_status()
         return False
 
     def _reload_tidal_status(self) -> None:
@@ -415,3 +466,62 @@ class PreferencesWindow(Adw.PreferencesWindow):
     def _on_tidal_sign_out_clicked(self, *_args: object) -> None:
         self._service.tidal_logout()
         self._reload_tidal_status()
+
+    def _reload_qobuz_status(self) -> None:
+        service = self._service
+        creds_ok = service.qobuz_configured()
+        self._qobuz_save_creds_row.set_subtitle(
+            "Saved" if creds_ok else "Required before sign-in"
+        )
+        can_sign_in = creds_ok
+        if service.qobuz_is_logged_in():
+            label = service.qobuz_account_label()
+            self._qobuz_status_row.set_subtitle(
+                f"Connected as {label}" if label else "Connected"
+            )
+            self._qobuz_sign_in_btn.set_sensitive(False)
+            self._qobuz_sign_out_btn.set_sensitive(True)
+            self._qobuz_email_row.set_sensitive(False)
+            self._qobuz_password_row.set_sensitive(False)
+        else:
+            if not creds_ok:
+                self._qobuz_status_row.set_subtitle("Save App ID and App Secret first")
+            else:
+                self._qobuz_status_row.set_subtitle("Not connected")
+            self._qobuz_sign_in_btn.set_sensitive(can_sign_in)
+            self._qobuz_sign_out_btn.set_sensitive(False)
+            self._qobuz_email_row.set_sensitive(True)
+            self._qobuz_password_row.set_sensitive(True)
+
+    def _on_qobuz_save_credentials_clicked(self, *_args: object) -> None:
+        app_id = self._qobuz_app_id_row.get_text().strip()
+        app_secret = self._qobuz_app_secret_row.get_text()
+        if not app_id or not app_secret:
+            self._qobuz_save_creds_row.set_subtitle("App ID and App Secret are both required")
+            return
+        try:
+            self._service.qobuz_set_credentials(app_id, app_secret)
+        except Exception as exc:
+            self._qobuz_save_creds_row.set_subtitle(f"Save failed: {exc}")
+            return
+        self._qobuz_password_row.set_text("")
+        self._reload_qobuz_status()
+
+    def _on_qobuz_sign_in_clicked(self, *_args: object) -> None:
+        email = self._qobuz_email_row.get_text().strip()
+        password = self._qobuz_password_row.get_text()
+        if not email or not password:
+            self._qobuz_status_row.set_subtitle("Email and password are required")
+            return
+        try:
+            self._service.qobuz_login(email, password)
+        except Exception as exc:
+            self._qobuz_status_row.set_subtitle(f"Sign-in failed: {exc}")
+            return
+        self._qobuz_password_row.set_text("")
+        self._reload_qobuz_status()
+        self._service.notify_sources_changed()
+
+    def _on_qobuz_sign_out_clicked(self, *_args: object) -> None:
+        self._service.qobuz_logout()
+        self._reload_qobuz_status()

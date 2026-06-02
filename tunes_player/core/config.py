@@ -19,6 +19,9 @@ class AppConfig:
     music_folder_added_at: dict[str, float] = field(default_factory=dict)
     bit_perfect: bool = True
     output_sink_id: str | None = None
+    qobuz_app_id: str | None = None
+    qobuz_app_secret: str | None = None
+    qobuz_stream_format_id: int = 27
 
 
 class ConfigManager:
@@ -55,11 +58,23 @@ class ConfigManager:
                     added_at[str(Path(key).expanduser().resolve())] = float(value)
                 except (TypeError, ValueError):
                     continue
+        format_id = raw.get("qobuz_stream_format_id", 27)
+        try:
+            format_id = int(format_id)
+        except (TypeError, ValueError):
+            format_id = 27
+        if format_id not in (5, 6, 7, 27):
+            format_id = 27
+        app_id = raw.get("qobuz_app_id")
+        app_secret = raw.get("qobuz_app_secret")
         self._config = AppConfig(
             music_folders=folders,
             music_folder_added_at=added_at,
             bit_perfect=bool(raw.get("bit_perfect", True)),
             output_sink_id=raw.get("output_sink_id") or None,
+            qobuz_app_id=str(app_id).strip() if app_id else None,
+            qobuz_app_secret=str(app_secret).strip() if app_secret else None,
+            qobuz_stream_format_id=format_id,
         )
         return self._config
 
@@ -70,6 +85,9 @@ class ConfigManager:
             "music_folder_added_at": dict(self._config.music_folder_added_at),
             "bit_perfect": self._config.bit_perfect,
             "output_sink_id": self._config.output_sink_id,
+            "qobuz_app_id": self._config.qobuz_app_id,
+            "qobuz_app_secret": self._config.qobuz_app_secret,
+            "qobuz_stream_format_id": self._config.qobuz_stream_format_id,
         }
         self._path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 

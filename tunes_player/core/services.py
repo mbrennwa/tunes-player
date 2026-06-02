@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from queue import Empty, Queue
 from typing import Callable
 
+from tunes_player.core.backends.qobuz import QobuzClient, QobuzUnavailableError
 from tunes_player.core.backends.resolve import resolve_track
 from tunes_player.core.backends.tidal import TidalClient, TidalUnavailableError
 from tunes_player.core.config import ConfigManager
@@ -92,6 +93,7 @@ class PlayerService:
             data_dir / "tidal-session.json",
             cache_dir=data_dir / "tidal-cache",
         )
+        self._qobuz = self._make_qobuz_client(data_dir)
 
     @property
     def config(self) -> ConfigManager:
@@ -104,6 +106,19 @@ class PlayerService:
     @property
     def tidal(self) -> TidalClient:
         return self._tidal
+
+    @property
+    def qobuz(self) -> QobuzClient:
+        return self._qobuz
+
+    def _make_qobuz_client(self, data_dir) -> QobuzClient:
+        cfg = self._config_manager.config
+        return QobuzClient(
+            data_dir / "qobuz-session.json",
+            app_id=cfg.qobuz_app_id,
+            app_secret=cfg.qobuz_app_secret,
+            format_id=cfg.qobuz_stream_format_id,
+        )
 
     def last_error(self) -> str | None:
         """Last user-facing playback error, if any."""
@@ -132,6 +147,12 @@ class PlayerService:
                 items = [*items, *tidal_items]
             except TidalUnavailableError:
                 pass
+        if self._qobuz.is_logged_in():
+            try:
+                qobuz_items = self._qobuz.list_new_release_items(within_days=within_days)
+                items = [*items, *qobuz_items]
+            except QobuzUnavailableError:
+                pass
         items.sort(key=lambda item: item.added_ns, reverse=True)
         deduped: list[RecentlyAddedItem] = []
         seen_release_ids: set[str] = set()
@@ -150,6 +171,13 @@ class PlayerService:
                 return self._tidal.get_release(release_id)
             except TidalUnavailableError:
                 return None
+        if release_id.startswith("qobuz:"):
+            if not self._qobuz.is_logged_in():
+                return None
+            try:
+                return self._qobuz.get_release(release_id)
+            except QobuzUnavailableError:
+                return None
         return self._store.get_release(release_id)
 
     def get_album(self, album_id: str) -> Album | None:
@@ -162,6 +190,13 @@ class PlayerService:
             try:
                 return self._tidal.get_release_tracks(release_id)
             except TidalUnavailableError:
+                return []
+        if release_id.startswith("qobuz:"):
+            if not self._qobuz.is_logged_in():
+                return []
+            try:
+                return self._qobuz.get_release_tracks(release_id)
+            except QobuzUnavailableError:
                 return []
         return self._store.get_release_tracks(release_id)
 
@@ -188,6 +223,14 @@ class PlayerService:
                         releases.append(release)
             except TidalUnavailableError:
                 pass
+        if self._qobuz.is_logged_in():
+            try:
+                for release in self._qobuz.search_releases(needle):
+                    if release.id not in seen:
+                        seen.add(release.id)
+                        releases.append(release)
+            except QobuzUnavailableError:
+                pass
         return SearchResults(releases=releases)
 
     def tidal_available(self) -> bool:
@@ -213,6 +256,39 @@ class PlayerService:
 
     def tidal_logout(self) -> None:
         self._tidal.logout()
+        self._emit("sources_changed")
+
+    def qobuz_configured(self) -> bool:
+        return self._qobuz.is_configured()
+
+    def qobuz_is_logged_in(self) -> bool:
+        return self._qobuz.is_logged_in()
+
+    def qobuz_account_label(self) -> str | None:
+        return self._qobuz.account_label()
+
+    def qobuz_login(self, email: str, password: str) -> None:
+        self._qobuz.login(email, password)
+        self._emit("sources_changed")
+
+    def qobuz_logout(self) -> None:
+        self._qobuz.logout()
+        self._emit("sources_changed")
+
+    def qobuz_set_credentials(
+        self,
+        app_id: str,
+        app_secret: str,
+        *,
+        format_id: int | None = None,
+    ) -> None:
+        cfg = self._config_manager.config
+        cfg.qobuz_app_id = app_id.strip() or None
+        cfg.qobuz_app_secret = app_secret.strip() or None
+        if format_id is not None:
+            cfg.qobuz_stream_format_id = format_id
+        self._config_manager.save()
+        self._qobuz = self._make_qobuz_client(self._config_manager.data_dir)
         self._emit("sources_changed")
 
     def notify_sources_changed(self) -> None:
@@ -315,6 +391,9 @@ class PlayerService:
         if track_id.startswith("tidal:"):
             self._play_tidal_track(track_id)
             return
+        if track_id.startswith("qobuz:"):
+            self._play_qobuz_track(track_id)
+            return
         track = self._store.get_track(track_id)
         if track is None:
             return
@@ -344,12 +423,40 @@ class PlayerService:
             return
         self._start_queue_track(self._queue[self._queue_index])
 
+    def _play_qobuz_track(self, track_id: str) -> None:
+        if not self._qobuz.is_configured():
+            self._report_error(
+                "Qobuz App ID and App Secret are required. Add them in Settings → Sources."
+            )
+            return
+        if not self._qobuz.is_logged_in():
+            self._report_error("Sign in to Qobuz in Settings → Sources.")
+            return
+        try:
+            self._queue, self._queue_index = self._qobuz.queue_for_track(track_id)
+        except QobuzUnavailableError as exc:
+            self._report_error(str(exc), exc=exc)
+            return
+        if not self._queue:
+            self._report_error("Qobuz track not found.")
+            return
+        self._start_queue_track(self._queue[self._queue_index])
+
     def play_release(self, release_id: str, *, start_index: int = 0) -> None:
         tracks = self.get_release_tracks(release_id)
         if not tracks:
             if release_id.startswith("tidal:"):
                 if not self._tidal.is_logged_in():
                     self._report_error("Sign in to TIDAL in Settings → Sources.")
+                else:
+                    self._report_error("Could not load tracks for this release.")
+            elif release_id.startswith("qobuz:"):
+                if not self._qobuz.is_configured():
+                    self._report_error(
+                        "Qobuz App ID and App Secret are required. Add them in Settings → Sources."
+                    )
+                elif not self._qobuz.is_logged_in():
+                    self._report_error("Sign in to Qobuz in Settings → Sources.")
                 else:
                     self._report_error("Could not load tracks for this release.")
             else:
@@ -481,7 +588,9 @@ class PlayerService:
                 engine.set_audio_device(device)
             track = self._current_track
             if track is not None:
-                source = resolve_track(self._store, track.id, tidal=self._tidal)
+                source = resolve_track(
+                    self._store, track.id, tidal=self._tidal, qobuz=self._qobuz
+                )
                 if source is not None:
                     pos = engine.get_position()
                     playing = engine.is_playing()
@@ -555,7 +664,9 @@ class PlayerService:
         if track is None:
             return True
         try:
-            source = resolve_track(self._store, track.id, tidal=self._tidal)
+            source = resolve_track(
+                self._store, track.id, tidal=self._tidal, qobuz=self._qobuz
+            )
         except Exception as exc:
             self._report_error(str(exc), exc=exc)
             return False
@@ -563,6 +674,10 @@ class PlayerService:
             if track.id.startswith("tidal:"):
                 self._report_error(
                     "Could not play TIDAL track. Check your subscription and sign-in."
+                )
+            elif track.id.startswith("qobuz:"):
+                self._report_error(
+                    "Could not play Qobuz track. Check your subscription and sign-in."
                 )
             else:
                 self._report_error("Track file is missing from disk.")
@@ -616,7 +731,9 @@ class PlayerService:
 
     def _start_queue_track(self, track: Track, *, resume: bool = True) -> None:
         try:
-            source = resolve_track(self._store, track.id, tidal=self._tidal)
+            source = resolve_track(
+                self._store, track.id, tidal=self._tidal, qobuz=self._qobuz
+            )
         except Exception as exc:
             self._report_error(str(exc), exc=exc)
             return
@@ -624,6 +741,10 @@ class PlayerService:
             if track.id.startswith("tidal:"):
                 self._report_error(
                     "Could not play TIDAL track. Check your subscription and sign-in."
+                )
+            elif track.id.startswith("qobuz:"):
+                self._report_error(
+                    "Could not play Qobuz track. Check your subscription and sign-in."
                 )
             else:
                 self._report_error("Track file is missing from disk.")
@@ -644,6 +765,8 @@ class PlayerService:
         self._current_track = track
         if track.source.value == "tidal":
             self._quality_hint = "TIDAL"
+        elif track.source.value == "qobuz":
+            self._quality_hint = "QOBUZ"
         else:
             metadata = self._store.get_file_metadata(track.id)
             self._quality_hint = LibraryStore.quality_hint(metadata)
