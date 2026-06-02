@@ -38,6 +38,7 @@ _HOME_ROOT_TITLES = {
     "home-continue": "Continue listening",
     "home-recently-added": "Recently added",
     "home-favorites": "Favorites",
+    "home-suggested": "Suggested",
 }
 _NAV_ROOT_TAGS = frozenset({"albums-root", "artists-root", "search-root", "home-root"})
 _NAV_ROOT_TITLES = {
@@ -171,6 +172,11 @@ class TunesWindow(Adw.ApplicationWindow):
             section_id="home-favorites",
             title=_HOME_ROOT_TITLES["home-favorites"],
             icon="starred-symbolic",
+        )
+        add_home_child(
+            section_id="home-suggested",
+            title=_HOME_ROOT_TITLES["home-suggested"],
+            icon="applications-science-symbolic",
         )
 
         def toggle_home(_row: Adw.ActionRow) -> None:
