@@ -61,6 +61,7 @@ class TunesWindow(Adw.ApplicationWindow):
 
         self._now_playing = NowPlayingBar(service=service, art_loader=self._art_loader)
         self._now_playing.set_queue_handler(self._open_queue_sheet)
+        self._now_playing.set_play_handler(self._on_play_clicked)
 
         self._toolbar = Adw.ToolbarView()
         self._toolbar.set_size_request(-1, -1)
@@ -238,6 +239,28 @@ class TunesWindow(Adw.ApplicationWindow):
         self._show_albums_root()
         self._show_artists_root()
         self._sidebar_nav_list.select_row(self._sidebar_rows["albums"])
+
+    def _album_id_for_current_view(self) -> str | None:
+        nav = self._active_nav_view()
+        if nav is None:
+            return None
+        page = nav.get_visible_page()
+        if page is None:
+            return None
+        tag = page.get_tag()
+        if not tag or tag in _NAV_ROOT_TAGS:
+            return None
+        album = self._service.get_album(tag)
+        return tag if album is not None else None
+
+    def _on_play_clicked(self) -> None:
+        state = self._service.get_playback_state()
+        if state.current_track is None and not state.queue:
+            album_id = self._album_id_for_current_view()
+            if album_id is not None:
+                self._service.play_album(album_id, start_index=0)
+                return
+        self._service.toggle_play_pause()
 
     def _compute_sidebar_width_sp(self) -> float:
         max_nat = 0

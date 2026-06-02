@@ -98,7 +98,8 @@ class NowPlayingBar(Gtk.Box):
         self._play_btn.add_css_class("circular")
         self._play_btn.set_icon_name("media-playback-start-symbolic")
         self._play_btn.set_tooltip_text("Play")
-        self._play_btn.connect("clicked", lambda *_: service.toggle_play_pause())
+        self._play_handler: Callable[[], None] | None = None
+        self._play_btn.connect("clicked", self._on_play_clicked)
         controls.append(self._play_btn)
 
         next_btn = Gtk.Button()
@@ -196,6 +197,16 @@ class NowPlayingBar(Gtk.Box):
 
     def set_queue_handler(self, handler: Callable[[], None]) -> None:
         self._queue_handler = handler
+
+    def set_play_handler(self, handler: Callable[[], None]) -> None:
+        self._play_handler = handler
+
+    def _on_play_clicked(self, *_args: object) -> None:
+        handler = self._play_handler
+        if handler is not None:
+            handler()
+            return
+        self._service.toggle_play_pause()
 
     def _attach_drag_gesture(
         self,
