@@ -13,6 +13,21 @@ class Source(str, Enum):
     QOBUZ = "qobuz"
 
 
+class ReleaseType(str, Enum):
+    ALBUM = "album"
+    EP = "ep"
+    SINGLE = "single"
+    COMPILATION = "compilation"
+    LIVE_ALBUM = "live_album"
+    SYNTHETIC = "synthetic"
+
+
+class ReleaseCompleteness(str, Enum):
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    SYNTHETIC = "synthetic"
+
+
 @dataclass(frozen=True, slots=True)
 class Artist:
     id: str
@@ -21,14 +36,31 @@ class Artist:
 
 
 @dataclass(frozen=True, slots=True)
-class Album:
+class Release:
     id: str
     title: str
     artist_name: str
     source: Source
-    year: int | None = None
     track_count: int = 0
+    expected_track_count: int | None = None
+    completeness: ReleaseCompleteness = ReleaseCompleteness.COMPLETE
+    release_type: ReleaseType = ReleaseType.ALBUM
+    year: int | None = None
+    genre: str | None = None
     art_uri: str | None = None
+    duration_sec: float | None = None
+
+    @property
+    def is_partial(self) -> bool:
+        return self.completeness == ReleaseCompleteness.PARTIAL
+
+    @property
+    def is_synthetic(self) -> bool:
+        return self.completeness == ReleaseCompleteness.SYNTHETIC
+
+
+# Backward-compatible alias during migration.
+Album = Release
 
 
 @dataclass(frozen=True, slots=True)

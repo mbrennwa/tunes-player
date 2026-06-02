@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -38,7 +38,10 @@ CREATE TABLE IF NOT EXISTS tracks (
     album TEXT NOT NULL,
     disc_number INTEGER,
     track_number INTEGER,
-    year INTEGER
+    year INTEGER,
+    is_synthetic INTEGER NOT NULL DEFAULT 0,
+    total_tracks INTEGER,
+    genre TEXT
 );
 
 CREATE TABLE IF NOT EXISTS album_art (
@@ -71,6 +74,45 @@ _MIGRATION_V4 = """
 UPDATE files SET indexed_at_ns = 0 WHERE indexed_at_ns = mtime_ns;
 """
 
+_MIGRATION_V5_UNKNOWN_ALBUM = """
+UPDATE tracks
+SET
+    album_id = 'local:release:synthetic:' || id,
+    is_synthetic = 1,
+    album = title
+WHERE trim(album) = ''
+   OR album = 'Unknown Album'
+   OR lower(trim(album)) = 'unknown album';
+"""
+
+
+def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    return {str(row["name"]) for row in rows}
+
+
+def _add_column_if_missing(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    if column in _table_columns(connection, table):
+        return
+    connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _migrate_v5(connection: sqlite3.Connection) -> None:
+    _add_column_if_missing(
+        connection,
+        "tracks",
+        "is_synthetic",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    _add_column_if_missing(connection, "tracks", "total_tracks", "INTEGER")
+    _add_column_if_missing(connection, "tracks", "genre", "TEXT")
+    connection.executescript(_MIGRATION_V5_UNKNOWN_ALBUM)
+
 
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -96,17 +138,18 @@ def _migrate(connection: sqlite3.Connection) -> None:
         connection.commit()
         return
 
-    version = int(row["value"])
-    if version < 2:
+    stored_version = int(row["value"])
+    if stored_version < 2:
         connection.executescript(_MIGRATION_V2)
-        version = 2
-    if version < 3:
+    if stored_version < 3:
         connection.executescript(_MIGRATION_V3)
-        version = 3
-    if version < 4:
+    if stored_version < 4:
         connection.executescript(_MIGRATION_V4)
+    if stored_version < 5:
+        _migrate_v5(connection)
+    if stored_version < SCHEMA_VERSION:
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
-            ("4",),
+            (str(SCHEMA_VERSION),),
         )
         connection.commit()

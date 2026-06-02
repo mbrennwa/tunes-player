@@ -5,7 +5,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from tunes_player.core.backends.tidal import ids as tidal_ids
-from tunes_player.core.models import Album, Artist, Source, Track
+from tunes_player.core.models import (
+    Artist,
+    Release,
+    ReleaseCompleteness,
+    ReleaseType,
+    Source,
+    Track,
+)
 
 if TYPE_CHECKING:
     from tidalapi.album import Album as TidalAlbum
@@ -21,21 +28,39 @@ def _album_art(session: Session, album: TidalAlbum, *, size: int = 320) -> str |
         return None
 
 
-def album_from_tidal(session: Session, album: TidalAlbum) -> Album:
+def release_from_tidal(session: Session, album: TidalAlbum, *, owned_track_count: int | None = None) -> Release:
     artists = album.artists or []
     artist_name = artists[0].name if artists else "Unknown Artist"
     year = None
     if album.release_date is not None:
         year = album.release_date.year
-    return Album(
+    expected = int(album.num_tracks or 0) or None
+    track_count = owned_track_count if owned_track_count is not None else (expected or 0)
+    if expected is not None and track_count < expected:
+        completeness = ReleaseCompleteness.PARTIAL
+        release_type = ReleaseType.ALBUM
+    elif track_count == 1:
+        completeness = ReleaseCompleteness.COMPLETE
+        release_type = ReleaseType.SINGLE
+    else:
+        completeness = ReleaseCompleteness.COMPLETE
+        release_type = ReleaseType.ALBUM
+    return Release(
         id=tidal_ids.album_id(album.id),
-        title=album.name or "Unknown Album",
+        title=album.name or "Unknown",
         artist_name=artist_name,
         source=Source.TIDAL,
         year=year,
-        track_count=int(album.num_tracks or 0),
+        track_count=track_count,
+        expected_track_count=expected,
+        completeness=completeness,
+        release_type=release_type,
         art_uri=_album_art(session, album),
     )
+
+
+def album_from_tidal(session: Session, album: TidalAlbum) -> Release:
+    return release_from_tidal(session, album)
 
 
 def artist_from_tidal(artist: TidalArtist) -> Artist:

@@ -15,7 +15,7 @@ from tunes_player.core.config import ConfigManager
 from tunes_player.core.home import RecentlyAddedItem
 from tunes_player.core.library import LibraryStore, ScanResult
 from tunes_player.core.library.scan_worker import create_scan_process
-from tunes_player.core.models import Album, Artist, Track
+from tunes_player.core.models import Album, Artist, Release, Track
 from tunes_player.core.playback.engine import EngineEvent, PlaybackEngine
 from tunes_player.core.volume import VolumeController, VolumeEndpoint
 
@@ -27,8 +27,11 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class SearchResults:
-    albums: list[Album]
-    tracks: list[Track]
+    releases: list[Release]
+
+    @property
+    def albums(self) -> list[Release]:
+        return self.releases
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,8 +115,11 @@ class PlayerService:
 
         return probe_playback_engine()
 
+    def list_releases(self) -> list[Release]:
+        return self._store.list_releases()
+
     def list_albums(self) -> list[Album]:
-        return self._store.list_albums()
+        return self.list_releases()
 
     def list_artists(self) -> list[Artist]:
         return self._store.list_artists()
@@ -127,44 +133,62 @@ class PlayerService:
             except TidalUnavailableError:
                 pass
         items.sort(key=lambda item: item.added_ns, reverse=True)
-        return items[:120]
+        deduped: list[RecentlyAddedItem] = []
+        seen_release_ids: set[str] = set()
+        for item in items:
+            if item.release.id in seen_release_ids:
+                continue
+            seen_release_ids.add(item.release.id)
+            deduped.append(item)
+        return deduped[:120]
+
+    def get_release(self, release_id: str) -> Release | None:
+        if release_id.startswith("tidal:"):
+            if not self._tidal.is_logged_in():
+                return None
+            try:
+                return self._tidal.get_release(release_id)
+            except TidalUnavailableError:
+                return None
+        return self._store.get_release(release_id)
 
     def get_album(self, album_id: str) -> Album | None:
-        if album_id.startswith("tidal:"):
+        return self.get_release(album_id)
+
+    def get_release_tracks(self, release_id: str) -> list[Track]:
+        if release_id.startswith("tidal:"):
             if not self._tidal.is_logged_in():
-                return None
+                return []
             try:
-                return self._tidal.get_album(album_id)
+                return self._tidal.get_release_tracks(release_id)
             except TidalUnavailableError:
-                return None
-        return self._store.get_album(album_id)
+                return []
+        return self._store.get_release_tracks(release_id)
 
     def get_album_tracks(self, album_id: str) -> list[Track]:
-        if album_id.startswith("tidal:"):
-            if not self._tidal.is_logged_in():
-                return []
-            try:
-                return self._tidal.get_album_tracks(album_id)
-            except TidalUnavailableError:
-                return []
-        return self._store.get_album_tracks(album_id)
+        return self.get_release_tracks(album_id)
+
+    def get_artist_releases(self, artist_id: str) -> list[Release]:
+        return self._store.get_artist_releases(artist_id)
 
     def get_artist_albums(self, artist_id: str) -> list[Album]:
-        return self._store.get_artist_albums(artist_id)
+        return self.get_artist_releases(artist_id)
 
     def search(self, query: str) -> SearchResults:
         needle = query.strip()
         if not needle:
-            return SearchResults(albums=[], tracks=[])
-        albums, tracks = self._store.search(needle)
+            return SearchResults(releases=[])
+        releases = self._store.search_releases(needle)
+        seen = {release.id for release in releases}
         if self._tidal.is_logged_in():
             try:
-                tidal_albums, tidal_tracks = self._tidal.search(needle)
-                albums = [*albums, *tidal_albums]
-                tracks = [*tracks, *tidal_tracks]
+                for release in self._tidal.search_releases(needle):
+                    if release.id not in seen:
+                        seen.add(release.id)
+                        releases.append(release)
             except TidalUnavailableError:
                 pass
-        return SearchResults(albums=albums, tracks=tracks)
+        return SearchResults(releases=releases)
 
     def tidal_available(self) -> bool:
         return self._tidal.is_available()
@@ -294,9 +318,9 @@ class PlayerService:
         track = self._store.get_track(track_id)
         if track is None:
             return
-        album_id = self._store.album_id_for_track(track_id)
-        if album_id is not None:
-            self._queue = self.get_album_tracks(album_id)
+        release_id = self._store.release_id_for_track(track_id)
+        if release_id is not None:
+            self._queue = self.get_release_tracks(release_id)
             self._queue_index = next(
                 (index for index, item in enumerate(self._queue) if item.id == track_id),
                 0,
@@ -320,21 +344,24 @@ class PlayerService:
             return
         self._start_queue_track(self._queue[self._queue_index])
 
-    def play_album(self, album_id: str, *, start_index: int = 0) -> None:
-        tracks = self.get_album_tracks(album_id)
+    def play_release(self, release_id: str, *, start_index: int = 0) -> None:
+        tracks = self.get_release_tracks(release_id)
         if not tracks:
-            if album_id.startswith("tidal:"):
+            if release_id.startswith("tidal:"):
                 if not self._tidal.is_logged_in():
                     self._report_error("Sign in to TIDAL in Settings → Sources.")
                 else:
-                    self._report_error("Could not load tracks for this album.")
+                    self._report_error("Could not load tracks for this release.")
             else:
-                self._report_error("No tracks in this album.")
+                self._report_error("No tracks in this release.")
             return
         start_index = max(0, min(start_index, len(tracks) - 1))
         self._queue = tracks
         self._queue_index = start_index
         self._start_queue_track(tracks[start_index])
+
+    def play_album(self, album_id: str, *, start_index: int = 0) -> None:
+        self.play_release(album_id, start_index=start_index)
 
     def toggle_play_pause(self) -> None:
         if self._current_track is None and self._queue:

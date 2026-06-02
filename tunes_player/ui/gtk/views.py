@@ -12,7 +12,7 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.home import RecentlyAddedItem
-from tunes_player.core.models import Album, Artist, Track
+from tunes_player.core.models import Artist, Release, ReleaseCompleteness, Track
 from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.album_grid import (
     ALBUM_GRID_SPACING,
@@ -39,74 +39,25 @@ _ALBUM_DETAIL_ART_SIZE = 220
 _ALBUM_TILE_DEFAULT_EDGE = 200
 
 
-class RecentlyAddedListView(Gtk.ScrolledWindow):
+class RecentlyAddedGridView(Gtk.ScrolledWindow):
     def __init__(
         self,
         *,
         items: list[RecentlyAddedItem],
-        on_album_activated: Callable[[str], None],
-        on_track_activated: Callable[[str], None],
+        on_release_activated: Callable[[str], None],
         empty_message: str | None = None,
+        art_loader: ArtLoader | None = None,
+        window_inner_width_fn: Callable[[], int] | None = None,
     ) -> None:
-        super().__init__(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
-        self.set_propagate_natural_width(False)
-        self.add_css_class("view")
-
-        if not items and empty_message:
-            label = Gtk.Label(label=empty_message, vexpand=True, justify=Gtk.Justification.CENTER)
-            label.add_css_class("dim-label")
-            label.set_valign(Gtk.Align.CENTER)
-            label.set_margin_top(24)
-            label.set_margin_bottom(24)
-            label.set_margin_start(24)
-            label.set_margin_end(24)
-            self.set_child(label)
-            return
-
-        list_box = Gtk.ListBox()
-        list_box.add_css_class("boxed-list")
-        list_box.set_selection_mode(Gtk.SelectionMode.NONE)
-        list_box.set_valign(Gtk.Align.START)
-        list_box.set_vexpand(False)
-        self.set_child(list_box)
-
-        for item in items:
-            if item.kind == "album" and item.album is not None:
-                album = item.album
-                row = Adw.ActionRow(
-                    title=escape_markup(album.title),
-                    subtitle=escape_markup(
-                        join_detail("Album", source_label(album.source), album.artist_name)
-                    ),
-                )
-                row.set_activatable(True)
-                row.add_prefix(Gtk.Image.new_from_icon_name("media-optical-symbolic"))
-                row.connect(
-                    "activated",
-                    lambda _row, album_id=album.id: on_album_activated(album_id),
-                )
-                list_box.append(row)
-            elif item.kind == "track" and item.track is not None:
-                track = item.track
-                row = Adw.ActionRow(
-                    title=escape_markup(track.title),
-                    subtitle=escape_markup(
-                        join_detail(
-                            "Track",
-                            source_label(track.source),
-                            track.artist_name,
-                            track.album_title,
-                            format_duration(track.duration_sec),
-                        )
-                    ),
-                )
-                row.set_activatable(True)
-                row.add_prefix(Gtk.Image.new_from_icon_name("audio-x-generic-symbolic"))
-                row.connect(
-                    "activated",
-                    lambda _row, track_id=track.id: on_track_activated(track_id),
-                )
-                list_box.append(row)
+        releases = [item.release for item in items]
+        ReleaseGridView.__init__(
+            self,
+            releases=releases,
+            on_release_activated=on_release_activated,
+            empty_message=empty_message,
+            art_loader=art_loader,
+            window_inner_width_fn=window_inner_width_fn,
+        )
 
 
 class PlaceholderView(Gtk.Box):
@@ -134,12 +85,29 @@ class PlaceholderView(Gtk.Box):
         box.append(label)
 
 
-class AlbumGridView(Gtk.ScrolledWindow):
+def _format_release_track_count(release: Release) -> str | None:
+    if release.expected_track_count and release.track_count < release.expected_track_count:
+        return f"{release.track_count} / {release.expected_track_count} tracks"
+    if release.track_count:
+        return f"{release.track_count} tracks"
+    return None
+
+
+def _release_completeness_label(release: Release) -> str | None:
+    if release.completeness == ReleaseCompleteness.PARTIAL:
+        expected = release.expected_track_count or "?"
+        return f"Partial — {release.track_count} of {expected} tracks"
+    if release.completeness == ReleaseCompleteness.SYNTHETIC:
+        return "Synthetic release"
+    return None
+
+
+class ReleaseGridView(Gtk.ScrolledWindow):
     def __init__(
         self,
         *,
-        albums: list[Album],
-        on_album_activated: Callable[[str], None],
+        releases: list[Release],
+        on_release_activated: Callable[[str], None],
         empty_message: str | None = None,
         art_loader: ArtLoader | None = None,
         window_inner_width_fn: Callable[[], int] | None = None,
@@ -152,7 +120,7 @@ class AlbumGridView(Gtk.ScrolledWindow):
         self._last_window_inner = 0
         self._root_width_notify_id = 0
 
-        if not albums and empty_message:
+        if not releases and empty_message:
             label = Gtk.Label(label=empty_message, vexpand=True, justify=Gtk.Justification.CENTER)
             label.add_css_class("dim-label")
             label.set_valign(Gtk.Align.CENTER)
@@ -163,7 +131,7 @@ class AlbumGridView(Gtk.ScrolledWindow):
             self.set_child(label)
             return
 
-        grid = AlbumTileGrid(inner_width_fn=self._album_tile_inner_width)
+        grid = ReleaseTileGrid(inner_width_fn=self._album_tile_inner_width)
         grid.set_margin_top(ALBUM_GRID_VIEW_MARGIN)
         grid.set_margin_bottom(ALBUM_GRID_VIEW_MARGIN)
         grid.set_margin_start(ALBUM_GRID_VIEW_MARGIN)
@@ -176,39 +144,39 @@ class AlbumGridView(Gtk.ScrolledWindow):
         self.connect("map", self._on_view_map)
         self.connect("unmap", self._on_view_unmap)
 
-        AlbumGridView._populate_albums(
+        ReleaseGridView._populate_releases(
             grid,
-            albums,
-            on_album_activated,
+            releases,
+            on_release_activated,
             art_loader=art_loader,
         )
 
     @staticmethod
-    def _populate_albums(
-        grid: AlbumTileGrid,
-        albums: list[Album],
-        on_album_activated: Callable[[str], None],
+    def _populate_releases(
+        grid: ReleaseTileGrid,
+        releases: list[Release],
+        on_release_activated: Callable[[str], None],
         *,
         art_loader: ArtLoader | None = None,
         start: int = 0,
         batch_size: int = 24,
         small: bool = False,
     ) -> None:
-        end = min(start + batch_size, len(albums))
-        for album in albums[start:end]:
-            grid.append_album(
-                album,
-                on_activate=lambda album_id=album.id: on_album_activated(album_id),
+        end = min(start + batch_size, len(releases))
+        for release in releases[start:end]:
+            grid.append_release(
+                release,
+                on_activate=lambda release_id=release.id: on_release_activated(release_id),
                 art_loader=art_loader,
                 small=small,
             )
 
-        if end < len(albums):
+        if end < len(releases):
             GLib.idle_add(
-                AlbumGridView._populate_albums,
+                ReleaseGridView._populate_releases,
                 grid,
-                albums,
-                on_album_activated,
+                releases,
+                on_release_activated,
                 art_loader,
                 start=end,
                 batch_size=batch_size,
@@ -297,7 +265,7 @@ class SearchResultsView(Gtk.ScrolledWindow):
         *,
         service: PlayerService,
         query: str,
-        on_album_activated: Callable[[str], None],
+        on_release_activated: Callable[[str], None],
         art_loader: ArtLoader | None = None,
         window_inner_width_fn: Callable[[], int] | None = None,
     ) -> None:
@@ -323,49 +291,28 @@ class SearchResultsView(Gtk.ScrolledWindow):
         self.connect("unmap", self._on_view_unmap)
 
         results = service.search(query)
-        if not results.albums and not results.tracks:
+        if not results.releases:
             empty = Gtk.Label(label=f'No results for “{query}”', vexpand=True)
             empty.add_css_class("dim-label")
             box.append(empty)
             return
 
-        if results.albums:
-            box.append(_section_label("Albums"))
-            album_grid = AlbumTileGrid(inner_width_fn=self._search_album_tile_inner_width)
-            album_grid.set_hexpand(True)
-            album_grid.set_halign(Gtk.Align.FILL)
-            album_shell = _FixedMinWidthShell(search_grid_min_content_width())
-            album_shell.append(album_grid)
-            box.append(album_shell)
-            self._search_album_grid = album_grid
-            for album in results.albums:
-                album_grid.append_album(
-                    album,
-                    on_activate=lambda album_id=album.id: on_album_activated(album_id),
-                    art_loader=art_loader,
-                    small=True,
-                )
-            GLib.idle_add(album_grid._sync_layout_idle)
-
-        if results.tracks:
-            box.append(_section_label("Tracks"))
-            track_list = Gtk.ListBox()
-            track_list.add_css_class("boxed-list")
-            track_list.set_selection_mode(Gtk.SelectionMode.NONE)
-            box.append(track_list)
-            for track in results.tracks:
-                detail = join_detail(track.artist_name, track.album_title or None)
-                subtitle = join_detail(source_label(track.source), detail)
-                row = Adw.ActionRow(
-                    title=escape_markup(track.title),
-                    subtitle=escape_markup(subtitle),
-                )
-                row.set_activatable(True)
-                row.connect(
-                    "activated",
-                    lambda _row, track_id=track.id: service.play_track(track_id),
-                )
-                track_list.append(row)
+        box.append(_section_label("Releases"))
+        release_grid = ReleaseTileGrid(inner_width_fn=self._search_album_tile_inner_width)
+        release_grid.set_hexpand(True)
+        release_grid.set_halign(Gtk.Align.FILL)
+        release_shell = _FixedMinWidthShell(search_grid_min_content_width())
+        release_shell.append(release_grid)
+        box.append(release_shell)
+        self._search_album_grid = release_grid
+        for release in results.releases:
+            release_grid.append_release(
+                release,
+                on_activate=lambda release_id=release.id: on_release_activated(release_id),
+                art_loader=art_loader,
+                small=True,
+            )
+        GLib.idle_add(release_grid._sync_layout_idle)
 
     def _viewport_inner_width(self) -> int:
         width = self.get_width()
@@ -475,12 +422,12 @@ class QueueSheet(Adw.Dialog):
             self._list_box.append(row)
 
 
-class AlbumDetailView(Gtk.Box):
+class ReleaseDetailView(Gtk.Box):
     def __init__(
         self,
         *,
         service: PlayerService,
-        album: Album,
+        release: Release,
         art_loader: ArtLoader | None = None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
@@ -501,7 +448,7 @@ class AlbumDetailView(Gtk.Box):
         art_box.set_valign(Gtk.Align.START)
         art_box.append(
             _square_art(
-                album,
+                release,
                 size=_ALBUM_DETAIL_ART_SIZE,
                 art_loader=art_loader,
                 css_class="album-detail-art",
@@ -515,23 +462,31 @@ class AlbumDetailView(Gtk.Box):
         details.set_valign(Gtk.Align.START)
         header.append(details)
 
-        title = Gtk.Label(label=album.title, xalign=0.0, ellipsize=3)
+        title = Gtk.Label(label=release.title, xalign=0.0, ellipsize=3)
         title.add_css_class("title-1")
         title.set_wrap(False)
         title.set_halign(Gtk.Align.START)
         details.append(title)
 
-        artist = Gtk.Label(label=album.artist_name, xalign=0.0, ellipsize=3)
+        artist = Gtk.Label(label=release.artist_name, xalign=0.0, ellipsize=3)
         artist.add_css_class("title-4")
         artist.add_css_class("dim-label")
         artist.set_wrap(False)
         artist.set_halign(Gtk.Align.START)
         details.append(artist)
 
-        year = str(album.year) if album.year else None
-        track_count = f"{album.track_count} tracks" if album.track_count else None
+        year = str(release.year) if release.year else None
+        genre = release.genre
+        duration = format_duration(release.duration_sec)
+        track_count = _format_release_track_count(release)
         info = Gtk.Label(
-            label=join_detail(source_label(album.source), year, track_count),
+            label=join_detail(
+                source_label(release.source),
+                year,
+                genre,
+                track_count,
+                duration,
+            ),
             xalign=0.0,
             ellipsize=3,
         )
@@ -539,6 +494,13 @@ class AlbumDetailView(Gtk.Box):
         info.set_wrap(False)
         info.set_halign(Gtk.Align.START)
         details.append(info)
+
+        completeness = _release_completeness_label(release)
+        if completeness:
+            status = Gtk.Label(label=completeness, xalign=0.0, ellipsize=3)
+            status.add_css_class("dim-label")
+            status.set_halign(Gtk.Align.START)
+            details.append(status)
 
         scrolled = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         scrolled.set_margin_top(0)
@@ -555,7 +517,7 @@ class AlbumDetailView(Gtk.Box):
         )
         scrolled.set_child(list_box)
 
-        for index, track in enumerate(service.get_album_tracks(album.id)):
+        for index, track in enumerate(service.get_release_tracks(release.id)):
             list_box.append(_compact_track_row(track, index=index))
 
 
@@ -684,8 +646,8 @@ class _FixedMinWidthShell(Gtk.Box):
         return Gtk.Box.do_measure(self, orientation, for_size)
 
 
-class AlbumTileGrid(Gtk.Box):
-    """Square album tiles; column count follows this widget's allocated width."""
+class ReleaseTileGrid(Gtk.Box):
+    """Square release tiles; column count follows this widget's allocated width."""
 
     def __init__(self, *, inner_width_fn: Callable[[], int] | None = None) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=ALBUM_GRID_SPACING)
@@ -753,16 +715,16 @@ class AlbumTileGrid(Gtk.Box):
             self.relayout(inner)
         return True
 
-    def append_album(
+    def append_release(
         self,
-        album: Album,
+        release: Release,
         *,
         on_activate: Callable[[], None],
         art_loader: ArtLoader | None,
         small: bool = False,
     ) -> None:
-        card = _album_card(
-            album,
+        card = _release_card(
+            release,
             art_loader=art_loader,
             small=small,
             edge=self._tile_edge,
@@ -833,13 +795,13 @@ def _attach_album_card_activate(tile: Gtk.Widget, callback: Callable[[], None]) 
 
 
 def _square_art(
-    album: Album,
+    release: Release,
     *,
     size: int,
     art_loader: ArtLoader | None,
     css_class: str = "album-card-art",
 ) -> Gtk.Widget:
-    """Fixed square cover for album detail header (fills with cover art)."""
+    """Fixed square cover for release detail header (fills with cover art)."""
     frame = Gtk.Box()
     frame.add_css_class(css_class)
     frame.set_size_request(size, size)
@@ -858,7 +820,7 @@ def _square_art(
     art.set_can_shrink(True)
     art.set_content_fit(Gtk.ContentFit.COVER)
     if art_loader is not None:
-        art_loader.set_picture(art, album.art_uri, pixel_size=size)
+        art_loader.set_picture(art, release.art_uri, pixel_size=size)
     else:
         art.set_paintable(None)
     frame.append(art)
@@ -874,8 +836,8 @@ def _overlay_label(text: str, *, extra_classes: tuple[str, ...] = ()) -> Gtk.Lab
     return label
 
 
-def _album_card(
-    album: Album,
+def _release_card(
+    release: Release,
     *,
     small: bool = False,
     art_loader: ArtLoader | None = None,
@@ -920,7 +882,7 @@ def _album_card(
 
     load_pixels = _ALBUM_TILE_ART_PIXELS_SMALL if small else _ALBUM_TILE_ART_PIXELS
     if art_loader is not None:
-        art_loader.set_picture(picture, album.art_uri, pixel_size=load_pixels)
+        art_loader.set_picture(picture, release.art_uri, pixel_size=load_pixels)
 
     labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
     labels.add_css_class("album-card-overlay")
@@ -930,8 +892,17 @@ def _album_card(
     labels.set_vexpand(True)
     overlay.add_overlay(labels)
 
-    labels.append(_overlay_label(album.title, extra_classes=("album-card-title",)))
-    labels.append(_overlay_label(album.artist_name, extra_classes=("album-card-meta",)))
-    labels.append(_overlay_label(source_label(album.source), extra_classes=("album-card-meta",)))
+    labels.append(_overlay_label(release.title, extra_classes=("album-card-title",)))
+    labels.append(_overlay_label(release.artist_name, extra_classes=("album-card-meta",)))
+    track_hint = _format_release_track_count(release)
+    meta = join_detail(source_label(release.source), track_hint)
+    labels.append(_overlay_label(meta, extra_classes=("album-card-meta",)))
 
     return shell
+
+
+# Backward-compatible aliases.
+AlbumGridView = ReleaseGridView
+AlbumDetailView = ReleaseDetailView
+AlbumTileGrid = ReleaseTileGrid
+RecentlyAddedListView = RecentlyAddedGridView

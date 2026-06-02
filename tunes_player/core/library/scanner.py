@@ -45,9 +45,13 @@ class _ParsedTrack:
     artist: str
     album_artist: str
     album: str
+    release_id: str
+    is_synthetic: bool
     disc_number: int | None
     track_number: int | None
     year: int | None
+    genre: str | None
+    total_tracks: int | None
 
 
 class LibraryScanner:
@@ -241,18 +245,17 @@ class LibraryScanner:
 
     @staticmethod
     def _insert_track(connection: sqlite3.Connection, parsed: _ParsedTrack, file_id: int) -> None:
-        album_key = ids.album_id(parsed.album_artist, parsed.album)
         connection.execute(
             """
             INSERT INTO tracks(
                 id, file_id, album_id, title, artist, album_artist, album,
-                disc_number, track_number, year
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                disc_number, track_number, year, is_synthetic, total_tracks, genre
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ids.track_id(parsed.path),
                 file_id,
-                album_key,
+                parsed.release_id,
                 parsed.title,
                 parsed.artist,
                 parsed.album_artist,
@@ -260,6 +263,9 @@ class LibraryScanner:
                 parsed.disc_number,
                 parsed.track_number,
                 parsed.year,
+                1 if parsed.is_synthetic else 0,
+                parsed.total_tracks,
+                parsed.genre,
             ),
         )
 
@@ -281,7 +287,20 @@ def _parse_file(path: Path, mtime_ns: int, size_bytes: int) -> _ParsedTrack:
     title = tags.get("title") or path.stem
     artist = tags.get("artist") or tags.get("albumartist") or "Unknown Artist"
     album_artist = tags.get("albumartist") or artist
-    album = tags.get("album") or "Unknown Album"
+    track_number = tags.get("tracknumber")
+    total_tracks = tags.get("totaltracks")
+    if total_tracks is None and track_number is not None:
+        track_number, total_tracks = _split_track_number(track_number)
+    track_id = ids.track_id(path_str)
+    album_raw = tags.get("album")
+    if _album_tag_missing(album_raw):
+        release_id = ids.synthetic_release_id(track_id)
+        album = title
+        is_synthetic = True
+    else:
+        album = str(album_raw).strip()
+        release_id = ids.release_id(album_artist, album)
+        is_synthetic = False
     audio = tags.get("_audio", {})
     return _ParsedTrack(
         path=path_str,
@@ -296,10 +315,29 @@ def _parse_file(path: Path, mtime_ns: int, size_bytes: int) -> _ParsedTrack:
         artist=artist,
         album_artist=album_artist,
         album=album,
+        release_id=release_id,
+        is_synthetic=is_synthetic,
         disc_number=tags.get("discnumber"),
-        track_number=tags.get("tracknumber"),
+        track_number=track_number,
         year=tags.get("year"),
+        genre=tags.get("genre"),
+        total_tracks=total_tracks,
     )
+
+
+def _album_tag_missing(album: str | None) -> bool:
+    if album is None:
+        return True
+    normalized = album.strip().casefold()
+    return not normalized or normalized == "unknown album"
+
+
+def _split_track_number(value: int | str) -> tuple[int | None, int | None]:
+    text = str(value)
+    if "/" not in text:
+        return _parse_int(text), None
+    left, _, right = text.partition("/")
+    return _parse_int(left), _parse_int(right)
 
 
 def _read_tags(path: Path) -> dict:
@@ -355,6 +393,7 @@ def _read_mutagen_mp4(path: Path) -> dict:
         "disk": "discnumber",
         "trkn": "tracknumber",
         "\xa9day": "year",
+        "\xa9gen": "genre",
     }
     for key, name in mapping.items():
         if key not in audio.tags:
@@ -399,12 +438,14 @@ def _tags_from_vorbis(audio) -> dict:
         ("album", "album"),
         ("discnumber", "discnumber"),
         ("tracknumber", "tracknumber"),
+        ("tracktotal", "totaltracks"),
         ("date", "year"),
+        ("genre", "genre"),
     ):
         value = getter(key)
         if not value:
             continue
-        if name in {"discnumber", "tracknumber"}:
+        if name in {"discnumber", "tracknumber", "totaltracks"}:
             tags[name] = _parse_int(str(value[0]))
         elif name == "year":
             tags[name] = _parse_year(str(value[0]))
@@ -422,12 +463,14 @@ def _tags_from_easyid3(tags) -> dict:
         ("album", "album"),
         ("discnumber", "discnumber"),
         ("tracknumber", "tracknumber"),
+        ("tracktotal", "totaltracks"),
         ("date", "year"),
+        ("genre", "genre"),
     ):
         if key not in tags:
             continue
         value = tags[key]
-        if name in {"discnumber", "tracknumber"}:
+        if name in {"discnumber", "tracknumber", "totaltracks"}:
             result[name] = _parse_int(str(value[0]))
         elif name == "year":
             result[name] = _parse_year(str(value[0]))

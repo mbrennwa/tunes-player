@@ -10,7 +10,24 @@ from pathlib import Path
 from tunes_player.core.home import RecentlyAddedItem
 from tunes_player.core.library import ids
 from tunes_player.core.library.db import connect
-from tunes_player.core.models import Album, Artist, Source, Track
+from tunes_player.core.library.release_logic import infer_release_metadata
+from tunes_player.core.models import Album, Artist, Release, Source, Track
+
+_RELEASE_GROUP_SELECT = """
+    SELECT
+        t.album_id AS release_id,
+        t.album,
+        t.album_artist,
+        MIN(t.year) AS year,
+        COUNT(*) AS track_count,
+        MAX(t.is_synthetic) AS is_synthetic,
+        MAX(t.total_tracks) AS total_tracks_tag,
+        MAX(t.track_number) AS max_track_number,
+        MIN(t.genre) AS genre,
+        SUM(f.duration_sec) AS duration_sec
+    FROM tracks t
+    JOIN files f ON f.id = t.file_id
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,25 +61,18 @@ class LibraryStore:
         row = self._connection.execute("SELECT COUNT(*) AS count FROM tracks").fetchone()
         return int(row["count"])
 
-    def list_albums(self) -> list[Album]:
+    def list_releases(self) -> list[Release]:
         rows = self._connection.execute(
-            """
-            SELECT
-                album_id,
-                album,
-                album_artist,
-                MIN(year) AS year,
-                COUNT(*) AS track_count
-            FROM tracks
-            GROUP BY album_id, album, album_artist
-            ORDER BY album_artist COLLATE NOCASE, album COLLATE NOCASE
+            f"""
+            {_RELEASE_GROUP_SELECT}
+            GROUP BY t.album_id, t.album, t.album_artist
+            ORDER BY t.album_artist COLLATE NOCASE, t.album COLLATE NOCASE
             """,
         ).fetchall()
-        art_by_album = self._art_uri_map([row["album_id"] for row in rows])
-        return [
-            self._row_to_album(row, art_uri=art_by_album.get(row["album_id"]))
-            for row in rows
-        ]
+        return self._rows_to_releases(rows)
+
+    def list_albums(self) -> list[Album]:
+        return self.list_releases()
 
     def list_artists(self) -> list[Artist]:
         rows = self._connection.execute(
@@ -78,21 +88,23 @@ class LibraryStore:
             for row in rows
         ]
 
-    def get_album(self, album_id: str) -> Album | None:
+    def get_release(self, release_id: str) -> Release | None:
         row = self._connection.execute(
-            """
-            SELECT album_id, album, album_artist, MIN(year) AS year, COUNT(*) AS track_count
-            FROM tracks
-            WHERE album_id = ?
-            GROUP BY album_id, album, album_artist
+            f"""
+            {_RELEASE_GROUP_SELECT}
+            WHERE t.album_id = ?
+            GROUP BY t.album_id, t.album, t.album_artist
             """,
-            (album_id,),
+            (release_id,),
         ).fetchone()
         if row is None:
             return None
-        return self._row_to_album(row, art_uri=self._art_uri_for_album(album_id))
+        return self._row_to_release(row, art_uri=self._art_uri_for_release(release_id))
 
-    def get_album_tracks(self, album_id: str) -> list[Track]:
+    def get_album(self, album_id: str) -> Album | None:
+        return self.get_release(album_id)
+
+    def get_release_tracks(self, release_id: str) -> list[Track]:
         rows = self._connection.execute(
             """
             SELECT
@@ -111,9 +123,12 @@ class LibraryStore:
             WHERE t.album_id = ?
             ORDER BY t.disc_number NULLS LAST, t.track_number NULLS LAST, t.title COLLATE NOCASE
             """,
-            (album_id,),
+            (release_id,),
         ).fetchall()
         return [self._row_to_track(row) for row in rows]
+
+    def get_album_tracks(self, album_id: str) -> list[Track]:
+        return self.get_release_tracks(album_id)
 
     def get_artist(self, artist_id: str) -> Artist | None:
         for artist in self.list_artists():
@@ -121,30 +136,23 @@ class LibraryStore:
                 return artist
         return None
 
-    def get_artist_albums(self, artist_id: str) -> list[Album]:
+    def get_artist_releases(self, artist_id: str) -> list[Release]:
         artist = self.get_artist(artist_id)
         if artist is None:
             return []
         rows = self._connection.execute(
-            """
-            SELECT
-                album_id,
-                album,
-                album_artist,
-                MIN(year) AS year,
-                COUNT(*) AS track_count
-            FROM tracks
-            WHERE album_artist = ?
-            GROUP BY album_id, album, album_artist
-            ORDER BY album COLLATE NOCASE
+            f"""
+            {_RELEASE_GROUP_SELECT}
+            WHERE t.album_artist = ?
+            GROUP BY t.album_id, t.album, t.album_artist
+            ORDER BY t.album COLLATE NOCASE
             """,
             (artist.name,),
         ).fetchall()
-        art_by_album = self._art_uri_map([row["album_id"] for row in rows])
-        return [
-            self._row_to_album(row, art_uri=art_by_album.get(row["album_id"]))
-            for row in rows
-        ]
+        return self._rows_to_releases(rows)
+
+    def get_artist_albums(self, artist_id: str) -> list[Album]:
+        return self.get_artist_releases(artist_id)
 
     def get_track(self, track_id: str) -> Track | None:
         row = self._connection.execute(
@@ -170,12 +178,15 @@ class LibraryStore:
             return None
         return self._row_to_track(row)
 
-    def album_id_for_track(self, track_id: str) -> str | None:
+    def release_id_for_track(self, track_id: str) -> str | None:
         row = self._connection.execute(
             "SELECT album_id FROM tracks WHERE id = ?",
             (track_id,),
         ).fetchone()
         return None if row is None else str(row["album_id"])
+
+    def album_id_for_track(self, track_id: str) -> str | None:
+        return self.release_id_for_track(track_id)
 
     def get_file_metadata(self, track_id: str) -> FileMetadata | None:
         row = self._connection.execute(
@@ -204,116 +215,98 @@ class LibraryStore:
             channels=row["channels"],
         )
 
-    def search(self, query: str) -> tuple[list[Album], list[Track]]:
+    def search_releases(self, query: str, *, limit: int = 50) -> list[Release]:
         needle = f"%{query.strip()}%"
-        album_rows = self._connection.execute(
-            """
-            SELECT
-                album_id,
-                album,
-                album_artist,
-                MIN(year) AS year,
-                COUNT(*) AS track_count
-            FROM tracks
-            WHERE album LIKE ? COLLATE NOCASE
-               OR album_artist LIKE ? COLLATE NOCASE
-            GROUP BY album_id, album, album_artist
-            ORDER BY album_artist COLLATE NOCASE, album COLLATE NOCASE
-            LIMIT 50
+        release_ids: list[str] = []
+        seen: set[str] = set()
+
+        def add_ids(rows: list[sqlite3.Row]) -> None:
+            for row in rows:
+                release_id = str(row["release_id"])
+                if release_id not in seen:
+                    seen.add(release_id)
+                    release_ids.append(release_id)
+
+        add_ids(
+            self._connection.execute(
+                f"""
+                SELECT DISTINCT t.album_id AS release_id
+                FROM tracks t
+                WHERE t.album LIKE ? COLLATE NOCASE
+                   OR t.album_artist LIKE ? COLLATE NOCASE
+                LIMIT ?
+                """,
+                (needle, needle, limit),
+            ).fetchall(),
+        )
+        add_ids(
+            self._connection.execute(
+                """
+                SELECT DISTINCT t.album_id AS release_id
+                FROM tracks t
+                WHERE t.title LIKE ? COLLATE NOCASE
+                   OR t.artist LIKE ? COLLATE NOCASE
+                LIMIT ?
+                """,
+                (needle, needle, limit),
+            ).fetchall(),
+        )
+
+        if not release_ids:
+            return []
+
+        placeholders = ",".join("?" * len(release_ids))
+        rows = self._connection.execute(
+            f"""
+            {_RELEASE_GROUP_SELECT}
+            WHERE t.album_id IN ({placeholders})
+            GROUP BY t.album_id, t.album, t.album_artist
+            ORDER BY t.album_artist COLLATE NOCASE, t.album COLLATE NOCASE
             """,
-            (needle, needle),
+            release_ids,
         ).fetchall()
-        track_rows = self._connection.execute(
-            """
-            SELECT t.id, t.title, t.artist, t.album, t.album_artist, f.duration_sec, aa.art_uri
-            FROM tracks t
-            JOIN files f ON f.id = t.file_id
-            LEFT JOIN album_art aa ON aa.album_id = t.album_id
-            WHERE t.title LIKE ? COLLATE NOCASE
-               OR t.artist LIKE ? COLLATE NOCASE
-               OR t.album LIKE ? COLLATE NOCASE
-            ORDER BY t.album_artist COLLATE NOCASE, t.album COLLATE NOCASE, t.title COLLATE NOCASE
-            LIMIT 100
-            """,
-            (needle, needle, needle),
-        ).fetchall()
-        art_by_album = self._art_uri_map([row["album_id"] for row in album_rows])
-        albums = [
-            self._row_to_album(row, art_uri=art_by_album.get(row["album_id"]))
-            for row in album_rows
-        ]
-        tracks = [self._row_to_track(row) for row in track_rows]
-        return albums, tracks
+        by_id = {str(row["release_id"]): row for row in rows}
+        ordered = [by_id[release_id] for release_id in release_ids if release_id in by_id]
+        return self._rows_to_releases(ordered)
+
+    def search(self, query: str) -> tuple[list[Album], list[Track]]:
+        releases = self.search_releases(query)
+        return releases, []
 
     def list_recently_added_items(
         self,
         *,
         within_days: int = 30,
-        album_limit: int = 40,
-        track_limit: int = 80,
+        limit: int = 80,
     ) -> list[RecentlyAddedItem]:
         cutoff_ns = time.time_ns() - int(within_days * 86_400 * 1_000_000_000)
-        album_rows = self._connection.execute(
-            """
-            SELECT
-                t.album_id,
-                t.album,
-                t.album_artist,
-                MIN(t.year) AS year,
-                COUNT(*) AS track_count,
-                MAX(f.indexed_at_ns) AS added_ns
-            FROM tracks t
-            JOIN files f ON f.id = t.file_id
+        rows = self._connection.execute(
+            f"""
+            {_RELEASE_GROUP_SELECT}
             GROUP BY t.album_id, t.album, t.album_artist
-            HAVING added_ns >= ?
-            ORDER BY added_ns DESC
+            HAVING MAX(f.indexed_at_ns) >= ?
+            ORDER BY MAX(f.indexed_at_ns) DESC
             LIMIT ?
             """,
-            (cutoff_ns, album_limit),
+            (cutoff_ns, limit),
         ).fetchall()
-        track_rows = self._connection.execute(
-            """
-            SELECT
-                t.id,
-                t.title,
-                t.artist,
-                t.album,
-                t.album_artist,
-                t.disc_number,
-                t.track_number,
-                f.duration_sec,
-                aa.art_uri,
-                f.indexed_at_ns AS added_ns
-            FROM tracks t
-            JOIN files f ON f.id = t.file_id
-            LEFT JOIN album_art aa ON aa.album_id = t.album_id
-            WHERE f.indexed_at_ns >= ?
-            ORDER BY f.indexed_at_ns DESC
-            LIMIT ?
-            """,
-            (cutoff_ns, track_limit),
-        ).fetchall()
-        art_by_album = self._art_uri_map([row["album_id"] for row in album_rows])
         items: list[RecentlyAddedItem] = []
-        for row in album_rows:
-            album = self._row_to_album(row, art_uri=art_by_album.get(row["album_id"]))
-            items.append(
-                RecentlyAddedItem(
-                    kind="album",
-                    added_ns=int(row["added_ns"]),
-                    album=album,
-                )
+        for row in rows:
+            release = self._row_to_release(
+                row,
+                art_uri=self._art_uri_for_release(str(row["release_id"])),
             )
-        for row in track_rows:
-            track = self._row_to_track(row)
-            items.append(
-                RecentlyAddedItem(
-                    kind="track",
-                    added_ns=int(row["added_ns"]),
-                    track=track,
-                )
-            )
-        items.sort(key=lambda item: item.added_ns, reverse=True)
+            added_row = self._connection.execute(
+                """
+                SELECT MAX(f.indexed_at_ns) AS added_ns
+                FROM tracks t
+                JOIN files f ON f.id = t.file_id
+                WHERE t.album_id = ?
+                """,
+                (row["release_id"],),
+            ).fetchone()
+            added_ns = int(added_row["added_ns"]) if added_row else 0
+            items.append(RecentlyAddedItem(added_ns=added_ns, release=release))
         return items
 
     @staticmethod
@@ -331,33 +324,57 @@ class LibraryStore:
             return f"MP3 · {metadata.channels or 2}ch"
         return f"{codec} · {metadata.channels or 2}ch"
 
-    def _art_uri_for_album(self, album_id: str) -> str | None:
+    def _rows_to_releases(self, rows: list[sqlite3.Row]) -> list[Release]:
+        if not rows:
+            return []
+        art_by_release = self._art_uri_map([str(row["release_id"]) for row in rows])
+        return [
+            self._row_to_release(row, art_uri=art_by_release.get(str(row["release_id"])))
+            for row in rows
+        ]
+
+    def _art_uri_for_release(self, release_id: str) -> str | None:
         row = self._connection.execute(
             "SELECT art_uri FROM album_art WHERE album_id = ?",
-            (album_id,),
+            (release_id,),
         ).fetchone()
         return None if row is None else str(row["art_uri"])
 
-    def _art_uri_map(self, album_ids: list[str]) -> dict[str, str]:
-        if not album_ids:
+    def _art_uri_map(self, release_ids: list[str]) -> dict[str, str]:
+        if not release_ids:
             return {}
-        placeholders = ",".join("?" * len(album_ids))
+        placeholders = ",".join("?" * len(release_ids))
         rows = self._connection.execute(
             f"SELECT album_id, art_uri FROM album_art WHERE album_id IN ({placeholders})",
-            album_ids,
+            release_ids,
         ).fetchall()
         return {str(row["album_id"]): str(row["art_uri"]) for row in rows}
 
-    @staticmethod
-    def _row_to_album(row: sqlite3.Row, *, art_uri: str | None = None) -> Album:
-        return Album(
-            id=row["album_id"],
-            title=row["album"] or "Unknown Album",
+    def _row_to_release(self, row: sqlite3.Row, *, art_uri: str | None = None) -> Release:
+        track_count = int(row["track_count"])
+        is_synthetic = bool(int(row["is_synthetic"] or 0))
+        total_tracks_tag = row["total_tracks_tag"]
+        max_track_number = row["max_track_number"]
+        completeness, release_type, expected = infer_release_metadata(
+            track_count=track_count,
+            is_synthetic=is_synthetic,
+            total_tracks_tag=int(total_tracks_tag) if total_tracks_tag is not None else None,
+            max_track_number=int(max_track_number) if max_track_number is not None else None,
+        )
+        duration = row["duration_sec"]
+        return Release(
+            id=str(row["release_id"]),
+            title=row["album"] or "Unknown",
             artist_name=row["album_artist"] or "Unknown Artist",
             source=Source.LOCAL,
+            track_count=track_count,
+            expected_track_count=expected,
+            completeness=completeness,
+            release_type=release_type,
             year=row["year"],
-            track_count=int(row["track_count"]),
+            genre=row["genre"],
             art_uri=art_uri,
+            duration_sec=float(duration) if duration is not None else None,
         )
 
     @staticmethod

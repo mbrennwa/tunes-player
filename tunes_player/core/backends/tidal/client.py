@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from tunes_player.core.backends.playable import PlayableSource
 from tunes_player.core.backends.tidal import convert, ids as tidal_ids
 from tunes_player.core.home import RecentlyAddedItem
-from tunes_player.core.models import Album, Track
+from tunes_player.core.models import Release, Track
 
 if TYPE_CHECKING:
     import tidalapi
@@ -201,16 +201,24 @@ class TidalClient:
         self._clear_stored_session()
         self._session = None
 
-    def search(self, query: str, *, limit: int = 25) -> tuple[list[Album], list[Track]]:
+    def search_releases(self, query: str, *, limit: int = 25) -> list[Release]:
         session = self._require_login()
         results = session.search(query, limit=limit)
-        albums: list[Album] = []
-        tracks: list[Track] = []
+        releases: list[Release] = []
+        seen: set[str] = set()
         for item in results.get("albums", []):
-            albums.append(convert.album_from_tidal(session, item))
+            release = convert.release_from_tidal(session, item)
+            if release.id not in seen:
+                seen.add(release.id)
+                releases.append(release)
         for item in results.get("tracks", []):
-            tracks.append(convert.track_from_tidal(session, item))
-        return albums, tracks
+            track = convert.track_from_tidal(session, item)
+            if track.album_title and item.album is not None:
+                release = convert.release_from_tidal(session, item.album)
+                if release.id not in seen:
+                    seen.add(release.id)
+                    releases.append(release)
+        return releases[:limit]
 
     def list_new_release_items(
         self,
@@ -242,19 +250,21 @@ class TidalClient:
                             added_ns = int(release.timestamp() * 1_000_000_000)
                         if added_ns < cutoff_ns:
                             continue
-                        album = convert.album_from_tidal(session, raw)
+                        tidal_release = convert.release_from_tidal(session, raw)
                         items.append(
-                            RecentlyAddedItem(kind="album", added_ns=added_ns, album=album)
+                            RecentlyAddedItem(added_ns=added_ns, release=tidal_release)
                         )
                     elif isinstance(raw, tidal_media_mod.Track):
-                        release = _tidal_track_release_date(raw)
-                        if release is not None:
-                            added_ns = int(release.timestamp() * 1_000_000_000)
+                        release_date = _tidal_track_release_date(raw)
+                        if release_date is not None:
+                            added_ns = int(release_date.timestamp() * 1_000_000_000)
                         if added_ns < cutoff_ns:
                             continue
-                        track = convert.track_from_tidal(session, raw)
+                        if raw.album is None:
+                            continue
+                        tidal_release = convert.release_from_tidal(session, raw.album)
                         items.append(
-                            RecentlyAddedItem(kind="track", added_ns=added_ns, track=track)
+                            RecentlyAddedItem(added_ns=added_ns, release=tidal_release)
                         )
                 except Exception:
                     log.debug(
@@ -268,16 +278,39 @@ class TidalClient:
         items.sort(key=lambda item: item.added_ns, reverse=True)
         return items[:limit]
 
-    def get_album(self, album_id: str) -> Album | None:
-        numeric = tidal_ids.parse_prefixed_id(album_id, "album")
+    def get_release(self, release_id: str) -> Release | None:
+        numeric = tidal_ids.parse_prefixed_id(release_id, "album")
         if numeric is None:
             return None
         session = self._require_login()
         album = session.album(numeric)
-        return convert.album_from_tidal(session, album)
+        tracks = list(album.tracks())
+        duration = sum(float(t.duration or 0) for t in tracks)
+        release = convert.release_from_tidal(
+            session,
+            album,
+            owned_track_count=len(tracks),
+        )
+        return Release(
+            id=release.id,
+            title=release.title,
+            artist_name=release.artist_name,
+            source=release.source,
+            track_count=len(tracks),
+            expected_track_count=release.expected_track_count,
+            completeness=release.completeness,
+            release_type=release.release_type,
+            year=release.year,
+            genre=release.genre,
+            art_uri=release.art_uri,
+            duration_sec=duration or None,
+        )
 
-    def get_album_tracks(self, album_id: str) -> list[Track]:
-        numeric = tidal_ids.parse_prefixed_id(album_id, "album")
+    def get_album(self, album_id: str) -> Release | None:
+        return self.get_release(album_id)
+
+    def get_release_tracks(self, release_id: str) -> list[Track]:
+        numeric = tidal_ids.parse_prefixed_id(release_id, "album")
         if numeric is None:
             return []
         session = self._require_login()
@@ -286,6 +319,9 @@ class TidalClient:
         for item in album.tracks():
             tracks.append(convert.track_from_tidal(session, item, album=album))
         return tracks
+
+    def get_album_tracks(self, album_id: str) -> list[Track]:
+        return self.get_release_tracks(album_id)
 
     def get_track(self, track_id: str) -> Track | None:
         numeric = tidal_ids.parse_prefixed_id(track_id, "track")

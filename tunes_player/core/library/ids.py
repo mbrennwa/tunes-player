@@ -11,8 +11,16 @@ def make_id(prefix: str, *parts: str) -> str:
     return f"{prefix}:{digest}"
 
 
-def album_id(album_artist: str, album: str) -> str:
+def release_id(album_artist: str, album: str) -> str:
     return make_id("local:album", album_artist, album)
+
+
+def synthetic_release_id(track_id: str) -> str:
+    return f"local:release:synthetic:{track_id}"
+
+
+def album_id(album_artist: str, album: str) -> str:
+    return release_id(album_artist, album)
 
 
 def artist_id(name: str) -> str:
