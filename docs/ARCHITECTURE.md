@@ -74,23 +74,56 @@ others) with rationale and collisions are in **[docs/NAMING.md](NAMING.md)**.
 
 ---
 
+## Implementation status (current)
+
+| Area | Status |
+|------|--------|
+| Local scan + SQLite index | Done (`core/library/`, multiprocessing scan worker) |
+| `Release` / `Track` models | Done — unified release across local + streaming |
+| `PlayableSource` + `resolve_track` | Done (`core/backends/`) |
+| `PlaybackEngine` + `MpvEngine` | Done — queue, skip, seek, events |
+| Device volume + bit-perfect profile | Partial — PipeWire/Pulse via `wpctl`/`pactl`; exclusive ALSA not done |
+| MPRIS + GDK media keys | Done |
+| GTK shell (Browse, New Music, Suggestions, search, queue sheet) | Done |
+| Settings (Sources, Audio, Application, Diagnostics) | Done |
+| TIDAL (OAuth, search, playback, New Music, Suggestions) | Done |
+| Qobuz (credentials, login, search, playback, New Music, Suggestions) | Done |
+| Federated search (phase A) | Done in `PlayerService.search()` — no separate `catalog/` module yet |
+| New Music + Suggestions aggregation | Done in `core/home.py` + `PlayerService` |
+| Deezer | Not started |
+| Minimized compact controller | Not started |
+| UPnP / AES67 output | Not started |
+| DEB packaging | Not started |
+
+---
+
 ## Repository layout
 
 ```
 tunes_player/
-├── core/           # No GTK, no mpv — models, services, library, playback logic
-│   ├── models.py
-│   ├── services.py # PlayerService facade for all UIs
-│   ├── backends/   # local/, tidal/, deezer/, qobuz/ → PlayableSource (planned)
-│   ├── playback/   # Queue, controller, events (planned)
-│   └── catalog/    # Unified search across sources (planned)
-├── engines/        # PlaybackEngine implementations (planned)
-│   └── mpv.py      # libmpv wrapper
-├── platform/       # OS-specific, non-UI
-│   └── linux/      # MPRIS, PipeWire/ALSA, UPnP renderer (planned)
+├── core/              # No GTK, no mpv — models, services, library, playback logic
+│   ├── models.py      # Release, Track, Artist, Source
+│   ├── services.py    # PlayerService facade for all UIs
+│   ├── config.py      # ConfigManager, AppConfig (platformdirs)
+│   ├── home.py        # New Music / Suggestions item types and merge limits
+│   ├── volume.py      # VolumeController protocol
+│   ├── backends/
+│   │   ├── playable.py, resolve.py, local.py
+│   │   ├── tidal/     # client (tidalapi), convert, ids
+│   │   └── qobuz/     # in-tree REST client, convert, ids
+│   ├── library/       # db, store, scanner, scan_worker, release_logic, art_cache
+│   └── playback/
+│       └── engine.py  # PlaybackEngine protocol
+├── engines/
+│   └── mpv.py         # MpvEngine (libmpv, headless)
+├── platform/
+│   └── linux/         # MPRIS, PipeWire/Pulse volume (audio.py)
 └── ui/
-    └── gtk/        # Libadwaita only on Linux for now
+    └── gtk/           # app, views, preferences, now_playing, album_grid, …
 ```
+
+Federated search and home aggregation live in **`PlayerService`** and **`core/home.py`**
+today; a dedicated `core/catalog/` module may appear if merge/dedup logic grows.
 
 **Rule:** `core/` must not import `gi`, `PySide6`, or `mpv`. UI must not call mpv
 directly.
@@ -105,7 +138,9 @@ Future: `ui/qt/` for macOS/Windows; same `PlayerService` API.
 - **PlayerService** (`core/services.py`): stable API — `play`, `pause`, `search`,
   `subscribe(events)`.
 - **No GTK types in core models** — use `art_uri: str`, opaque IDs like
-  `local:…`, `tidal:…`, `deezer:…`, `qobuz:…`.
+  `local:…`, `tidal:…`, `qobuz:…` (Deezer reserved: `deezer:…`).
+- **Release** is the primary browse/playback unit (album, EP, single, partial/synthetic
+  local groups); `Album` is a backward-compatible alias in `core/models.py`.
 
 GTK runs on the main loop; mpv callbacks post to a queue → GLib idle (same pattern
 will work for Qt signals later).
@@ -128,10 +163,11 @@ will work for Qt signals later).
 
 `python3 -m venv .venv --system-site-packages`
 
-### Minimized player (compact controller)
+### Minimized player (compact controller) — not implemented
 
 The main window should support a **minimized** layout so users can keep Tunes open
-without dedicating screen space to browsing and artwork.
+without dedicating screen space to browsing and artwork. **This is not built yet**;
+only the full expanded shell exists today.
 
 | Mode | What the user sees |
 |------|---------------------|
@@ -171,22 +207,24 @@ and simpler than Roon.
 **Structure:** one window, three zones — *browse in the middle, control at the bottom*.
 
 ```text
-┌ Header: search · settings · minimize ─────────────────────────┐
-├ Sidebar ──┬ Main pane (single navigation stack) ──────────────┤
-│ Albums    │  Album grid · artist discography · album detail    │
-│ Artists   │  (cover + track list) · search results             │
-│ Queue →   │                                                   │
-│           │  Queue opens as sheet/overlay, not a third column  │
+┌ Header: back · search · (title) ─────────────────────────────┐
+├ Sidebar ──┬ Main pane (navigation stacks) ────────────────────┤
+│ Browse    │  Local release grid · release detail (art + tracks)│
+│ New Music │  Merged recently-added grid (local + streaming)    │
+│ Suggestions│ Merged suggestion grid (continue, editorial, etc.) │
+│ Settings… │  Search toggled from header → federated results   │
+│           │  Queue opens as sheet from Now Playing bar         │
 ├───────────┴───────────────────────────────────────────────────┤
 │ Now Playing bar: art · title · transport · volume · queue   │
 └───────────────────────────────────────────────────────────────┘
 ```
 
-**Sidebar (v0.1):** **Albums**, **Artists**, **Queue** (opens play queue sheet). Use
-`AdwNavigationSplitView` + `AdwSidebar`; collapse to navigation list on narrow widths.
+**Sidebar (current):** **Browse** (local indexed releases), **New Music**, **Suggestions**,
+and **Settings…** at the bottom. Fixed-width sidebar via `AdwNavigationSplitView`
+(`ui/gtk/app.py`). There is no separate Artists browse section.
 
-**Main pane:** stack navigation — browse grid → album/artist detail; header search
-replaces pane with results while active.
+**Main pane:** `AdwNavigationView` per section — release grid → release detail; header
+search toggles a federated results view (local + signed-in TIDAL/Qobuz).
 
 **Now Playing bar:** always visible in expanded mode; shared widget with [minimized
 mode](#minimized-player-compact-controller). Optional subtitle for audiophile context
@@ -203,58 +241,31 @@ lyrics, streaming source badges in browse views.
 
 ### Settings (preferences window)
 
-`AdwPreferencesWindow` with one page per concern — **not** one flat list. Streaming
-accounts do **not** belong under **Library → Music folders** (local scan paths only).
+`AdwPreferencesWindow` with one page per concern (`ui/gtk/preferences.py`):
+
+| Page | Contents |
+|------|----------|
+| **Application** | New Music cutoff (days) — local and Qobuz featured releases |
+| **Sources** | **Local files:** music folders, scan library. **Streaming:** TIDAL sign-in/out (OAuth via browser); Qobuz App ID/Secret, save credentials, email/password sign-in/out |
+| **Audio** | Bit-perfect toggle (subtitle reflects device vs software volume), output device dropdown (PipeWire/Pulse sinks) |
+| **Diagnostics** | Log file path (copy button) |
 
 **Unifying principle:** Local files and streaming services are both **sources** of music.
-Settings should reflect the same mental model as the app: one library surface, multiple
-providers. Avoid a UI where local vs remote feels like separate “modes”.
+The **Sources** page groups local folders and streaming accounts; credentials and session
+files live in **core/backends/** and `platformdirs` config/data dirs. Settings UI calls
+**PlayerService** only — never streaming APIs from GTK.
 
-| Page | v0.1 | Later |
-|------|------|-------|
-| **Library** | Music folders, scan options | Watch folders, rescan |
-| **Sources** | — | Tidal, Deezer, Qobuz: per-service connect/disconnect; see [Settings](#settings-preferences-window) |
-| **Audio** | Bit-perfect toggle, output device (placeholders today) | Local sink (PipeWire/ALSA), UPnP renderer, endpoint volume |
-
-**Suggested GUI structure (unified, scalable):**
-
-- **Library**: where the user’s music comes from
-  - **Local files** (group): folders, scan/rescan, watch folders (later)
-  - **Streaming services** (group): one row per provider with connect/disconnect and
-    status (“connected as …”), plus enable/disable toggles
-- **Playback & audio**: output device, endpoint volume behavior, bit-perfect profile
-- **Appearance**: UI preferences (later)
-- **Advanced / Diagnostics**: logs, cache size, reset library index (later)
-
-This keeps “Library” as the user’s mental entry point while still separating filesystem
-paths from account credentials inside the page via **PreferencesGroup** sections.
-
-**Sources page (when streaming lands):**
-
-- One **PreferencesGroup** per service (Tidal, Deezer, Qobuz).
-- **Tidal / Deezer:** OAuth or documented sign-in; rows for login / logout, account
-  label (“connected as …”), connection status, enable/disable — not filesystem paths.
-- **Qobuz:** account sign-in (username + password, same API surface as other third-party
-  clients) plus **App ID** and **App Secret** in Settings until/unless Qobuz grants
-  Tunes its own client credentials — see [Qobuz credentials](#qobuz-credentials). v1
-  treats app credentials as user-supplied (“advanced”); help text explains how to obtain
-  them. Tunes must **not** ship or redistribute Qobuz app credentials in source or
-  binaries and must **not** auto-scrape secrets from Qobuz’s web player.
-- Auth and tokens live in **core/backends/** (and config on disk via `platformdirs`);
-  Settings UI only calls **PlayerService** (or a small settings facade), never
-  streaming APIs directly from GTK.
-- README [streaming disclaimer](#streaming) applies; UI should link or repeat it on
-  first connect (extra emphasis for Qobuz credential setup).
+**Qobuz:** user-supplied App ID and App Secret (required before sign-in); see
+[Qobuz credentials](#qobuz-credentials). Tunes does **not** ship or auto-scrape Qobuz keys.
 
 **Where streaming appears outside Settings:**
 
-- **Browse / search:** unified results tagged Local / Tidal / Deezer / Qobuz (see
-  [Unified catalog](#unified-catalog)); no per-service sidebar library section.
-- **Now Playing:** optional source badge on the bar (deferred).
-- **Playlists:** cross-source playlists remain catalog phase D — not v0.1.
-
-Implement the **Sources** page with the first streaming backend (roadmap step 7), not
-with local folder scanning.
+- **Browse:** local indexed releases only.
+- **New Music / Suggestions:** merged grids from local + signed-in services.
+- **Search:** federated release results (local first, then streaming append).
+- **Release detail / playback:** same views for `local:…`, `tidal:…`, `qobuz:…` IDs.
+- **Now Playing:** quality hint (e.g. FLAC metadata, “TIDAL”, “QOBUZ”); source badge deferred.
+- **Playlists:** not implemented — catalog phase D.
 
 ---
 
@@ -265,16 +276,17 @@ Same layering as GUI:
 | Layer | Responsibility |
 |-------|----------------|
 | `core/backends/` | Resolve `Track` → `PlayableSource` (file path or HTTPS URL) |
-| `core/playback/` | Queue, shuffle/repeat, state machine, gapless policy |
-| `engines/mpv.py` | `PlaybackEngine` protocol — load URI, play/pause/seek, emit position |
-| `platform/linux/audio.py` | Output device list, **endpoint volume**, bit-perfect mpv options |
+| `PlayerService` | Queue, play/pause/skip/seek, volume, federated search, home feeds |
+| `engines/mpv.py` | `PlaybackEngine` — load URI, play/pause/seek, emit position |
+| `platform/linux/audio.py` | Output device list, **endpoint volume**, mpv audio-device mapping |
 | `platform/linux/mpris.py` | D-Bus controls from **PlayerService**, not from GTK or mpv |
 | `ui/gtk/` | Displays state; calls `PlayerService` only |
 
 ### PlayableSource
 
+Implemented in `core/backends/playable.py`:
+
 ```python
-# Conceptual — implement in core when playback lands
 @dataclass
 class PlayableSource:
     uri: str              # file:///… or https://…
@@ -282,8 +294,9 @@ class PlayableSource:
     start_sec: float = 0
 ```
 
-Stream URLs are resolved at **play time** (they expire). Local backend uses
-`file://`; streaming backends use service APIs.
+`resolve_track()` in `core/backends/resolve.py` dispatches by ID prefix (`local:`,
+`tidal:`, `qobuz:`) to the matching backend. Stream URLs are resolved at **play time**
+(they expire). Local backend uses `file://`; streaming backends use service APIs.
 
 ### mpv
 
@@ -355,10 +368,13 @@ Linux implementations (platform/linux/audio.py):
 **UI:** show when volume is **device** vs **software** (e.g. badge or subtitle in
 preferences) so users know bit-perfect status is intact.
 
-### Output endpoints (planned — not implemented yet)
+### Output endpoints (planned — local only today)
 
 Tunes supports more than one **output type**. Endpoints are not all “ALSA cards”;
 network renderers use a different control path than local mpv playback.
+
+**Today:** local PipeWire/Pulse sink selection and volume only (`platform/linux/audio.py`,
+Settings → Audio → Output device). UPnP and pro-audio adapters are not implemented.
 
 **Priorities (product order):**
 
@@ -472,20 +488,19 @@ UI never polls mpv properties directly.
 
 “One music store” is phased:
 
-| Phase | User experience | Effort (rough) |
-|-------|-----------------|----------------|
-| A | One search box; results tagged Local / Tidal / Deezer / Qobuz | +2–4 weeks after streaming works |
-| B | Merged list, heuristic duplicate titles | +2–4 weeks |
-| C | Dedup via MusicBrainz / ISRC / UPC | +1–2 months |
-| D | Unified playlists, “prefer local if duplicate” | ongoing |
+| Phase | User experience | Status |
+|-------|-----------------|--------|
+| A | One search box; results tagged Local / Tidal / Deezer / Qobuz | **Done** — `PlayerService.search()` merges local + signed-in backends |
+| B | Merged list, heuristic duplicate titles | Not started |
+| C | Dedup via MusicBrainz / ISRC / UPC | Not started |
+| D | Unified playlists, “prefer local if duplicate” | Not started |
 
-**v0.1:** local search only. **First unified milestone:** federated search (phase A).
-
-`core/catalog/` should fan out search to backends and merge results; UI only calls
-`catalog.search(query)`.
+Search is implemented in **`PlayerService.search()`** (local store first, then TIDAL and
+Qobuz append). A dedicated `core/catalog/` module may appear if dedup/merge grows beyond
+the service facade.
 
 **Prefer local:** when the same album exists locally and on a service, default play
-local file (match on normalized artist/title or MBID later).
+local file (match on normalized artist/title or MBID later) — not implemented yet.
 
 ---
 
@@ -506,60 +521,65 @@ Each provider can implement any subset:
 - **Featured / editorial** — service picks (not applicable to local).
 - **Recommendations** — optional later; service API or local heuristics.
 
-### Provider interface (conceptual)
+### Provider surface (as implemented)
 
-Backends expose a small, optional “home” surface (in addition to search and
-`PlayableSource` resolution):
+Backends are concrete clients (`TidalClient`, `QobuzClient`, `LibraryStore`) called from
+**PlayerService**, not a shared protocol yet. Typical methods:
 
-- `get_recently_played()`
-- `get_recently_added()`
-- `get_favorites()`
-- `get_new_releases()` (service-only)
-- `get_featured()` (service-only)
-- `get_recommendations()` (later)
+| Concern | Local (`LibraryStore`) | TIDAL / Qobuz clients |
+|---------|------------------------|------------------------|
+| Search | `search_releases()` | `search_releases()` |
+| Browse | `list_releases()`, `get_release()`, `get_release_tracks()` | same |
+| Play | `resolve_local_track()` via `resolve_track()` | `resolve_playable()`, `queue_for_track()` |
+| New Music | `list_recently_added_items()` | `list_new_release_items()` |
+| Suggestions | `list_continue_listening_entries()`, `list_rediscover_items()` | `list_suggestion_items()`, `list_similar_items()` (TIDAL) |
+| Auth | — | OAuth (TIDAL) or credentials + login (Qobuz) |
 
-Items returned are normalized to core models and use opaque IDs:
-`local:…`, `tidal:…`, `deezer:…`, `qobuz:…`.
+Items use core `Release` / `Track` models and opaque IDs.
 
-### Aggregation rules
+### Aggregation (implemented)
 
-Home is an aggregation layer in `core/catalog/` (or a dedicated `core/home/` module),
-not something implemented separately per UI.
+Home feeds are aggregated in **`core/home.py`** (types and limits) and
+**`PlayerService`** (`list_recently_added_items`, `list_suggestion_items`), not in a
+separate catalog module.
 
-- **Normalize** to common item types (track/album/playlist), `art_uri: str`, and
-  `provider_id`.
-- **Deduplicate** where possible:
-  - Strong: MusicBrainz IDs / ISRC / UPC (phase C work).
-  - Fallback: normalized artist/title/year string match (phase B).
-- **Rank** simply (v1): recency (played/added), user preference signals (likes, play
-  count), and an optional “available locally” boost.
-- **Badge source** in UI so users can see why an item appears (Local/Tidal/Deezer/Qobuz).
+- **Normalize** to `RecentlyAddedItem(release, added_ns)` with opaque IDs
+  (`local:…`, `tidal:…`, `qobuz:…`).
+- **Deduplicate** by `release.id` within each view (same ID from multiple providers
+  keeps the highest `added_ns`).
+- **Rank:** New Music by recency (`added_ns`); Suggestions by `suggestion_added_ns()`
+  (local first, then streaming by source name order).
+- **Badge source** in UI via `source_label()` (`ui/gtk/util.py`).
 
-### Local rails (easy wins; no recommender needed)
+### Local rails (implemented in library store)
 
-Local library can fully populate the core rails with basic heuristics:
+Local library populates home feeds via `LibraryStore`:
 
-- **Continue listening (local)**: last played items from local playback history.
-- **Recently added (local)**: albums imported in the last \(N\) days.
-- **Favorites (local)**: starred items (or rating threshold if implemented).
-- **Rediscover (local)**: highly-rated items not played recently (e.g.
-  `rating >= 4 AND last_played < now-18months`).
+- **Recently added (local):** releases from folders added within the New Music window.
+- **Continue listening:** `play_history` table (recorded on playback).
+- **Rediscover (local):** highly-played releases not played recently
+  (`SUGGESTIONS_REDISCOVER_IDLE_MONTHS` in `core/home.py`).
 
-Start with these before implementing sophisticated recommendations.
+Favorites / star ratings are not implemented yet.
 
-### Discover → Suggestions (implemented v1)
+### Discover views (implemented)
 
-**Suggestions** is a single merged album grid (same UX as **New Music** — no labeled
-sections). `PlayerService.list_suggestion_items()` concatenates provider lists, dedupes
-by `release.id` (keeping the highest sort key), and caps the result.
+**New Music** — flat album grid (`RecentlyAddedGridView`). `PlayerService.list_recently_added_items()`
+merges:
 
-Items are collected from TIDAL track radio (when playing TIDAL), **continue listening**
-(`play_history`), TIDAL / Qobuz editorial catalogs, and local **rediscover**, then deduped
-by `release.id` (same provider once; different providers stay separate).
+- Local releases added within **New Music cutoff** days (Settings → Application; default 90).
+- TIDAL new-release rails (when signed in; not filtered by cutoff).
+- Qobuz featured new/recent releases (when signed in; filtered by cutoff).
+
+Deduped by `release.id`, sorted by `added_ns`, capped at 300.
+
+**Suggestions** — flat album grid (same UX as New Music). `PlayerService.list_suggestion_items()`
+collects TIDAL track radio (when playing TIDAL), **continue listening** (`play_history`),
+TIDAL / Qobuz editorial catalogs, and local **rediscover**, then dedupes by `release.id`.
 
 **Sort order** (higher `added_ns` first): all **local** releases, then streaming by source
-name — **Deezer**, **Qobuz**, **TIDAL** (when each is implemented / signed in). Within
-each group, recent plays or catalog order apply.
+name — **Deezer**, **Qobuz**, **TIDAL** (Deezer not implemented yet). Within each group,
+recent plays or catalog order apply.
 
 LLM-based recommendations are out of scope. **Last.fm** (optional later): scrobble from
 `play_history`, similar-artist API, opt-in credentials in Settings.
@@ -572,9 +592,12 @@ Tunes is **not affiliated** with any streaming provider. Users need **own paid
 subscriptions** where required. Features can break when providers change auth or terms.
 README includes a user-facing [disclaimer](../README.md#streaming-disclaimer).
 
-Implement streaming **after** local library + mpv playback work (roadmap steps 7–9).
-One **provider abstraction** in `core/backends/` (auth, catalog/search, resolve
-`PlayableSource` at play time) is proven with the **first** backend, then reused.
+**TIDAL** and **Qobuz** backends are implemented in `core/backends/` with OAuth or
+account login, federated search, stream URL resolution at play time, and New Music /
+Suggestions feeds. **Deezer** is planned next.
+
+One **provider abstraction** pattern — auth, catalog/search, resolve `PlayableSource` at
+play time — is shared across backends via `resolve_track()` and `PlayerService`.
 
 ### Provider strategy (integration order)
 
@@ -582,24 +605,24 @@ Commercial hi-fi apps often have **formal partnerships** with lossless services;
 FOSS desktop player should not depend on that. There is no Spotify-like open ecosystem
 for lossless streaming — plan per provider:
 
-| Provider | Access model (working assumption) | Role in Tunes |
-|----------|-------------------------------------|---------------|
-| **Tidal** | Official developer platform; OAuth | **First** streaming backend — prove abstraction, auth, playback |
-| **Deezer** | Documented developer API | **Second** — validate streaming/playback; add if API stays clean |
-| **Qobuz** | No simple public third-party path for hobby apps | **Later, optional** — config-driven client; v1 user-supplied app credentials ([Qobuz credentials](#qobuz-credentials)) |
+| Provider | Access model | Status in Tunes |
+|----------|--------------|-----------------|
+| **Tidal** | Official developer platform; OAuth via `tidalapi` | **Done** — first streaming backend |
+| **Qobuz** | JSON API; user-supplied app credentials | **Done** — in-tree REST client |
+| **Deezer** | Documented developer API | **Not started** — planned second streaming backend |
 
 Optional: contact Qobuz about third-party open-source clients. Official app credentials
 for Tunes would switch the default from user-supplied keys to bundled defaults without
 changing the backend API shape.
 
-### Backend layout (planned)
+### Backend layout
 
 ```text
 tunes_player/core/backends/
-  local/
-  tidal/       # oauth, api, playback
-  deezer/      # auth, api, playback
-  qobuz/       # api client, config-driven app credentials, session, playback
+  playable.py, resolve.py, local.py
+  tidal/       # TidalClient — oauth, search, streams, home feeds (tidalapi)
+  qobuz/       # QobuzClient — config credentials, session, signed stream URLs
+  deezer/      # (planned)
 ```
 
 ### Auth and credentials
@@ -622,8 +645,8 @@ strings changes.
 
 | Phase | App id / secret | Account login |
 |-------|-----------------|---------------|
-| **v1 (planned)** | User enters in **Settings → Sources → Qobuz**; persisted in `platformdirs` config (e.g. `~/.config/tunes-player/config.json`). Same pattern as apps that use your own API keys (YouTube, TMDb). | Required: username + password → `user_auth_token` stored under the data dir (session file, analogous to TIDAL). |
-| **If Qobuz grants Tunes official credentials** | Ship defaults in the app (like LMS today); remove or hide the App ID / Secret fields from Settings. Config may still allow overrides for debugging. | Unchanged — subscribers still sign in with their Qobuz account. |
+| **v1 (current)** | User enters in **Settings → Sources → Qobuz**; persisted in `platformdirs` config (`~/.config/tunes-player/config.json`). | Required: email + password → session in `~/.local/share/tunes-player/qobuz-session.json`. |
+| **If Qobuz grants Tunes official credentials** | Ship defaults in the app; hide or pre-fill App ID / Secret fields. Config may still allow overrides for debugging. | Unchanged — subscribers still sign in with their Qobuz account. |
 
 **Policy (v1):**
 
@@ -640,11 +663,11 @@ update) replace app id/secret; session tokens are separate.
 
 ### Libraries and license
 
-| Provider | Likely dependency | License note |
-|----------|-------------------|--------------|
+| Provider | Dependency | License note |
+|----------|------------|--------------|
 | Tidal | `tidalapi` | LGPL-3.0 — OK inside GPL app |
 | Deezer | TBD (REST/client) | Confirm before linking |
-| Qobuz | community tooling (if any) | Often GPL/AGPL — may be optional or isolated module |
+| Qobuz | in-tree client (urllib) | No third-party SDK linked |
 
 See [License rationale](#license-rationale).
 
@@ -657,11 +680,10 @@ See [License rationale](#license-rationale).
 | Dependency | License | Note |
 |------------|---------|------|
 | mpv / libmpv | GPLv2+ | Playback engine |
-| mutagen (planned) | GPLv2+ | Tags |
+| mutagen | GPLv2+ | Tags / local metadata |
 | GTK / Libadwaita | LGPL | OK inside GPL app |
-| tidalapi (planned) | LGPL-3.0 | OK inside GPL app |
+| tidalapi | LGPL-3.0 | TIDAL backend |
 | Deezer client (planned) | TBD | Confirm before linking |
-| Qobuz libs (planned) | GPL/AGPL | Strong copyleft if linked; optional module |
 
 MIT/Apache would only be realistic if the stack avoided GPL deps (e.g. GStreamer
 instead of mpv). **AGPL** is unnecessary for a desktop app.
@@ -676,32 +698,40 @@ instead of mpv). **AGPL** is unnecessary for a desktop app.
 | Debian package | `tunes-player` (not bare `tunes`) |
 | Binary | `tunes-player` |
 | Desktop file | `data/tunes-player.desktop` |
-| Config (planned) | `platformdirs` → e.g. `~/.config/tunes-player/` |
+| Config | `platformdirs` → `~/.config/tunes-player/config.json` |
+| Library DB | `~/.local/share/tunes-player/library.db` |
+| Sessions | `tidal-session.json`, `qobuz-session.json` under data dir |
 
 ---
 
 ## Roadmap (ordered)
 
-1. Local folder scan + SQLite library index.
-2. `PlaybackEngine` + `MpvEngine` + queue; GTK transport bar (expanded + minimized compact controller); **MPRIS + media keys**.
-3. **Local output (priority):** bit-perfect profile + output device selection + **`VolumeController`** (PipeWire / ALSA endpoint volume). See [Output endpoints](#output-endpoints-planned--not-implemented-yet).
-4. **External control interface** — bidirectional sync with external tools; inbound volume from device/DAC/stack → Tunes UI + MPRIS. See [External control interface](#external-control-interface-requirement).
-5. DEB package with declared depends (`python3-gi`, `gir1.2-adw-1`, `mpv`, …).
-6. **UPnP / DLNA Media Renderer** output — SSDP discovery, push `PlayableSource` URI, transport/volume sync; Settings lists renderers alongside local sinks. Not started until step 3 lands.
-7. **Streaming — Tidal** (provider abstraction + OAuth; Settings → Sources).
-8. **Streaming — Deezer** (second backend if developer API and playback are viable).
-9. **Streaming — Qobuz** (optional; config-driven app credentials — v1 user-supplied in Settings, account login; no bundled or auto-scraped credentials in releases).
-10. Federated catalog search (phase A).
-11. Heuristic dedup / prefer-local.
-12. Optional Qt UI for macOS.
-13. Playlists UI (if needed for other users; not required for core browsing workflow).
-14. **(Optional)** AES67 / Dante (or Ravenna) LAN output — pro-audio adapter; only if there is clear demand; does not precede local + UPnP.
+Status as of current tree — see [Implementation status](#implementation-status-current).
+
+1. ~~Local folder scan + SQLite library index.~~ **Done**
+2. ~~`PlaybackEngine` + `MpvEngine` + queue; GTK transport bar; **MPRIS + media keys**.~~ **Done** (minimized compact controller still open)
+3. **Local output:** bit-perfect profile + output device selection + **`VolumeController`**. **Partial** — PipeWire/Pulse sink volume works; exclusive ALSA / full bit-perfect path open (see TODO)
+4. **External control interface** — inbound volume from device/stack → Tunes UI + MPRIS. **Partial** — outbound MPRIS done; inbound `VolumeController.subscribe()` not wired
+5. DEB package with declared depends (`python3-gi`, `gir1.2-adw-1`, `mpv`, …). **Not started**
+6. **UPnP / DLNA Media Renderer** output. **Not started**
+7. ~~**Streaming — Tidal**.~~ **Done**
+8. **Streaming — Deezer**. **Not started**
+9. ~~**Streaming — Qobuz**.~~ **Done**
+10. ~~Federated catalog search (phase A).~~ **Done** in `PlayerService.search()`
+11. Heuristic dedup / prefer-local. **Not started**
+12. Optional Qt UI for macOS. **Not started**
+13. Playlists UI. **Not started**
+14. **(Optional)** AES67 / Dante LAN output. **Not started**
 
 ---
 
 ## TODO
 
 Trackable open items. Ordered milestones are in [Roadmap](#roadmap-ordered) above.
+
+### Streaming
+
+- [ ] **Deezer backend** — auth, search, playback, home feeds (second streaming provider).
 
 ### Discover / recommendations
 
@@ -710,6 +740,7 @@ Trackable open items. Ordered milestones are in [Roadmap](#roadmap-ordered) abov
 
 ### Control / integration
 
+- [ ] **Minimized compact controller** — small always-on-top transport-only window mode.
 - [ ] **External control interface** — expose a control surface for external tools;
   sync device/DAC/stack volume changes back into Tunes (UI, MPRIS, related state).
   Builds on `VolumeController.subscribe()` and MPRIS/D-Bus. See
