@@ -38,6 +38,31 @@ _ALBUM_DETAIL_ART_SIZE = 220
 _ALBUM_TILE_DEFAULT_EDGE = 200
 
 
+class PlaceholderView(Gtk.Box):
+    def __init__(self, *, title: str, message: str) -> None:
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
+        self.add_css_class("view")
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, vexpand=True)
+        box.set_valign(Gtk.Align.CENTER)
+        box.set_halign(Gtk.Align.CENTER)
+        box.set_margin_top(24)
+        box.set_margin_bottom(24)
+        box.set_margin_start(24)
+        box.set_margin_end(24)
+        self.append(box)
+
+        heading = Gtk.Label(label=title)
+        heading.add_css_class("title-2")
+        box.append(heading)
+
+        label = Gtk.Label(label=message, justify=Gtk.Justification.CENTER)
+        label.add_css_class("dim-label")
+        label.set_wrap(True)
+        label.set_max_width_chars(52)
+        box.append(label)
+
+
 class AlbumGridView(Gtk.ScrolledWindow):
     def __init__(
         self,

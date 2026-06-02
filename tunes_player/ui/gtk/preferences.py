@@ -47,9 +47,6 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._scan_row.set_activatable_widget(scan_button)
         self._scan_button = scan_button
 
-        library_page = Adw.PreferencesPage(title="Library", icon_name="folder-music-symbolic")
-        library_page.add(self._folders_group)
-
         log_path = service.config.data_dir / "tunes-player.log"
         self._log_row = Adw.ActionRow(title="Log file", subtitle=str(log_path))
         copy_log_btn = Gtk.Button(label="Copy path")
@@ -62,7 +59,14 @@ class PreferencesWindow(Adw.PreferencesWindow):
             description="Errors and warnings are appended to this file while Tunes runs.",
         )
         diagnostics_group.add(self._log_row)
-        library_page.add(diagnostics_group)
+
+        sources_page = Adw.PreferencesPage(title="Sources", icon_name="cloud-download-symbolic")
+        local_group = Adw.PreferencesGroup(
+            title="Local files",
+            description="Folders are scanned into the local library index.",
+        )
+        local_group.add(self._folders_group)
+        sources_page.add(local_group)
 
         audio = Adw.PreferencesGroup(title="Audio")
         self._bit_perfect_row = Adw.SwitchRow(
@@ -88,7 +92,6 @@ class PreferencesWindow(Adw.PreferencesWindow):
         audio_page = Adw.PreferencesPage(title="Audio", icon_name="audio-speakers-symbolic")
         audio_page.add(audio)
 
-        sources_page = Adw.PreferencesPage(title="Sources", icon_name="cloud-download-symbolic")
         self._tidal_status_row = Adw.ActionRow(title="TIDAL")
         self._tidal_sign_in_btn = Gtk.Button(label="Sign in")
         self._tidal_sign_in_btn.connect("clicked", self._on_tidal_sign_in_clicked)
@@ -109,9 +112,15 @@ class PreferencesWindow(Adw.PreferencesWindow):
         tidal_group.add(self._tidal_status_row)
         sources_page.add(tidal_group)
 
-        self.add(library_page)
+        diagnostics_page = Adw.PreferencesPage(
+            title="Diagnostics",
+            icon_name="utilities-terminal-symbolic",
+        )
+        diagnostics_page.add(diagnostics_group)
+
         self.add(sources_page)
         self.add(audio_page)
+        self.add(diagnostics_page)
 
         self._tidal_oauth_poll_id = 0
         self._tidal_sign_in_dialog: Adw.AlertDialog | None = None
