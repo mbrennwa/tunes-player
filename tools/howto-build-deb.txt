@@ -14,10 +14,12 @@ Build machine prerequisites (Debian 12+ / Ubuntu 24.04+):
 
   sudo apt install debhelper devscripts python3 python3-venv python3-pip
 
-Install the package on a target system (also needs runtime GTK/mpv deps from
-pyproject.toml [tool.deb].apt_depends):
+Install on a target system (apt pulls in [tool.deb].apt_depends automatically):
 
   sudo apt install ./dist/tunes-player_*.deb
   tunes-player
+
+Published packages: push a tag v<version> (matching pyproject.toml); GitHub Actions
+uploads the .deb to https://github.com/mbrennwa/tunes-player/releases
 
 Desktop menu integration (.desktop, icons) is not included yet.

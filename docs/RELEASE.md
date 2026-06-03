@@ -82,10 +82,13 @@ DEB packages are built from **`main`** at a release tag.
 - **Debian revision** (`-1`, `-2`, …) is for packaging-only fixes without bumping
   the upstream version.
 - **Build:** `./tools/build-deb.sh` (see [tools/howto-build-deb.txt](../tools/howto-build-deb.txt)).
-  Artifacts land in `dist/`.
+  Local build artifacts land in `dist/` (gitignored).
 - **Target systems:** Debian 12+ or Ubuntu 24.04+ with Python 3.11+.
 - **Dependencies:** `[tool.deb]` in `pyproject.toml` (`apt_depends`, `pypi_wheelhouse`).
-- Attach the `.deb` from `dist/` to the GitHub Release for the matching tag.
+- Push an annotated tag `v` + version (e.g. `v0.1.dev0`). CI
+  ([`.github/workflows/release-deb.yml`](../.github/workflows/release-deb.yml))
+  builds the `.deb` and attaches it to the GitHub Release automatically.
+- Optional: build locally with `./tools/build-deb.sh` (artifacts in `dist/`).
 
 ## References
 

@@ -62,16 +62,21 @@ PyGObject is provided by the system on GNOME; a normal venv cannot see it unless
 
 ## Install from .deb (experimental)
 
-On Debian 12+ or Ubuntu 24.04+, build and install locally:
+On Debian 12+ or Ubuntu 24.04+, download the latest `.deb` from
+[GitHub Releases](https://github.com/mbrennwa/tunes-player/releases), then:
 
 ```bash
-./tools/build-deb.sh
-sudo apt install ./dist/tunes-player_*.deb
+sudo apt install ./tunes-player_*.deb
 tunes-player
 ```
 
-See [tools/howto-build-deb.txt](tools/howto-build-deb.txt) for build prerequisites.
-Desktop menu entry is not included yet; run `tunes-player` from a terminal.
+`apt` installs declared package dependencies automatically (GTK, mpv, Python GI,
+and related libraries). Desktop menu entry is not included yet; run
+`tunes-player` from a terminal.
+
+Maintainers: new release builds are published when a `v*` tag is pushed (see
+[docs/RELEASE.md](docs/RELEASE.md) and [.github/workflows/release-deb.yml](.github/workflows/release-deb.yml)).
+To build a package locally, see [tools/howto-build-deb.txt](tools/howto-build-deb.txt).
 
 ## Install from source
 
