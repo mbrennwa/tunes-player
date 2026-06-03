@@ -92,7 +92,11 @@ dpkg-buildpackage -us -uc
 
 mkdir -p dist
 find dist -maxdepth 1 -type f -name 'tunes-player_*' -delete
-find .. -maxdepth 1 -type f -name 'tunes-player_*' -exec mv -t dist {} +
+shopt -s nullglob
+artifacts=(../tunes-player_*)
+if ((${#artifacts[@]} > 0)); then
+  mv -t dist "${artifacts[@]}"
+fi
 
 echo "Artifacts in dist/:"
 ls -1 dist
