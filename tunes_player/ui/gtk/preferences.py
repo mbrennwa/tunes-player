@@ -92,13 +92,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         audio_page = Adw.PreferencesPage(title="Audio", icon_name="audio-speakers-symbolic")
         audio_page.add(audio)
 
-        application_group = Adw.PreferencesGroup(
-            title="New Releases",
-            description=(
-                "How far back to include releases in the New Releases view for local files, "
-                "TIDAL, and Qobuz."
-            ),
-        )
+        application_group = Adw.PreferencesGroup(title="New Releases")
         days = service.config.config.new_music_within_days
         self._new_music_days_adj = Gtk.Adjustment.new(
             days,
@@ -109,8 +103,8 @@ class PreferencesWindow(Adw.PreferencesWindow):
             0,
         )
         self._new_music_days_row = Adw.SpinRow(
-            title="New cutoff",
-            subtitle="Days to include in the New Releases view",
+            title="Cutoff Days",
+            subtitle="How far back to include releases in the New Releases search",
             adjustment=self._new_music_days_adj,
         )
         self._new_music_days_adj.connect("value-changed", self._on_new_music_within_days_changed)

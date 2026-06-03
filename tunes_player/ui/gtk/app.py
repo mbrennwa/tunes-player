@@ -10,7 +10,7 @@ import gi
 gi.require_version("Adw", "1")
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.logging_config import configure_logging
 from tunes_player.core.models import Release, Source
@@ -122,15 +122,9 @@ class TunesWindow(Adw.ApplicationWindow):
         self._back_btn.connect("clicked", self._on_nav_back)
         self._header.pack_start(self._back_btn)
 
-        settings_action = Gio.SimpleAction.new("settings", None)
-        settings_action.connect("activate", lambda *_a, **_k: self._open_preferences())
-        self.add_action(settings_action)
-
-        settings_btn = Gtk.MenuButton(icon_name="emblem-system-symbolic")
+        settings_btn = Gtk.Button(icon_name="emblem-system-symbolic")
         settings_btn.set_tooltip_text("Settings")
-        menu = Gio.Menu.new()
-        menu.append("Settings", "win.settings")
-        settings_btn.set_menu_model(menu)
+        settings_btn.connect("clicked", self._open_preferences)
         self._header.pack_end(settings_btn)
 
         shell_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
