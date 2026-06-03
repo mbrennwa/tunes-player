@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/lib/tunes-player/venv/bin/tunes-player "$@"

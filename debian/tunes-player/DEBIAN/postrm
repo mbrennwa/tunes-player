@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    purge)
+        rm -rf /usr/lib/tunes-player/venv
+        ;;
+esac
+
+exit 0

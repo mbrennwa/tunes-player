@@ -76,10 +76,16 @@ mark the GitHub Release as pre-release.
 
 ## Packaging
 
-DEB and other installable packages are built from **`main`** at a release tag.
-Debian packaging revision (`1.0.0-1`, `1.0.0-2`, …) is for packaging-only
-changes without bumping the upstream version in `pyproject.toml`. Details will be
-added when `debian/` exists.
+DEB packages are built from **`main`** at a release tag.
+
+- **Upstream version** comes from `pyproject.toml` (`[project].version`).
+- **Debian revision** (`-1`, `-2`, …) is for packaging-only fixes without bumping
+  the upstream version.
+- **Build:** `./tools/build-deb.sh` (see [tools/howto-build-deb.txt](../tools/howto-build-deb.txt)).
+  Artifacts land in `dist/`.
+- **Target systems:** Debian 12+ or Ubuntu 24.04+ with Python 3.11+.
+- **Dependencies:** `[tool.deb]` in `pyproject.toml` (`apt_depends`, `pypi_wheelhouse`).
+- Attach the `.deb` from `dist/` to the GitHub Release for the matching tag.
 
 ## References
 

@@ -1,0 +1,6 @@
+df86e4c4ffd183c98d4f2e78963c3752  usr/bin/tunes-player
+0cf1a417a2f6a12f8350510710fafaed  usr/lib/tunes-player/wheels/python_mpv-1.0.8-py3-none-any.whl
+5543d83d8227ec5445ed3dd28b1db90c  usr/lib/tunes-player/wheels/tidalapi-0.8.11-py3-none-any.whl
+b78da82607cbab46002e39f0eb996df9  usr/lib/tunes-player/wheels/tunes_player-0.1.dev0-py3-none-any.whl
+a7e21ef3a8333fb3516e9aad12a440f1  usr/share/doc/tunes-player/changelog.Debian.gz
+7b42cb9a0de673f0655e77cd8cfa0fba  usr/share/doc/tunes-player/copyright

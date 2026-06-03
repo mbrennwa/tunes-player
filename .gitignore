@@ -25,3 +25,15 @@ venv/
 # App data (local dev)
 *.db
 .cache/
+
+# Debian / packaging artifacts
+debian/*.log
+debian/*.substvars
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+debian/pypi-requirements.txt
+debian/.build-venv
+*.deb
+*.buildinfo
+*.changes

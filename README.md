@@ -21,7 +21,7 @@ Early development (v0.1). Working today on Linux:
 - **Settings** — music folders, TIDAL/Qobuz accounts, output device, bit-perfect toggle, New Releases cutoff
 
 Still planned or incomplete: Deezer, cross-source deduplication, playlists, minimized
-compact controller, UPnP/AES67 output, DEB packaging, macOS/Windows UI. See
+compact controller, UPnP/AES67 output, desktop .deb menu integration, macOS/Windows UI. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for roadmap and open items.
 
 ## Architecture
@@ -59,6 +59,19 @@ Python dependencies (installed with `pip install -e .`): `platformdirs`, `mutage
 
 PyGObject is provided by the system on GNOME; a normal venv cannot see it unless you use
 `--system-site-packages` (recommended below) or install PyGObject into the venv yourself.
+
+## Install from .deb (experimental)
+
+On Debian 12+ or Ubuntu 24.04+, build and install locally:
+
+```bash
+./tools/build-deb.sh
+sudo apt install ./dist/tunes-player_*.deb
+tunes-player
+```
+
+See [tools/howto-build-deb.txt](tools/howto-build-deb.txt) for build prerequisites.
+Desktop menu entry is not included yet; run `tunes-player` from a terminal.
 
 ## Install from source
 

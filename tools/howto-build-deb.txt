@@ -1,0 +1,20 @@
+Build a tunes-player .deb package
+
+From the repository root:
+
+  ./tools/build-deb.sh
+
+Version and dependencies are read from pyproject.toml ([project].version and
+[tool.deb]). Output artifacts are collected in dist/.
+
+Build machine prerequisites (Debian 12+ / Ubuntu 24.04+):
+
+  sudo apt install debhelper devscripts python3 python3-venv python3-pip
+
+Install the package on a target system (also needs runtime GTK/mpv deps from
+pyproject.toml [tool.deb].apt_depends):
+
+  sudo apt install ./dist/tunes-player_*.deb
+  tunes-player
+
+Desktop menu integration (.desktop, icons) is not included yet.
