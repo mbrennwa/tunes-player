@@ -392,8 +392,12 @@ class NowPlayingBar(Gtk.Box):
                 badges.append("bit-perfect")
             if state.device_volume:
                 badges.append("device volume")
-            elif not state.bit_perfect:
+            elif state.mpv_soft_volume:
                 badges.append("software volume")
+            elif state.no_volume_control:
+                badges.append("no volume control")
+            if state.output_using_fallback:
+                badges.append("output fallback")
             self._quality.set_label(" · ".join(badges))
             icon = (
                 "media-playback-pause-symbolic"

@@ -247,7 +247,7 @@ lyrics, streaming source badges in browse views.
 |------|----------|
 | **Application** | New Releases cutoff (days) — local, TIDAL, and Qobuz new-release selection |
 | **Sources** | **Local files:** music folders, scan library. **Streaming:** TIDAL sign-in/out (OAuth via browser); Qobuz App ID/Secret, save credentials, email/password sign-in/out |
-| **Audio** | Bit-perfect toggle (subtitle reflects device vs software volume), output device dropdown (PipeWire/Pulse sinks) |
+| **Audio** | Output device dropdown (PipeWire/Pulse sinks, bit-perfect potential labels); allow software-volume fallback when no sink control |
 | **Diagnostics** | Log file path (copy button) |
 
 **Unifying principle:** Local files and streaming services are both **sources** of music.
@@ -750,14 +750,16 @@ Trackable open items. Ordered milestones are in [Roadmap](#roadmap-ordered) abov
 mpv remains the right engine (decode, seek, formats, streaming, cross-platform).
 Bit-perfect is an **output policy** on top of mpv — not a reason to replace it.
 Today only the mpv-side half is done (volume 100%, ReplayGain off, device/sink
-volume when `_effective_bit_perfect()` is true). PCM may still be resampled or
+volume when `_unity_gain_profile()` is true). PCM may still be resampled or
 mixed by PipeWire/Pulse before the DAC.
 
 **Done:**
 
 - [x] mpv soft gain disabled when bit-perfect is effective (`volume=100`, no ReplayGain).
 - [x] Volume slider routes to **VolumeController** (PipeWire/Pulse sink), not mpv gain.
-- [x] UI indicates bit-perfect vs software-volume fallback.
+- [x] UI indicates bit-perfect vs software-volume fallback (derived from output path, not a toggle).
+- [x] Output device selection does not change the system default sink (Tunes-only routing).
+- [x] Output list shows bit-perfect potential per sink (heuristic labels).
 
 **Still needed for proper bit-perfect:**
 

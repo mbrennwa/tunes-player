@@ -10,6 +10,7 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
+from tunes_player.core.audio_labels import endpoint_dropdown_label
 from tunes_player.core.library import ScanResult
 from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.util import escape_markup, open_external_uri
@@ -69,24 +70,31 @@ class PreferencesWindow(Adw.PreferencesWindow):
         sources_page.add(local_group)
 
         audio = Adw.PreferencesGroup(title="Audio")
-        self._bit_perfect_row = Adw.SwitchRow(
-            title="Bit-perfect playback",
-            subtitle=self._volume_mode_subtitle(),
-            active=service.config.config.bit_perfect,
-        )
-        self._bit_perfect_row.connect("notify::active", self._on_bit_perfect_changed)
-        audio.add(self._bit_perfect_row)
+        self._audio_group = audio
+        self._apply_audio_group_description()
 
         self._output_row = Adw.ActionRow(
             title="Output device",
-            subtitle="System default audio sink",
+            subtitle="ALSA preferred for bit-perfect audio",
         )
         self._output_dropdown = Gtk.DropDown(model=Gtk.StringList.new([]))
+        self._output_dropdown.set_halign(Gtk.Align.END)
+        self._output_dropdown.set_size_request(260, -1)
         self._output_dropdown.set_valign(Gtk.Align.CENTER)
         self._output_dropdown.connect("notify::selected", self._on_output_changed)
         self._output_row.add_suffix(self._output_dropdown)
         self._output_row.set_activatable_widget(self._output_dropdown)
         audio.add(self._output_row)
+
+        self._software_volume_row = Adw.SwitchRow(
+            title="Allow software volume",
+            subtitle="For devices with fixed volume",
+            active=service.config.config.allow_software_volume_fallback,
+        )
+        self._software_volume_row.connect(
+            "notify::active", self._on_software_volume_fallback_changed
+        )
+        audio.add(self._software_volume_row)
         self._reload_output_sinks()
 
         audio_page = Adw.PreferencesPage(title="Audio", icon_name="audio-speakers-symbolic")
@@ -203,6 +211,12 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._reload_tidal_status()
         self._reload_qobuz_status()
         service.subscribe(lambda event: GLib.idle_add(self._on_service_event, event))
+        self.connect("map", self._on_preferences_map)
+
+    def _on_preferences_map(self, *_args: object) -> None:
+        self._apply_audio_group_description()
+        self._reload_output_sinks()
+        self._sync_software_volume_row()
 
     def _reload_folders(self) -> None:
         for row in self._dynamic_rows:
@@ -255,9 +269,8 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._service.config.remove_music_folder(folder)
         self._reload_folders()
 
-    def _on_bit_perfect_changed(self, row: Adw.SwitchRow, *_args: object) -> None:
-        self._service.set_bit_perfect(row.get_active())
-        row.set_subtitle(self._volume_mode_subtitle())
+    def _on_software_volume_fallback_changed(self, row: Adw.SwitchRow, *_args: object) -> None:
+        self._service.set_allow_software_volume_fallback(row.get_active())
 
     def _on_new_music_within_days_changed(self, adjustment: Gtk.Adjustment) -> None:
         days = int(adjustment.get_value())
@@ -266,33 +279,41 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._service.config.set_new_music_within_days(days)
         self._service.notify_sources_changed()
 
-    def _volume_mode_subtitle(self) -> str:
-        state = self._service.get_playback_state()
-        setting_on = self._service.config.config.bit_perfect
-        if state.bit_perfect:
-            return "Bit-perfect uses device volume only (no mpv soft gain)"
-        if setting_on and state.device_volume:
-            return "Bit-perfect enabled — volume adjusts the selected audio sink"
-        if setting_on:
-            return (
-                "Bit-perfect needs device volume; using mpv float software gain "
-                "(not bit-perfect)"
+    def _apply_audio_group_description(self) -> None:
+        stack = self._service.get_linux_audio_stack_info()
+        if stack is None:
+            self._audio_group.set_description(
+                "Output applies to Tunes only (not the system default sink)."
             )
-        if state.device_volume:
-            return "Volume adjusts the selected audio sink"
-        return "Device volume unavailable — using mpv float software volume"
+            return
+        self._audio_group.set_description(stack.settings_hint)
+
+    def _output_row_subtitle(self) -> str:
+        state = self._service.get_playback_state()
+        if state.output_using_fallback:
+            return "Saved device unavailable — using fallback"
+        return "ALSA preferred for bit-perfect audio"
+
+    def _sync_software_volume_row(self) -> None:
+        """Disable soft-volume option when the selected output has hardware/sink volume."""
+        row = getattr(self, "_software_volume_row", None)
+        if row is None:
+            return
+        state = self._service.get_playback_state()
+        row.set_sensitive(not state.device_volume)
 
     def _reload_output_sinks(self) -> None:
         endpoints = self._service.list_output_sinks()
         if not endpoints:
             self._output_row.set_sensitive(False)
             self._output_row.set_subtitle("No controllable sinks found")
+            self._output_dropdown.set_model(Gtk.StringList.new([]))
+            self._sync_software_volume_row()
             return
 
         self._output_row.set_sensitive(True)
-        names = [endpoint.description for endpoint in endpoints]
-        model = Gtk.StringList.new(names)
-        self._output_dropdown.set_model(model)
+        names = [endpoint_dropdown_label(endpoint) for endpoint in endpoints]
+        self._output_dropdown.set_model(Gtk.StringList.new(names))
 
         active_id = self._service.config.config.output_sink_id
         selected = 0
@@ -303,17 +324,18 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._output_dropdown.handler_block_by_func(self._on_output_changed)
         self._output_dropdown.set_selected(selected)
         self._output_dropdown.handler_unblock_by_func(self._on_output_changed)
-        self._output_row.set_subtitle(endpoints[selected].description)
+        self._output_row.set_subtitle(self._output_row_subtitle())
+        self._sync_software_volume_row()
 
     def _on_output_changed(self, dropdown: Gtk.DropDown, *_args: object) -> None:
         endpoints = self._service.list_output_sinks()
         index = dropdown.get_selected()
-        if index >= len(endpoints):
+        if index < 0 or index >= len(endpoints):
             return
         endpoint = endpoints[index]
         self._service.set_output_sink(endpoint.id)
-        self._output_row.set_subtitle(endpoint.description)
-        self._bit_perfect_row.set_subtitle(self._volume_mode_subtitle())
+        self._output_row.set_subtitle(self._output_row_subtitle())
+        self._sync_software_volume_row()
 
     def _on_scan_clicked(self, *_args: object) -> None:
         if self._service.is_scanning():
@@ -380,6 +402,8 @@ class PreferencesWindow(Adw.PreferencesWindow):
         if event == "sources_changed":
             self._reload_tidal_status()
             self._reload_qobuz_status()
+        elif event in ("playback_changed", "volume_changed"):
+            self._sync_software_volume_row()
         return False
 
     def _reload_tidal_status(self) -> None:

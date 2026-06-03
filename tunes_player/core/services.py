@@ -54,6 +54,9 @@ class PlaybackState:
     quality_hint: str
     bit_perfect: bool
     device_volume: bool
+    mpv_soft_volume: bool
+    no_volume_control: bool
+    output_using_fallback: bool
     position_sec: float
     duration_sec: float | None
     playback_epoch: int
@@ -75,7 +78,9 @@ class PlayerService:
         self._listeners: list[EventCallback] = []
         self._volume = 0.72
         self._muted = False
-        self._bit_perfect = self._config_manager.config.bit_perfect
+        self._allow_software_volume_fallback = (
+            self._config_manager.config.allow_software_volume_fallback
+        )
         self._device_volume = self._has_device_volume()
         if self._device_volume and self._volume_controller is not None:
             try:
@@ -486,8 +491,11 @@ class PlayerService:
             queue=tuple(self._queue),
             queue_index=self._queue_index,
             quality_hint=self._quality_hint,
-            bit_perfect=self._effective_bit_perfect(),
+            bit_perfect=self._unity_gain_profile(),
             device_volume=self._device_volume,
+            mpv_soft_volume=self._mpv_soft_volume(),
+            no_volume_control=self._no_volume_control(),
+            output_using_fallback=self._output_using_fallback(),
             position_sec=self._playback_position(),
             duration_sec=self._duration_sec,
             playback_epoch=self._playback_epoch,
@@ -706,8 +714,12 @@ class PlayerService:
             return
         self._volume_controller.set_active_endpoint(endpoint_id)
         self._config_manager.save()
+        self._device_volume = self._has_device_volume()
         engine = self._engine
         if engine is not None:
+            if hasattr(engine, "set_bit_perfect"):
+                engine.set_bit_perfect(self._unity_gain_profile())
+            engine.set_volume(self._mpv_volume_level())
             device = self._mpv_audio_device()
             if device and hasattr(engine, "set_audio_device"):
                 engine.set_audio_device(device)
@@ -729,17 +741,27 @@ class PlayerService:
             return []
         return self._volume_controller.list_endpoints()
 
-    def set_bit_perfect(self, enabled: bool) -> None:
-        self._bit_perfect = enabled
-        self._config_manager.config.bit_perfect = enabled
+    def get_linux_audio_stack_info(self) -> object:
+        """Return LinuxAudioStackInfo on Linux, else None."""
+        try:
+            from tunes_player.platform.linux.audio_probe import (
+                LinuxAudioStackInfo,
+                probe_linux_audio_stack,
+            )
+        except ImportError:
+            return None
+        return probe_linux_audio_stack()
+
+    def set_allow_software_volume_fallback(self, enabled: bool) -> None:
+        if enabled == self._allow_software_volume_fallback:
+            return
+        self._allow_software_volume_fallback = enabled
+        self._config_manager.config.allow_software_volume_fallback = enabled
         self._config_manager.save()
         engine = self._engine
         if engine is not None:
-            engine.set_bit_perfect(self._effective_bit_perfect())
-            if self._effective_bit_perfect() or self._device_volume:
-                engine.set_volume(1.0)
-            else:
-                engine.set_volume(self._volume)
+            engine.set_bit_perfect(self._unity_gain_profile())
+            engine.set_volume(self._mpv_volume_level())
         self._emit("playback_changed")
 
     def poll_playback(self) -> None:
@@ -778,7 +800,11 @@ class PlayerService:
 
     def _fallback_to_software_volume(self) -> bool:
         """Retry playback through mpv soft volume when PipeWire routing fails."""
-        if not self._device_volume or self._device_output_fallback:
+        if (
+            not self._allow_software_volume_fallback
+            or not self._device_volume
+            or self._device_output_fallback
+        ):
             return False
         self._device_output_fallback = True
         self._device_volume = False
@@ -818,11 +844,25 @@ class PlayerService:
         self._sync_from_engine()
         return True
 
-    def _effective_bit_perfect(self) -> bool:
-        return self._bit_perfect and self._device_volume
+    def _mpv_soft_volume(self) -> bool:
+        return not self._device_volume and self._allow_software_volume_fallback
+
+    def _unity_gain_profile(self) -> bool:
+        """mpv unity gain — no in-player attenuation (derived bit-perfect active)."""
+        return not self._mpv_soft_volume()
+
+    def _no_volume_control(self) -> bool:
+        return not self._device_volume and not self._allow_software_volume_fallback
+
+    def _output_using_fallback(self) -> bool:
+        configured = self._config_manager.config.output_sink_id
+        if not configured or self._volume_controller is None:
+            return False
+        ids = {item.id for item in self._volume_controller.list_endpoints()}
+        return configured not in ids
 
     def _mpv_volume_level(self) -> float:
-        if self._effective_bit_perfect() or self._device_volume:
+        if self._unity_gain_profile():
             return 1.0
         return self._volume
 
@@ -843,7 +883,7 @@ class PlayerService:
             from tunes_player.engines.mpv import create_mpv_engine
 
             self._engine = create_mpv_engine(
-                bit_perfect=self._effective_bit_perfect(),
+                bit_perfect=self._unity_gain_profile(),
                 volume=self._mpv_volume_level(),
                 audio_device=self._mpv_audio_device(),
                 use_device_output=self._device_volume,

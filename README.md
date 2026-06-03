@@ -15,9 +15,9 @@ Early development (1.0.dev0). Current functionality:
 - **Music shell** — `Release` grid driven by search, **New Releases**, or **Suggest Music** selections (optional per-source filter); release detail and play queue
 - **Discovery** — **New Releases** (recent local imports + service new-release rails) and **Suggest Music** (continue listening, editorial picks, similar tracks, local rediscover)
 - **Federated search** — search field merges local index with signed-in streaming catalogs
-- **Playback** — mpv/libmpv queue, skip, seek; bit-perfect profile when device volume is available; PipeWire/Pulse sink volume via `wpctl`/`pactl`
+- **Playback** — mpv/libmpv queue, skip, seek; unity-gain (bit-perfect) profile when using device/sink volume; optional software-volume fallback; PipeWire/Pulse sink volume via `wpctl`/`pactl`
 - **Desktop integration** — MPRIS, GDK media keys, playback error toasts, file logging
-- **Settings** — music folders, TIDAL/Qobuz accounts, output device, bit-perfect toggle, New Releases cutoff
+- **Settings** — music folders, TIDAL/Qobuz accounts, output device (with bit-perfect potential labels), software-volume fallback, New Releases cutoff
 
 Still planned or incomplete: macOS and Windows, Deezer, cross-source deduplication,
 playlists, minimized compact controller, UPnP/AES67 output, desktop .deb menu integration.

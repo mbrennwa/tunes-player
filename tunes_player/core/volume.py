@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Callable, Literal, Protocol
 
 VolumeListener = Callable[[float], None]
 Unsubscribe = Callable[[], None]
+
+BitPerfectPotential = Literal["direct", "capable", "none"]
+
+SYSTEM_DEFAULT_SINK_ID = "__system_default__"
+
+
+def is_alsa_endpoint_id(endpoint_id: str | None) -> bool:
+    return bool(endpoint_id and endpoint_id.startswith("alsa:"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,6 +23,7 @@ class VolumeEndpoint:
     name: str
     description: str
     is_default: bool = False
+    bit_perfect_potential: BitPerfectPotential = "none"
 
 
 class VolumeController(Protocol):
