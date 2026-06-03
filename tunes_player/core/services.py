@@ -919,7 +919,7 @@ class PlayerService:
             self._notify_playback_unavailable()
             return
         self._engine_error = None
-        self._set_current_track(track)
+        self._set_current_track(track, format_label=source.format_label)
         self._record_playback(track)
         engine.load(source.playback_target, start_sec=source.start_sec)
         if not resume:
@@ -965,13 +965,25 @@ class PlayerService:
                 return None
         return None
 
-    def _set_current_track(self, track: Track) -> None:
+    def _set_current_track(
+        self, track: Track, *, format_label: str | None = None
+    ) -> None:
         self._playback_epoch += 1
         self._current_track = track
-        if track.source.value == "tidal":
-            self._quality_hint = "TIDAL"
+        if format_label is not None:
+            self._quality_hint = format_label
+        elif track.source.value == "tidal":
+            self._quality_hint = (
+                self._tidal.stream_format_label(track.id)
+                if self._tidal is not None
+                else "Unknown format"
+            )
         elif track.source.value == "qobuz":
-            self._quality_hint = "QOBUZ"
+            from tunes_player.core.playback_quality import qobuz_stream_format_label
+
+            self._quality_hint = qobuz_stream_format_label(
+                self._config_manager.config.qobuz_stream_format_id
+            )
         else:
             metadata = self._store.get_file_metadata(track.id)
             self._quality_hint = LibraryStore.quality_hint(metadata)

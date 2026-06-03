@@ -386,18 +386,9 @@ class LibraryStore:
 
     @staticmethod
     def quality_hint(metadata: FileMetadata | None) -> str:
-        if metadata is None:
-            return "Local file"
-        codec = (metadata.codec or "audio").upper()
-        if metadata.sample_rate:
-            rate_khz = metadata.sample_rate / 1000
-            rate_text = f"{rate_khz:g}"
-            if metadata.bit_depth:
-                return f"{codec} · {metadata.bit_depth}/{rate_text} kHz · {metadata.channels or 2}ch"
-            return f"{codec} · {rate_text} kHz · {metadata.channels or 2}ch"
-        if codec == "MP3":
-            return f"MP3 · {metadata.channels or 2}ch"
-        return f"{codec} · {metadata.channels or 2}ch"
+        from tunes_player.core.playback_quality import local_file_format_label
+
+        return local_file_format_label(metadata)
 
     def _rows_to_releases(self, rows: list[sqlite3.Row]) -> list[Release]:
         if not rows:

@@ -14,6 +14,7 @@ class PlayableSource:
     uri: str
     metadata: Track
     start_sec: float = 0
+    format_label: str | None = None
 
     @property
     def playback_target(self) -> str:

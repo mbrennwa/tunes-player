@@ -205,12 +205,12 @@ _DEMO_TRACKS: dict[str, tuple[Track, ...]] = {
 }
 
 _QUALITY_HINTS: dict[str, str] = {
-    "local:album:love-supreme": "FLAC · 24/96 · 2ch",
-    "local:album:kind-of-blue": "FLAC · 16/44.1 · 2ch",
-    "local:album:ok-computer": "FLAC · 16/44.1 · 2ch",
-    "local:album:kid-a": "FLAC · 16/44.1 · 2ch",
-    "local:album:discovery": "MP3 · 320 kbps · 2ch",
-    "local:album:random-access": "FLAC · 24/48 · 2ch",
+    "local:album:love-supreme": "24-bit / 96 kHz",
+    "local:album:kind-of-blue": "16-bit / 44.1 kHz",
+    "local:album:ok-computer": "16-bit / 44.1 kHz",
+    "local:album:kid-a": "16-bit / 44.1 kHz",
+    "local:album:discovery": "MP3",
+    "local:album:random-access": "24-bit / 48 kHz",
 }
 
 

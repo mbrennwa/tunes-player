@@ -380,25 +380,11 @@ class NowPlayingBar(Gtk.Box):
             album = track.album_title or ""
             duration = format_duration(track.duration_sec)
             self._subtitle.set_label(
-                join_detail(
-                    source_label(track.source),
-                    artist,
-                    album or None,
-                    duration,
-                )
+                join_detail(artist, album or None, duration)
             )
-            badges = [state.quality_hint]
-            if state.bit_perfect:
-                badges.append("bit-perfect")
-            if state.device_volume:
-                badges.append("device volume")
-            elif state.mpv_soft_volume:
-                badges.append("software volume")
-            elif state.no_volume_control:
-                badges.append("no volume control")
-            if state.output_using_fallback:
-                badges.append("output fallback")
-            self._quality.set_label(" · ".join(badges))
+            self._quality.set_label(
+                join_detail(source_label(track.source), state.quality_hint)
+            )
             icon = (
                 "media-playback-pause-symbolic"
                 if state.is_playing

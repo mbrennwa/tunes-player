@@ -137,6 +137,33 @@ class TidalClient:
             self._drop_session()
             return False
 
+    def stream_format_label(self, track_id: str | None = None) -> str:
+        from tunes_player.core.playback_quality import (
+            tidal_format_label,
+            tidal_stream_format_label,
+        )
+
+        session = self._get_session()
+        if session is None:
+            return "Unknown format"
+        if track_id:
+            numeric = tidal_ids.parse_prefixed_id(track_id, "track")
+            if numeric is not None:
+                try:
+                    tidal_track = session.track(numeric)
+                    if tidal_track.audio_quality:
+                        return tidal_format_label(audio_quality=tidal_track.audio_quality)
+                except Exception:
+                    log.debug(
+                        "Could not read TIDAL track quality for %s",
+                        track_id,
+                        exc_info=True,
+                    )
+        try:
+            return tidal_stream_format_label(str(session.config.quality))
+        except Exception:
+            return "Unknown format"
+
     def account_label(self) -> str | None:
         session = self._get_session()
         if session is None or not self.is_logged_in():
@@ -178,6 +205,7 @@ class TidalClient:
             raise TidalUnavailableError(str(exc)) from exc
         if not session.check_login():
             raise TidalUnavailableError("TIDAL login did not complete.")
+        self._apply_preferred_stream_quality(session)
         self.save_session()
         self._oauth_error = None
 
@@ -234,6 +262,7 @@ class TidalClient:
         if not session.check_login():
             self._oauth_error = "TIDAL login did not complete."
             return "failed"
+        self._apply_preferred_stream_quality(session)
         self.save_session()
         return "success"
 
@@ -539,7 +568,14 @@ class TidalClient:
         except Exception:
             log.exception("Failed to resolve TIDAL stream for track %s", numeric)
             return None
-        return PlayableSource(uri=playback_uri, metadata=metadata)
+        from tunes_player.core.playback_quality import tidal_format_label_from_stream_payload
+
+        format_label = tidal_format_label_from_stream_payload(payload)
+        return PlayableSource(
+            uri=playback_uri,
+            metadata=metadata,
+            format_label=format_label,
+        )
 
     def _fetch_stream_payload(self, session: object, track_id: int) -> dict[str, Any]:
         quality = str(session.config.quality)
@@ -644,11 +680,30 @@ class TidalClient:
         if self._session_file.is_file():
             try:
                 self._session.load_session_from_file(self._session_file)
+                self._apply_preferred_stream_quality(self._session)
             except Exception as exc:
                 log.warning("TIDAL session expired or invalid; sign in again (%s)", exc)
                 self._clear_stored_session()
                 self._session = tidalapi.Session()
         return self._session
+
+    @staticmethod
+    def _apply_preferred_stream_quality(session: object) -> None:
+        """Request the best stream tier the subscription allows (hi-res → CD lossless)."""
+        try:
+            from tidalapi.media import Quality
+        except ImportError:
+            return
+        for quality in (
+            Quality.hi_res_lossless,
+            Quality.high_lossless,
+            Quality.low_320k,
+        ):
+            try:
+                session.audio_quality = quality
+                return
+            except Exception:
+                continue
 
     def _ensure_session(self) -> tidalapi.Session:
         session = self._get_session()
