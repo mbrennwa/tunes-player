@@ -53,12 +53,7 @@ def probe_linux_audio_stack() -> LinuxAudioStackInfo:
                 return LinuxAudioStackInfo(
                     backend="ALSA",
                     detail="PipeWire is installed but not running",
-                    settings_hint=(
-                        "Start the session audio daemon, e.g. "
-                        "systemctl --user start pipewire wireplumber "
-                        "(or log in to a desktop session that starts them). "
-                        "Until then, Tunes lists ALSA hardware below."
-                    ),
+                    settings_hint="",
                 )
             return LinuxAudioStackInfo(
                 backend="Unavailable",

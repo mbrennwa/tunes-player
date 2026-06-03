@@ -73,10 +73,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._audio_group = audio
         self._apply_audio_group_description()
 
-        self._output_row = Adw.ActionRow(
-            title="Output device",
-            subtitle="ALSA preferred for bit-perfect audio",
-        )
+        self._output_row = Adw.ActionRow(title="Output device")
         self._output_dropdown = Gtk.DropDown(model=Gtk.StringList.new([]))
         self._output_dropdown.set_halign(Gtk.Align.END)
         self._output_dropdown.set_size_request(260, -1)
@@ -286,13 +283,17 @@ class PreferencesWindow(Adw.PreferencesWindow):
                 "Output applies to Tunes only (not the system default sink)."
             )
             return
-        self._audio_group.set_description(stack.settings_hint)
+        hint = stack.settings_hint.strip()
+        if hint:
+            self._audio_group.set_description(hint)
+        else:
+            self._audio_group.set_description(None)
 
     def _output_row_subtitle(self) -> str:
         state = self._service.get_playback_state()
         if state.output_using_fallback:
             return "Saved device unavailable — using fallback"
-        return "ALSA preferred for bit-perfect audio"
+        return ""
 
     def _sync_software_volume_row(self) -> None:
         """Disable soft-volume option when the selected output has hardware/sink volume."""
