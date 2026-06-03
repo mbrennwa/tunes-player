@@ -8,7 +8,7 @@ Package and command name: **tunes-player**.
 
 ## Status
 
-Early development (v0.1). Current functionality:
+Early development (1.0.dev0). Current functionality:
 
 - **Local library** — scan music folders into SQLite; browse, search, and play **FLAC, WAV, AIFF, ALAC, MP3, AAC, Ogg Vorbis**
 - **Streaming** — **TIDAL** (OAuth sign-in, search, playback, New Releases, Suggest Music) and **Qobuz** (user-supplied App ID/Secret, account login, search, playback, New Releases, Suggest Music)
