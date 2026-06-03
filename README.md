@@ -1,15 +1,14 @@
 # Tunes
 
-**Tunes** is a free, open-source music player for Linux (GNOME/GTK first), with planned
-support for macOS and Windows. It plays local audio files and streaming catalogs from
-**TIDAL** and **Qobuz** (Deezer planned) — presented as one searchable library with
-shared browse, playback, and discovery views.
+**Tunes** is a free, open-source music player for Linux (GNOME/GTK). It is a shell to
+access, discover, and play music from local files and streaming catalogs (**TIDAL**,
+**Qobuz**; others planned).
 
 Package and command name: **tunes-player**.
 
 ## Status
 
-Early development (v0.1). Working today on Linux:
+Early development (v0.1). Current functionality:
 
 - **Local library** — scan music folders into SQLite; browse, search, and play **FLAC, WAV, AIFF, ALAC, MP3, AAC, Ogg Vorbis**
 - **Streaming** — **TIDAL** (OAuth sign-in, search, playback, New Releases, Suggest Music) and **Qobuz** (user-supplied App ID/Secret, account login, search, playback, New Releases, Suggest Music)
@@ -20,8 +19,9 @@ Early development (v0.1). Working today on Linux:
 - **Desktop integration** — MPRIS, GDK media keys, playback error toasts, file logging
 - **Settings** — music folders, TIDAL/Qobuz accounts, output device, bit-perfect toggle, New Releases cutoff
 
-Still planned or incomplete: Deezer, cross-source deduplication, playlists, minimized
-compact controller, UPnP/AES67 output, desktop .deb menu integration, macOS/Windows UI. See
+Still planned or incomplete: macOS and Windows, Deezer, cross-source deduplication,
+playlists, minimized compact controller, UPnP/AES67 output, desktop .deb menu integration.
+See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for roadmap and open items.
 
 ## Architecture
@@ -62,17 +62,20 @@ PyGObject is provided by the system on GNOME; a normal venv cannot see it unless
 
 ## Install from .deb (experimental)
 
-On Debian 12+ or Ubuntu 24.04+, download the latest `.deb` from
-[GitHub Releases](https://github.com/mbrennwa/tunes-player/releases), then:
+On Debian 12+, Ubuntu 24.04+, or similar DEB-based distros, download the latest `.deb`
+from [GitHub Releases](https://github.com/mbrennwa/tunes-player/releases).
+
+Then install with:
 
 ```bash
-sudo apt install ./tunes-player_*.deb
+sudo apt install ./path/to/tunes-player_*.deb
 tunes-player
 ```
 
-`apt` installs declared package dependencies automatically (GTK, mpv, Python GI,
-and related libraries). Desktop menu entry is not included yet; run
-`tunes-player` from a terminal.
+`apt` installs declared package dependencies automatically (GTK, mpv, Python GI, and
+related libraries).
+
+Desktop menu entry is not included yet; run `tunes-player` from a terminal.
 
 Maintainers: new release builds are published when a `v*` tag is pushed (see
 [docs/RELEASE.md](docs/RELEASE.md) and [.github/workflows/release-deb.yml](.github/workflows/release-deb.yml)).
@@ -102,15 +105,11 @@ tunes-player
 
 ## Streaming disclaimer
 
-Tunes is **not affiliated with Tidal, Deezer, Qobuz, or any other streaming provider**.
-Streaming requires your own paid subscriptions where applicable. Integrations may use
-official developer APIs (e.g. Tidal, Deezer) or user-supplied credentials (Qobuz App ID
-and App Secret — Tunes does not ship or distribute Qobuz keys). For Qobuz, open
-**Settings → Sources**, enter and save your App ID and App Secret, then sign in with your
-Qobuz account email and password. Features can break when providers change authentication
+Tunes is **not affiliated with Tidal, Qobuz, or any other streaming provider**.
+Streaming requires your own paid subscriptions where applicable. Integrations may use official developer APIs (e.g. Tidal, Deezer) or user-supplied credentials (Qobuz App ID and App Secret — Tunes does not ship or distribute Qobuz keys). For Qobuz, open
+**Settings → Sources**, enter and save your App ID and App Secret, then sign in with your Qobuz account email and password. Features can break when providers change authentication
 or terms. Use at your own responsibility and in compliance with each service's terms of use.
 
 ## License
 
-GPL-3.0-or-later — see [LICENSE](LICENSE). Rationale (mpv, mutagen, streaming deps):
-[docs/ARCHITECTURE.md#license-rationale](docs/ARCHITECTURE.md#license-rationale).
+GPL-3.0-or-later — see [LICENSE](LICENSE).
