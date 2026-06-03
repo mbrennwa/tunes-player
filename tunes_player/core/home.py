@@ -13,7 +13,7 @@ class RecentlyAddedItem:
     release: Release
 
 
-# New Music view limits (local index window + per-source fetch, then merged cap).
+# New Releases view limits (local index window + per-source fetch, then merged cap).
 NEW_MUSIC_MERGE_LIMIT = 300
 NEW_MUSIC_LOCAL_WITHIN_DAYS_DEFAULT = 90
 NEW_MUSIC_LOCAL_WITHIN_DAYS_MIN = 1

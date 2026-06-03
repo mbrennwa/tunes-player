@@ -15,7 +15,13 @@ from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 from tunes_player.core.logging_config import configure_logging
 from tunes_player.core.models import Release, Source
 from tunes_player.core.services import PlayerService
-from tunes_player.core.shell_state import ShellBase, ShellState, apply_source_filter
+from tunes_player.core.shell_state import (
+    ShellBase,
+    ShellState,
+    apply_source_filter,
+    release_to_cache_payload,
+    releases_from_cache_payloads,
+)
 from tunes_player.platform.linux.audio import create_volume_controller
 from tunes_player.ui.gtk.art import ArtLoader
 from tunes_player.ui.gtk.errors import attach_error_toasts, show_error_toast
@@ -37,14 +43,14 @@ _DEFAULT_SIZE = (960, 640)
 _GRID_ROOT_TAG = "grid-root"
 _PERSIST_DEBOUNCE_MS = 400
 _ONBOARDING_MESSAGE = (
-    "Configure music sources in Settings, then search or choose New Music."
+    "Configure music sources in Settings, then search or choose New Releases."
 )
 _PRESET_LABELS = {
-    ShellBase.NEW_MUSIC: "New Music",
+    ShellBase.NEW_MUSIC: "New Releases",
     ShellBase.SUGGESTION: "Suggest Music",
 }
 _LOADING_MESSAGES = {
-    ShellBase.NEW_MUSIC: "Loading New Music…",
+    ShellBase.NEW_MUSIC: "Loading new releases…",
     ShellBase.SUGGESTION: "Finding suggestions...",
 }
 
@@ -137,7 +143,8 @@ class TunesWindow(Adw.ApplicationWindow):
         controls.set_margin_start(12)
         controls.set_margin_end(12)
 
-        search_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        search_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        search_row.add_css_class("linked")
         search_row.add_css_class("shell-search-row")
         search_row.set_hexpand(True)
         self._search_entry = Gtk.SearchEntry()
@@ -147,14 +154,12 @@ class TunesWindow(Adw.ApplicationWindow):
         self._search_entry.connect("activate", self._on_search_activate)
         search_row.append(self._search_entry)
 
-        self._new_music_btn = Gtk.ToggleButton(label="New Music")
-        self._new_music_btn.add_css_class("flat")
+        self._new_music_btn = Gtk.ToggleButton(label="New Releases")
         self._new_music_btn.add_css_class("shell-preset-btn")
         self._new_music_btn.connect("toggled", self._on_new_music_toggled)
         search_row.append(self._new_music_btn)
 
         self._suggestion_btn = Gtk.ToggleButton(label="Suggest Music")
-        self._suggestion_btn.add_css_class("flat")
         self._suggestion_btn.add_css_class("shell-preset-btn")
         self._suggestion_btn.connect("toggled", self._on_suggestion_toggled)
         search_row.append(self._suggestion_btn)
@@ -241,6 +246,13 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _set_shell_state(self, state: ShellState, *, reload: bool = True) -> None:
         identity_changed = self._selection_identity_changed(self._shell_state, state)
+        if identity_changed:
+            state = ShellState(
+                base=state.base,
+                search_query=state.search_query,
+                enabled_sources=state.enabled_sources,
+                cached_releases=(),
+            )
         self._shell_state = state
         self._sync_shell_controls()
         self._schedule_persist()
@@ -365,21 +377,53 @@ class TunesWindow(Adw.ApplicationWindow):
             self._persist_shell_state,
         )
 
+    def _shell_state_for_persist(self) -> ShellState:
+        state = self._shell_state
+        cached_payloads: tuple[dict, ...] = ()
+        if self._cache_matches(state) and self._cached_releases:
+            cached_payloads = tuple(
+                release_to_cache_payload(release) for release in self._cached_releases
+            )
+        return ShellState(
+            base=state.base,
+            search_query=state.search_query,
+            enabled_sources=state.enabled_sources,
+            cached_releases=cached_payloads,
+        )
+
     def _persist_shell_state(self) -> bool:
         self._persist_timeout_id = 0
-        self._service.config.set_shell_state(self._shell_state)
+        self._service.config.set_shell_state(self._shell_state_for_persist())
         return False
 
     def _on_close_request(self, *_args: object) -> bool:
         if self._persist_timeout_id:
             GLib.source_remove(self._persist_timeout_id)
             self._persist_timeout_id = 0
-        self._service.config.set_shell_state(self._shell_state)
+        self._service.config.set_shell_state(self._shell_state_for_persist())
         return False
+
+    def _try_restore_persisted_grid(self, state: ShellState) -> bool:
+        if state.base == ShellBase.NONE or not state.cached_releases:
+            return False
+        releases = releases_from_cache_payloads(state.cached_releases)
+        if not releases:
+            return False
+        self._store_selection_cache(state, releases)
+        filtered = self._filtered_from_cache(state)
+        self._show_grid(
+            releases=filtered,
+            empty_message=self._empty_message(state, filtered),
+            title=self._grid_title(state),
+        )
+        return True
 
     def _reload_grid(self) -> bool:
         state = self._effective_shell_state()
         self._sync_header_title(state)
+
+        if self._try_restore_persisted_grid(state):
+            return False
 
         if state.base in (ShellBase.NEW_MUSIC, ShellBase.SUGGESTION):
             self._start_async_load(state.base)
@@ -397,6 +441,7 @@ class TunesWindow(Adw.ApplicationWindow):
             empty_message=self._empty_message(state, filtered),
             title=self._grid_title(state),
         )
+        self._schedule_persist()
         return False
 
     def _start_async_load(self, base: ShellBase) -> None:
@@ -447,6 +492,7 @@ class TunesWindow(Adw.ApplicationWindow):
             empty_message=self._empty_message(self._shell_state, filtered),
             title=label,
         )
+        self._schedule_persist()
         return False
 
     def _show_grid_loading(self, base: ShellBase) -> None:

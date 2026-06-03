@@ -93,9 +93,9 @@ class PreferencesWindow(Adw.PreferencesWindow):
         audio_page.add(audio)
 
         application_group = Adw.PreferencesGroup(
-            title="New Music",
+            title="New Releases",
             description=(
-                "How far back to include releases in the New Music view for local files, "
+                "How far back to include releases in the New Releases view for local files, "
                 "TIDAL, and Qobuz."
             ),
         )
@@ -110,7 +110,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         )
         self._new_music_days_row = Adw.SpinRow(
             title="New cutoff",
-            subtitle="Days to include in the New Music view",
+            subtitle="Days to include in the New Releases view",
             adjustment=self._new_music_days_adj,
         )
         self._new_music_days_adj.connect("value-changed", self._on_new_music_within_days_changed)

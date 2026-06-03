@@ -1,4 +1,4 @@
-"""Config persistence for New Music cutoff."""
+"""Config persistence for New Releases cutoff."""
 
 from __future__ import annotations
 

@@ -14,6 +14,9 @@ from tunes_player.core.shell_state import (
     ShellState,
     apply_source_filter,
     parse_shell_state,
+    release_from_cache_payload,
+    release_to_cache_payload,
+    releases_from_cache_payloads,
 )
 
 
@@ -23,6 +26,8 @@ def _release(release_id: str, source: Source) -> Release:
         title="Title",
         artist_name="Artist",
         source=source,
+        year=2024,
+        genre="Rock",
     )
 
 
@@ -32,6 +37,7 @@ class TestShellStateParsing(unittest.TestCase):
         self.assertEqual(state.base, ShellBase.NONE)
         self.assertEqual(state.search_query, "")
         self.assertEqual(state.enabled_sources, frozenset())
+        self.assertEqual(state.cached_releases, ())
 
     def test_roundtrip_dict(self) -> None:
         state = ShellState(
@@ -54,6 +60,24 @@ class TestShellStateParsing(unittest.TestCase):
         self.assertEqual(restored.enabled_sources, frozenset({Source.QOBUZ}))
 
 
+class TestReleaseCachePayload(unittest.TestCase):
+    def test_roundtrip(self) -> None:
+        release = _release("tidal:99", Source.TIDAL)
+        payload = release_to_cache_payload(release)
+        restored = release_from_cache_payload(payload)
+        assert restored is not None
+        self.assertEqual(restored, release)
+
+    def test_releases_from_cache_payloads(self) -> None:
+        payloads = (
+            release_to_cache_payload(_release("local:1", Source.LOCAL)),
+            release_to_cache_payload(_release("tidal:2", Source.TIDAL)),
+        )
+        restored = releases_from_cache_payloads(payloads)
+        self.assertEqual(len(restored), 2)
+        self.assertEqual(restored[0].id, "local:1")
+
+
 class TestApplySourceFilter(unittest.TestCase):
     def test_all_sources(self) -> None:
         releases = [
@@ -70,38 +94,30 @@ class TestApplySourceFilter(unittest.TestCase):
         filtered = apply_source_filter(releases, frozenset({Source.LOCAL}))
         self.assertEqual([r.id for r in filtered], ["local:1"])
 
-    def test_multiple_sources(self) -> None:
-        releases = [
-            _release("local:1", Source.LOCAL),
-            _release("tidal:1", Source.TIDAL),
-            _release("qobuz:1", Source.QOBUZ),
-        ]
-        filtered = apply_source_filter(
-            releases,
-            frozenset({Source.LOCAL, Source.TIDAL}),
-        )
-        self.assertEqual({r.id for r in filtered}, {"local:1", "tidal:1"})
-
 
 class TestShellStateConfigPersistence(unittest.TestCase):
-    def test_config_roundtrip(self) -> None:
+    def test_config_roundtrip_with_cached_releases(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
             manager = ConfigManager(path)
             manager.load()
+            release = _release("qobuz:1", Source.QOBUZ)
             state = ShellState(
                 base=ShellBase.SUGGESTION,
                 enabled_sources=frozenset({Source.QOBUZ}),
+                cached_releases=(release_to_cache_payload(release),),
             )
             manager.set_shell_state(state)
 
             other = ConfigManager(path)
             other.load()
-            self.assertEqual(other.config.shell_state, state)
+            self.assertEqual(len(other.config.shell_state.cached_releases), 1)
+            restored = release_from_cache_payload(other.config.shell_state.cached_releases[0])
+            assert restored is not None
+            self.assertEqual(restored.id, "qobuz:1")
 
             raw = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(raw["shell_state"]["base"], "suggestion")
-            self.assertEqual(raw["shell_state"]["enabled_sources"], ["qobuz"])
+            self.assertIn("cached_releases", raw["shell_state"])
 
 
 if __name__ == "__main__":

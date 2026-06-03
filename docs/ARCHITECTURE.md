@@ -84,12 +84,12 @@ others) with rationale and collisions are in **[docs/NAMING.md](NAMING.md)**.
 | `PlaybackEngine` + `MpvEngine` | Done — queue, skip, seek, events |
 | Device volume + bit-perfect profile | Partial — PipeWire/Pulse via `wpctl`/`pactl`; exclusive ALSA not done |
 | MPRIS + GDK media keys | Done |
-| GTK shell (search, New Music, Suggest Music, source filter, queue sheet) | Done |
+| GTK shell (search, New Releases, Suggest Music, source filter, queue sheet) | Done |
 | Settings (Sources, Audio, Application, Diagnostics) | Done |
-| TIDAL (OAuth, search, playback, New Music, Suggest Music) | Done |
-| Qobuz (credentials, login, search, playback, New Music, Suggest Music) | Done |
+| TIDAL (OAuth, search, playback, New Releases, Suggest Music) | Done |
+| Qobuz (credentials, login, search, playback, New Releases, Suggest Music) | Done |
 | Federated search (phase A) | Done in `PlayerService.search()` — no separate `catalog/` module yet |
-| New Music + Suggest Music aggregation | Done in `core/home.py` + `PlayerService` |
+| New Releases + Suggest Music aggregation | Done in `core/home.py` + `PlayerService` |
 | Deezer | Not started |
 | Minimized compact controller | Not started |
 | UPnP / AES67 output | Not started |
@@ -105,7 +105,7 @@ tunes_player/
 │   ├── models.py      # Release, Track, Artist, Source
 │   ├── services.py    # PlayerService facade for all UIs
 │   ├── config.py      # ConfigManager, AppConfig (platformdirs)
-│   ├── home.py        # New Music / Suggestions item types and merge limits
+│   ├── home.py        # New Releases / Suggestions item types and merge limits
 │   ├── volume.py      # VolumeController protocol
 │   ├── backends/
 │   │   ├── playable.py, resolve.py, local.py
@@ -208,7 +208,7 @@ and simpler than Roon.
 
 ```text
 ┌ Header: back · (title) · Settings menu ────────────────────────┐
-├ Search… · New Music · Suggest Music ────────────────────────────┤
+├ Search… · New Releases · Suggest Music ────────────────────────────┤
 ├ [All] [Local] [TIDAL] [Qobuz]  (only if multiple sources) ─────┤
 ├ Main pane: release grid → release detail (single NavigationView) ┤
 ├─────────────────────────────────────────────────────────────────┤
@@ -217,7 +217,7 @@ and simpler than Roon.
 ```
 
 **Shell (`ui/gtk/app.py`):** every grid is a **bounded selection** — federated **search**
-(Enter in the search field), **New Music**, or **Suggest Music** — optionally narrowed by
+(Enter in the search field), **New Releases**, or **Suggest Music** — optionally narrowed by
 **source chips** (shown only when more than one source is configured). There is no
 full-catalog browse and no sidebar. **Settings** opens from the header menu
 (`AdwPreferencesWindow`). Session state (`shell_state` in `config.json`) restores the
@@ -245,7 +245,7 @@ lyrics, streaming source badges in browse views.
 
 | Page | Contents |
 |------|----------|
-| **Application** | New Music cutoff (days) — local, TIDAL, and Qobuz new-release selection |
+| **Application** | New Releases cutoff (days) — local, TIDAL, and Qobuz new-release selection |
 | **Sources** | **Local files:** music folders, scan library. **Streaming:** TIDAL sign-in/out (OAuth via browser); Qobuz App ID/Secret, save credentials, email/password sign-in/out |
 | **Audio** | Bit-perfect toggle (subtitle reflects device vs software volume), output device dropdown (PipeWire/Pulse sinks) |
 | **Diagnostics** | Log file path (copy button) |
@@ -260,7 +260,7 @@ files live in **core/backends/** and `platformdirs` config/data dirs. Settings U
 
 **Where streaming appears outside Settings:**
 
-- **New Music / Suggest Music:** merged selections from local + signed-in services.
+- **New Releases / Suggest Music:** merged selections from local + signed-in services.
 - **Search:** federated release results (local first, then streaming append).
 - **Release detail / playback:** same views for `local:…`, `tidal:…`, `qobuz:…` IDs.
 - **Now Playing:** quality hint (e.g. FLAC metadata, “TIDAL”, “QOBUZ”); source badge deferred.
@@ -530,7 +530,7 @@ Backends are concrete clients (`TidalClient`, `QobuzClient`, `LibraryStore`) cal
 | Search | `search_releases()` | `search_releases()` |
 | Browse | `list_releases()`, `get_release()`, `get_release_tracks()` | same |
 | Play | `resolve_local_track()` via `resolve_track()` | `resolve_playable()`, `queue_for_track()` |
-| New Music | `list_recently_added_items()` | `list_new_release_items()` |
+| New Releases | `list_recently_added_items()` | `list_new_release_items()` |
 | Suggestions | `list_continue_listening_entries()`, `list_rediscover_items()` | `list_suggestion_items()`, `list_similar_items()` (TIDAL) |
 | Auth | — | OAuth (TIDAL) or credentials + login (Qobuz) |
 
@@ -546,7 +546,7 @@ separate catalog module.
   (`local:…`, `tidal:…`, `qobuz:…`).
 - **Deduplicate** by `release.id` within each view (same ID from multiple providers
   keeps the highest `added_ns`).
-- **Rank:** New Music by recency (`added_ns`); Suggestions by `suggestion_added_ns()`
+- **Rank:** New Releases by recency (`added_ns`); Suggestions by `suggestion_added_ns()`
   (local first, then streaming by source name order).
 - **Badge source** in UI via `source_label()` (`ui/gtk/util.py`).
 
@@ -554,7 +554,7 @@ separate catalog module.
 
 Local library populates home feeds via `LibraryStore`:
 
-- **Recently added (local):** releases from folders added within the New Music window.
+- **Recently added (local):** releases from folders added within the New Releases window.
 - **Continue listening:** `play_history` table (recorded on playback).
 - **Rediscover (local):** highly-played releases not played recently
   (`SUGGESTIONS_REDISCOVER_IDLE_MONTHS` in `core/home.py`).
@@ -563,10 +563,10 @@ Favorites / star ratings are not implemented yet.
 
 ### Discover views (implemented)
 
-**New Music** — flat release grid (`ReleaseGridView`). `PlayerService.list_recently_added_items()`
+**New Releases** — flat release grid (`ReleaseGridView`). `PlayerService.list_recently_added_items()`
 merges:
 
-- Local releases added within **New Music cutoff** days (Settings → Application; default 90).
+- Local releases added within **New Releases cutoff** days (Settings → Application; default 90).
 - TIDAL new-release rails (when signed in; filtered by the same cutoff).
 - Qobuz featured new/recent releases (when signed in; filtered by cutoff).
 
@@ -592,7 +592,7 @@ subscriptions** where required. Features can break when providers change auth or
 README includes a user-facing [disclaimer](../README.md#streaming-disclaimer).
 
 **TIDAL** and **Qobuz** backends are implemented in `core/backends/` with OAuth or
-account login, federated search, stream URL resolution at play time, and New Music /
+account login, federated search, stream URL resolution at play time, and New Releases /
 Suggestions feeds. **Deezer** is planned next.
 
 One **provider abstraction** pattern — auth, catalog/search, resolve `PlayableSource` at

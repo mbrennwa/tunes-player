@@ -54,7 +54,7 @@ def sign_get_file_url(
 
 
 def _album_added_ns(album: dict[str, Any]) -> int:
-    """Sort key for New Music from Qobuz release/stream dates."""
+    """Sort key for New Releases from Qobuz release/stream dates."""
     for key in ("release_date_stream", "released_at", "release_date_original"):
         raw = album.get(key)
         if isinstance(raw, str) and len(raw) >= 10:

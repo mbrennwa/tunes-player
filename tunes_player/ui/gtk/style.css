@@ -75,31 +75,33 @@ button.artist-link:hover label {
 }
 
 /* Shell controls: search primary, filters secondary */
-.shell-controls .shell-search-row {
+.shell-controls .shell-search-row.linked {
   min-height: 0;
 }
 
-.shell-controls .shell-search-entry {
+.shell-controls .shell-search-row.linked .shell-search-entry {
   min-height: 36px;
   font-size: 1.05em;
+}
+
+.shell-controls .shell-search-row.linked > button.shell-preset-btn {
+  min-height: 36px;
+  min-width: 0;
+  padding: 0 10px;
+  font-size: 0.8em;
+  font-weight: 400;
+}
+
+.shell-controls .shell-search-row.linked > button.shell-preset-btn:checked {
+  background-color: @accent_bg_color;
+  color: @accent_fg_color;
+  font-weight: 600;
 }
 
 .shell-controls .shell-source-row {
   margin-top: 2px;
   min-height: 0;
   opacity: 0.92;
-}
-
-.shell-controls .shell-preset-btn {
-  min-height: 0;
-  min-width: 0;
-  padding: 2px 8px;
-  font-size: 0.8em;
-  font-weight: 400;
-}
-
-.shell-controls .shell-preset-btn:checked {
-  font-weight: 500;
 }
 
 .shell-source-multi .shell-source-heading {

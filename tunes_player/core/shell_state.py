@@ -7,7 +7,12 @@ from enum import Enum
 from typing import Any
 
 from tunes_player.core.home import RecentlyAddedItem
-from tunes_player.core.models import Release, Source
+from tunes_player.core.models import (
+    Release,
+    ReleaseCompleteness,
+    ReleaseType,
+    Source,
+)
 
 
 class ShellBase(str, Enum):
@@ -19,6 +24,8 @@ class ShellBase(str, Enum):
 
 _VALID_BASES = frozenset(item.value for item in ShellBase)
 _VALID_SOURCES = frozenset(item.value for item in Source)
+_VALID_COMPLETENESS = frozenset(item.value for item in ReleaseCompleteness)
+_VALID_RELEASE_TYPES = frozenset(item.value for item in ReleaseType)
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +34,8 @@ class ShellState:
     search_query: str = ""
     # Empty set = all configured sources enabled. Non-empty = only those sources.
     enabled_sources: frozenset[Source] = field(default_factory=frozenset)
+    # Serialized grid rows for instant restore on relaunch (no API refetch).
+    cached_releases: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -37,6 +46,8 @@ class ShellState:
             payload["enabled_sources"] = sorted(
                 source.value for source in self.enabled_sources
             )
+        if self.cached_releases:
+            payload["cached_releases"] = list(self.cached_releases)
         return payload
 
     @classmethod
@@ -52,11 +63,105 @@ class ShellState:
         if base != ShellBase.SEARCH:
             search_query = ""
         enabled_sources = _parse_enabled_sources(raw)
+        cached_releases = _parse_cached_releases(raw)
         return cls(
             base=base,
             search_query=search_query,
             enabled_sources=enabled_sources,
+            cached_releases=cached_releases,
         )
+
+
+def release_to_cache_payload(release: Release) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": release.id,
+        "title": release.title,
+        "artist_name": release.artist_name,
+        "source": release.source.value,
+        "track_count": release.track_count,
+        "completeness": release.completeness.value,
+        "release_type": release.release_type.value,
+    }
+    if release.expected_track_count is not None:
+        payload["expected_track_count"] = release.expected_track_count
+    if release.year is not None:
+        payload["year"] = release.year
+    if release.genre:
+        payload["genre"] = release.genre
+    if release.art_uri:
+        payload["art_uri"] = release.art_uri
+    if release.duration_sec is not None:
+        payload["duration_sec"] = release.duration_sec
+    return payload
+
+
+def release_from_cache_payload(raw: object) -> Release | None:
+    if not isinstance(raw, dict):
+        return None
+    release_id = raw.get("id")
+    title = raw.get("title")
+    artist_name = raw.get("artist_name")
+    source_raw = raw.get("source")
+    if not isinstance(release_id, str) or not release_id:
+        return None
+    if not isinstance(title, str) or not isinstance(artist_name, str):
+        return None
+    if not isinstance(source_raw, str) or source_raw not in _VALID_SOURCES:
+        return None
+    completeness_raw = raw.get("completeness", ReleaseCompleteness.COMPLETE.value)
+    release_type_raw = raw.get("release_type", ReleaseType.ALBUM.value)
+    completeness = ReleaseCompleteness.COMPLETE
+    if isinstance(completeness_raw, str) and completeness_raw in _VALID_COMPLETENESS:
+        completeness = ReleaseCompleteness(completeness_raw)
+    release_type = ReleaseType.ALBUM
+    if isinstance(release_type_raw, str) and release_type_raw in _VALID_RELEASE_TYPES:
+        release_type = ReleaseType(release_type_raw)
+    expected = raw.get("expected_track_count")
+    year = raw.get("year")
+    genre = raw.get("genre")
+    art_uri = raw.get("art_uri")
+    duration = raw.get("duration_sec")
+    try:
+        track_count = int(raw.get("track_count", 0))
+    except (TypeError, ValueError):
+        track_count = 0
+    return Release(
+        id=release_id,
+        title=title,
+        artist_name=artist_name,
+        source=Source(source_raw),
+        track_count=track_count,
+        expected_track_count=int(expected) if expected is not None else None,
+        completeness=completeness,
+        release_type=release_type,
+        year=int(year) if year is not None else None,
+        genre=str(genre) if genre else None,
+        art_uri=str(art_uri) if art_uri else None,
+        duration_sec=float(duration) if duration is not None else None,
+    )
+
+
+def releases_from_cache_payloads(
+    payloads: tuple[dict[str, Any], ...],
+) -> list[Release]:
+    releases: list[Release] = []
+    for item in payloads:
+        release = release_from_cache_payload(item)
+        if release is not None:
+            releases.append(release)
+    return releases
+
+
+def _parse_cached_releases(raw: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    cached_raw = raw.get("cached_releases")
+    if isinstance(cached_raw, list):
+        payloads: list[dict[str, Any]] = []
+        for item in cached_raw:
+            if isinstance(item, dict):
+                payloads.append(dict(item))
+        if payloads:
+            return tuple(payloads)
+    return ()
 
 
 def _parse_enabled_sources(raw: dict[str, Any]) -> frozenset[Source]:
@@ -69,7 +174,6 @@ def _parse_enabled_sources(raw: dict[str, Any]) -> frozenset[Source]:
         )
         if parsed:
             return parsed
-    # Legacy single-source filter.
     filter_raw = raw.get("source_filter")
     if isinstance(filter_raw, str) and filter_raw in _VALID_SOURCES:
         return frozenset({Source(filter_raw)})

@@ -12,13 +12,13 @@ Package and command name: **tunes-player**.
 Early development (v0.1). Working today on Linux:
 
 - **Local library** — scan music folders into SQLite; browse, search, and play **FLAC, WAV, AIFF, ALAC, MP3, AAC, Ogg Vorbis**
-- **Streaming** — **TIDAL** (OAuth sign-in, search, playback, New Music, Suggest Music) and **Qobuz** (user-supplied App ID/Secret, account login, search, playback, New Music, Suggest Music)
-- **Music shell** — `Release` grid driven by search, **New Music**, or **Suggest Music** selections (optional per-source filter); release detail and play queue
-- **Discovery** — **New Music** (recent local imports + service new-release rails) and **Suggest Music** (continue listening, editorial picks, similar tracks, local rediscover)
+- **Streaming** — **TIDAL** (OAuth sign-in, search, playback, New Releases, Suggest Music) and **Qobuz** (user-supplied App ID/Secret, account login, search, playback, New Releases, Suggest Music)
+- **Music shell** — `Release` grid driven by search, **New Releases**, or **Suggest Music** selections (optional per-source filter); release detail and play queue
+- **Discovery** — **New Releases** (recent local imports + service new-release rails) and **Suggest Music** (continue listening, editorial picks, similar tracks, local rediscover)
 - **Federated search** — search field merges local index with signed-in streaming catalogs
 - **Playback** — mpv/libmpv queue, skip, seek; bit-perfect profile when device volume is available; PipeWire/Pulse sink volume via `wpctl`/`pactl`
 - **Desktop integration** — MPRIS, GDK media keys, playback error toasts, file logging
-- **Settings** — music folders, TIDAL/Qobuz accounts, output device, bit-perfect toggle, New Music cutoff
+- **Settings** — music folders, TIDAL/Qobuz accounts, output device, bit-perfect toggle, New Releases cutoff
 
 Still planned or incomplete: Deezer, cross-source deduplication, playlists, minimized
 compact controller, UPnP/AES67 output, DEB packaging, macOS/Windows UI. See
@@ -30,7 +30,7 @@ compact controller, UPnP/AES67 output, DEB packaging, macOS/Windows UI. See
 tunes_player/
 ├── core/           # Models, library, backends, playback logic — no GTK, no mpv
 │   ├── services.py # PlayerService facade for all UIs
-│   ├── home.py     # New Music / Suggestion types and merge limits
+│   ├── home.py     # New Releases / Suggestion types and merge limits
 │   ├── backends/   # local, tidal/, qobuz/ → PlayableSource
 │   ├── library/    # SQLite index, scanner, release grouping
 │   └── playback/   # PlaybackEngine protocol
