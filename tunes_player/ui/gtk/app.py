@@ -170,6 +170,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._source_row.add_css_class("shell-source-row")
         controls.append(self._source_row)
 
+        self._shell_controls = controls
         shell_column.append(controls)
 
         self._main_nav = Adw.NavigationView()
@@ -616,6 +617,8 @@ class TunesWindow(Adw.ApplicationWindow):
         self._sync_header_with_nav()
 
     def _search_for_artist(self, artist_name: str) -> None:
+        if not self._nav_at_root():
+            self._main_nav.pop()
         self._search_entry.set_text(artist_name)
         self._set_shell_state(
             ShellState(
@@ -682,6 +685,7 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _sync_header_with_nav(self) -> None:
         at_root = self._nav_at_root()
+        self._shell_controls.set_visible(at_root)
         self._back_btn.set_visible(not at_root)
         if not at_root:
             page = self._main_nav.get_visible_page()
