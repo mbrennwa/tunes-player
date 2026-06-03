@@ -75,7 +75,8 @@ tunes-player
 `apt` installs declared package dependencies automatically (GTK, mpv, Python GI, and
 related libraries).
 
-Desktop menu entry is not included yet; run `tunes-player` from a terminal.
+After install, **Tunes** appears in the application menu (desktop entry and icon are
+included in the `.deb`).
 
 Maintainers: new release builds are published when a `v*` tag is pushed (see
 [docs/RELEASE.md](docs/RELEASE.md) and [.github/workflows/release-deb.yml](.github/workflows/release-deb.yml)).
@@ -101,6 +102,13 @@ python3 -m venv .venv --system-site-packages
 source .venv/bin/activate
 pip install -e .
 tunes-player
+```
+
+Optional: install the launcher icon and `.desktop` entry for local development:
+
+```bash
+make icons
+sudo make install
 ```
 
 ## Streaming disclaimer

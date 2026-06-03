@@ -696,7 +696,7 @@ instead of mpv). **AGPL** is unnecessary for a desktop app.
 | GitHub repo | `mbrennwa/tunes-player` |
 | Debian package | `tunes-player` (not bare `tunes`) |
 | Binary | `tunes-player` |
-| Desktop file | `data/tunes-player.desktop` |
+| Desktop file | `data/tunes.player.desktop` (basename must match GTK app ID) |
 | Config | `platformdirs` → `~/.config/tunes-player/config.json` |
 | Library DB | `~/.local/share/tunes-player/library.db` |
 | Sessions | `tidal-session.json`, `qobuz-session.json` under data dir |

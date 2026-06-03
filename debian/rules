@@ -30,6 +30,16 @@ override_dh_auto_install:
 
 	rm -rf "$$BUILD_VENV"
 
+	if command -v rsvg-convert >/dev/null 2>&1 || command -v inkscape >/dev/null 2>&1; then
+		python3 scripts/generate_icons.py --platform linux
+	elif [ ! -f build/icons/hicolor/48x48/apps/tunes-player.png ]; then
+		echo "No SVG renderer and no pre-built icons. Install librsvg2-bin or run: make icons" >&2
+		exit 1
+	fi
+	install -Dm644 data/tunes.player.desktop debian/tunes-player/usr/share/applications/tunes.player.desktop
+	mkdir -p debian/tunes-player/usr/share/icons/hicolor
+	cp -a build/icons/hicolor/. debian/tunes-player/usr/share/icons/hicolor/
+
 override_dh_auto_clean:
 	dh_auto_clean
 	rm -rf debian/.build-venv

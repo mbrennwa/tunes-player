@@ -73,6 +73,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._cached_selection_key: tuple[str, str] | None = None
         self._cached_releases: list[Release] = []
         self.set_default_size(*_DEFAULT_SIZE)
+        self.set_icon_name("tunes-player")
 
         self._now_playing = NowPlayingBar(service=service, art_loader=self._art_loader)
         self._now_playing.set_queue_handler(self._open_queue_sheet)
@@ -680,6 +681,7 @@ def run() -> int:
     from tunes_player.core.config import ConfigManager
 
     load_app_css()
+    Gtk.Window.set_default_icon_name("tunes-player")
     config = ConfigManager()
     config.load()
     configure_logging(config.data_dir)

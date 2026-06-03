@@ -23,4 +23,10 @@ python3 -m venv --system-site-packages "$VENV"
   --no-deps \
   tunes-player
 
+rm -f /usr/share/applications/tunes-player.desktop
+
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -q -f -t /usr/share/icons/hicolor || true
+fi
+
 exit 0

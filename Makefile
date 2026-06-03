@@ -7,15 +7,17 @@
 #   make uninstall          # Remove installed files
 
 APP_ID := tunes-player
+DESKTOP_ID := tunes.player
 PREFIX ?= /usr/local
 DESTDIR ?=
 PYTHON ?= python3
 
-DESKTOP_SRC := data/$(APP_ID).desktop
+DESKTOP_SRC := data/$(DESKTOP_ID).desktop
 ICON_SRC := data/icons/$(APP_ID).svg
 ICON_BUILD := build/icons
 ICON_DEST := $(DESTDIR)$(PREFIX)/share/icons/hicolor
-DESKTOP_DEST := $(DESTDIR)$(PREFIX)/share/applications/$(APP_ID).desktop
+DESKTOP_DEST := $(DESTDIR)$(PREFIX)/share/applications/$(DESKTOP_ID).desktop
+LEGACY_DESKTOP_DEST := $(DESTDIR)$(PREFIX)/share/applications/$(APP_ID).desktop
 
 .PHONY: icons icons-all install uninstall clean-icons help
 
@@ -42,7 +44,7 @@ install: icons
 	@echo "Installed $(APP_ID) to $(DESTDIR)$(PREFIX)"
 
 uninstall:
-	rm -f $(DESKTOP_DEST)
+	rm -f $(DESKTOP_DEST) $(LEGACY_DESKTOP_DEST)
 	rm -f $(ICON_DEST)/scalable/apps/$(APP_ID).svg
 	@for size in 16 22 24 32 48 64 128 256 512; do \
 		rm -f $(ICON_DEST)/$${size}x$${size}/apps/$(APP_ID).png; \

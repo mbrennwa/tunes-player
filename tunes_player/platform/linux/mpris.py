@@ -21,7 +21,7 @@ OBJECT_PATH = "/org/mpris/MediaPlayer2"
 ROOT_INTERFACE = "org.mpris.MediaPlayer2"
 PLAYER_INTERFACE = "org.mpris.MediaPlayer2.Player"
 PROPERTIES_INTERFACE = "org.freedesktop.DBus.Properties"
-DESKTOP_ENTRY = "tunes-player"
+DESKTOP_ENTRY = "tunes.player"
 IDENTITY = "Tunes"
 SUPPORTED_MIME_TYPES = [
     "audio/flac",

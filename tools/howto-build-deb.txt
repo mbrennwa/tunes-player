@@ -22,4 +22,5 @@ Install on a target system (apt pulls in [tool.deb].apt_depends automatically):
 Published packages: push a tag v<version> (matching pyproject.toml); GitHub Actions
 uploads the .deb to https://github.com/mbrennwa/tunes-player/releases
 
-Desktop menu integration (.desktop, icons) is not included yet.
+The package installs data/tunes.player.desktop and hicolor icons (generated from
+data/icons/tunes-player.svg at build time; requires librsvg2-bin on the build host).
