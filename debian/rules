@@ -21,8 +21,9 @@ override_dh_auto_install:
 	python3 -m venv "$$BUILD_VENV"
 	"$$BUILD_VENV/bin/python" -m pip install --upgrade pip wheel setuptools
 
+	# Include transitive dependencies (tidalapi needs requests, isodate, etc.).
 	if [ -f debian/pypi-requirements.txt ] && [ -s debian/pypi-requirements.txt ]; then
-		"$$BUILD_VENV/bin/python" -m pip wheel --no-deps --wheel-dir "$$WHEEL_DIR" -r debian/pypi-requirements.txt
+		"$$BUILD_VENV/bin/python" -m pip wheel --wheel-dir "$$WHEEL_DIR" -r debian/pypi-requirements.txt
 	fi
 
 	"$$BUILD_VENV/bin/python" -m pip wheel --no-deps --wheel-dir "$$WHEEL_DIR" .

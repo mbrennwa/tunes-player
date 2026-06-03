@@ -7,6 +7,9 @@ From the repository root:
 Version and dependencies are read from pyproject.toml ([project].version and
 [tool.deb]). Output artifacts are collected in dist/.
 
+The build machine needs network access when pip builds the wheelhouse (to
+download tidalapi and its dependencies into wheels).
+
 Build machine prerequisites (Debian 12+ / Ubuntu 24.04+):
 
   sudo apt install debhelper devscripts python3 python3-venv python3-pip

@@ -10,12 +10,17 @@ python3 -m venv --system-site-packages "$VENV"
 "$VENV/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 || true
 "$VENV/bin/python" -m pip install --upgrade pip >/dev/null 2>&1 || true
 
+# Install PyPI stack from wheelhouse (includes tidalapi dependencies).
+"$VENV/bin/python" -m pip install \
+  --no-index \
+  --find-links "$WHEELS" \
+  tidalapi \
+  python-mpv
+
 "$VENV/bin/python" -m pip install \
   --no-index \
   --find-links "$WHEELS" \
   --no-deps \
-  tidalapi \
-  python-mpv \
   tunes-player
 
 exit 0
