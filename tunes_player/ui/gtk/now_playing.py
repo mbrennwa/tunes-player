@@ -18,6 +18,9 @@ from tunes_player.ui.gtk.util import format_duration, join_detail, source_label
 
 _TIME_LABEL_CHARS = 7  # wide enough for "0:00:00"
 _ART_PIXEL_SIZE = 48
+_VOLUME_SLIDER_WIDTH = 180
+_CONTROLS_WIDTH = 388  # prev · play · next · volume · queue + spacing
+_VOLUME_BOX_WIDTH = 224  # mute button + volume slider + spacing
 
 
 def _keyval(name: str) -> int:
@@ -32,6 +35,16 @@ _KEY_PREV = _keyval("XF86AudioPrev")
 _KEY_STOP = _keyval("XF86AudioStop")
 _KEY_VOLUME_UP = _keyval("XF86AudioRaiseVolume")
 _KEY_VOLUME_DOWN = _keyval("XF86AudioLowerVolume")
+
+
+def _volume_icon_name(level: float, *, muted: bool) -> str:
+    if muted or level <= 0.01:
+        return "audio-volume-muted-symbolic"
+    if level < 0.33:
+        return "audio-volume-low-symbolic"
+    if level < 0.66:
+        return "audio-volume-medium-symbolic"
+    return "audio-volume-high-symbolic"
 
 
 class NowPlayingBar(Gtk.Box):
@@ -65,6 +78,7 @@ class NowPlayingBar(Gtk.Box):
         row.append(self._art)
 
         meta = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        meta.add_css_class("now-playing-meta")
         meta.set_hexpand(True)
         meta.set_valign(Gtk.Align.CENTER)
         row.append(meta)
@@ -83,6 +97,10 @@ class NowPlayingBar(Gtk.Box):
         meta.append(self._quality)
 
         controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        controls.add_css_class("now-playing-controls")
+        controls.set_hexpand(False)
+        controls.set_halign(Gtk.Align.END)
+        controls.set_size_request(_CONTROLS_WIDTH, -1)
         controls.set_valign(Gtk.Align.CENTER)
         row.append(controls)
 
@@ -110,13 +128,15 @@ class NowPlayingBar(Gtk.Box):
         controls.append(next_btn)
 
         volume_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        volume_box.set_size_request(_VOLUME_BOX_WIDTH, -1)
         volume_box.set_valign(Gtk.Align.CENTER)
         controls.append(volume_box)
 
-        mute_btn = Gtk.Button()
-        mute_btn.set_icon_name("audio-volume-high-symbolic")
-        mute_btn.set_tooltip_text("Volume")
-        volume_box.append(mute_btn)
+        self._mute_btn = Gtk.Button()
+        self._mute_btn.set_icon_name("audio-volume-high-symbolic")
+        self._mute_btn.set_tooltip_text("Mute")
+        self._mute_btn.connect("clicked", self._on_mute_clicked)
+        volume_box.append(self._mute_btn)
 
         self._volume = Gtk.Scale.new_with_range(
             Gtk.Orientation.HORIZONTAL,
@@ -124,8 +144,8 @@ class NowPlayingBar(Gtk.Box):
             1.0,
             0.01,
         )
-        self._volume.set_hexpand(True)
-        self._volume.set_size_request(72, -1)
+        self._volume.set_hexpand(False)
+        self._volume.set_size_request(_VOLUME_SLIDER_WIDTH, -1)
         self._volume.set_draw_value(False)
         self._volume.connect("value-changed", self._on_volume_changed)
         self._attach_drag_gesture(
@@ -321,6 +341,14 @@ class NowPlayingBar(Gtk.Box):
         if self._queue_handler is not None:
             self._queue_handler()
 
+    def _on_mute_clicked(self, *_args: object) -> None:
+        self._service.toggle_mute()
+
+    def _sync_mute_button(self, state: object) -> None:
+        icon = _volume_icon_name(state.volume, muted=state.muted)
+        self._mute_btn.set_icon_name(icon)
+        self._mute_btn.set_tooltip_text("Unmute" if state.muted else "Mute")
+
     def _on_volume_changed(self, scale: Gtk.Scale) -> None:
         value = scale.get_value()
         if self._volume_dragging:
@@ -376,11 +404,15 @@ class NowPlayingBar(Gtk.Box):
             self._play_btn.set_tooltip_text("Pause" if state.is_playing else "Play")
             self._sync_art(track)
 
-        if not self._volume_dragging:
-            if event in (None, "volume_changed", "playback_changed"):
-                self._volume.handler_block_by_func(self._on_volume_changed)
-                self._volume.set_value(state.volume)
-                self._volume.handler_unblock_by_func(self._on_volume_changed)
+        if not self._volume_dragging and event in (
+            None,
+            "volume_changed",
+            "playback_changed",
+        ):
+            self._volume.handler_block_by_func(self._on_volume_changed)
+            self._volume.set_value(state.volume)
+            self._volume.handler_unblock_by_func(self._on_volume_changed)
+        self._sync_mute_button(state)
 
         return False
 

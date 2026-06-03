@@ -48,6 +48,7 @@ class PlaybackState:
     current_track: Track | None
     is_playing: bool
     volume: float
+    muted: bool
     queue: tuple[Track, ...]
     queue_index: int
     quality_hint: str
@@ -73,6 +74,7 @@ class PlayerService:
         self._volume_controller = volume_controller
         self._listeners: list[EventCallback] = []
         self._volume = 0.72
+        self._muted = False
         self._bit_perfect = self._config_manager.config.bit_perfect
         self._device_volume = self._has_device_volume()
         if self._device_volume and self._volume_controller is not None:
@@ -480,6 +482,7 @@ class PlayerService:
             current_track=self._current_track,
             is_playing=self._is_playing,
             volume=self._volume,
+            muted=self._muted,
             queue=tuple(self._queue),
             queue_index=self._queue_index,
             quality_hint=self._quality_hint,
@@ -658,17 +661,36 @@ class PlayerService:
 
     def set_volume(self, level: float, *, notify: bool = True) -> None:
         self._volume = max(0.0, min(1.0, level))
+        if self._muted and self._volume > 0:
+            self._muted = False
+        self._push_volume_to_output(notify=notify)
+
+    def toggle_mute(self) -> None:
+        self._muted = not self._muted
+        self._push_volume_to_output(notify=True)
+
+    def _output_volume_level(self) -> float:
+        return 0.0 if self._muted else self._volume
+
+    def _push_volume_to_output(self, *, notify: bool = True) -> None:
+        level = self._output_volume_level()
         if self._device_volume and self._volume_controller is not None:
-            self._volume_controller.set_level(self._volume)
+            self._volume_controller.set_level(level)
         else:
             engine = self._engine
             if engine is not None:
-                engine.set_volume(self._volume)
+                engine.set_volume(level)
         if notify:
             self._emit("volume_changed")
 
     def adjust_volume(self, delta: float) -> None:
         if self._device_volume and self._volume_controller is not None:
+            if self._muted:
+                self._volume = max(0.0, min(1.0, self._volume + delta))
+                if self._volume > 0:
+                    self._muted = False
+                self._push_volume_to_output(notify=True)
+                return
             self._volume_controller.adjust_level(delta)
             try:
                 self._volume = self._volume_controller.get_level()

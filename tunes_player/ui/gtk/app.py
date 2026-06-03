@@ -39,6 +39,7 @@ from tunes_player.ui.gtk.views import (
 )
 from tunes_player.ui.gtk.album_grid import ALBUM_GRID_VIEW_MARGIN, album_grid_min_content_width
 
+_APP_WINDOW_TITLE = "Tunes Player"
 _DEFAULT_SIZE = (960, 640)
 _GRID_ROOT_TAG = "grid-root"
 _PERSIST_DEBOUNCE_MS = 400
@@ -59,7 +60,7 @@ log = logging.getLogger(__name__)
 
 class TunesWindow(Adw.ApplicationWindow):
     def __init__(self, *, application: Adw.Application, service: PlayerService) -> None:
-        super().__init__(application=application, title="Tunes")
+        super().__init__(application=application, title=_APP_WINDOW_TITLE)
         self._service = service
         self._art_loader = ArtLoader(service.config.data_dir)
         self._shell_state = self._load_initial_shell_state()
@@ -109,7 +110,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._header = Adw.HeaderBar()
         self._toolbar.add_top_bar(self._header)
 
-        self._window_title = Adw.WindowTitle(title="Tunes", subtitle="")
+        self._window_title = Adw.WindowTitle(title=_APP_WINDOW_TITLE, subtitle="")
         title_center = Gtk.Box()
         title_center.set_halign(Gtk.Align.CENTER)
         title_center.append(self._window_title)
@@ -238,7 +239,6 @@ class TunesWindow(Adw.ApplicationWindow):
             self._reload_grid()
             return
         releases = self._filtered_from_cache(state)
-        self._sync_header_title(state)
         self._show_grid(
             releases=releases,
             empty_message=self._empty_message(state, releases),
@@ -421,7 +421,6 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _reload_grid(self) -> bool:
         state = self._effective_shell_state()
-        self._sync_header_title(state)
 
         if self._try_restore_persisted_grid(state):
             return False
@@ -558,11 +557,6 @@ class TunesWindow(Adw.ApplicationWindow):
             return state.search_query
         return _PRESET_LABELS.get(state.base, "Tunes")
 
-    def _sync_header_title(self, state: ShellState) -> None:
-        if not self._nav_at_root():
-            return
-        self._window_title.set_title(self._grid_title(state))
-
     def _replace_root_page(self, *, title: str, child: Gtk.Widget) -> None:
         self._pop_to_root()
         current = self._main_nav.get_visible_page()
@@ -674,27 +668,10 @@ class TunesWindow(Adw.ApplicationWindow):
             return True
         return page.get_tag() == _GRID_ROOT_TAG
 
-    def _title_for_nav_page(self, page: Adw.NavigationPage) -> str | None:
-        tag = page.get_tag()
-        if not tag or tag == _GRID_ROOT_TAG:
-            return None
-        release = self._service.get_release(tag)
-        if release is not None:
-            return release.title
-        return None
-
     def _sync_header_with_nav(self) -> None:
         at_root = self._nav_at_root()
         self._shell_controls.set_visible(at_root)
         self._back_btn.set_visible(not at_root)
-        if not at_root:
-            page = self._main_nav.get_visible_page()
-            if page is not None:
-                title = self._title_for_nav_page(page)
-                if title:
-                    self._window_title.set_title(title)
-            return
-        self._sync_header_title(self._effective_shell_state())
 
     def _on_nav_back(self, *_args: object) -> None:
         if self._nav_at_root():

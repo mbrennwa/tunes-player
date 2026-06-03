@@ -4,6 +4,11 @@
   min-width: 0;
 }
 
+/* Now Playing bar: metadata ellipsizes; transport width stays fixed */
+.now-playing-bar .now-playing-meta {
+  min-width: 0;
+}
+
 /* Album grid tiles: square, cover fills tile, text overlaid at bottom */
 .album-card-frame {
   min-width: 0;
