@@ -74,12 +74,64 @@ button.artist-link:hover label {
   min-height: 32px;
 }
 
-/* Shell: grouped source filter (linked toggle buttons) */
-.source-multi-switch button {
-  min-height: 28px;
-  padding: 4px 12px;
+/* Shell controls: search primary, filters secondary */
+.shell-controls .shell-search-row {
+  min-height: 0;
 }
 
-.source-multi-switch button:checked {
-  background-color: alpha(currentColor, 0.12);
+.shell-controls .shell-search-entry {
+  min-height: 36px;
+  font-size: 1.05em;
+}
+
+.shell-controls .shell-source-row {
+  margin-top: 2px;
+  min-height: 0;
+  opacity: 0.92;
+}
+
+.shell-controls .shell-preset-btn {
+  min-height: 0;
+  min-width: 0;
+  padding: 2px 8px;
+  font-size: 0.8em;
+  font-weight: 400;
+}
+
+.shell-controls .shell-preset-btn:checked {
+  font-weight: 500;
+}
+
+.shell-source-multi .shell-source-heading {
+  font-size: 0.75em;
+  opacity: 0.65;
+}
+
+/* Linked multi-switch: segmented look at compact height */
+.shell-source-multi .source-multi-switch.linked {
+  min-height: 0;
+}
+
+.shell-source-multi .source-multi-switch.linked > button.shell-source-btn {
+  min-height: 18px;
+  padding: 0 7px;
+  margin: 0;
+  min-width: 0;
+}
+
+.shell-source-multi .source-multi-switch.linked > button.shell-source-btn label.shell-source-btn-label {
+  padding: 0;
+  margin: 0;
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.shell-source-multi .source-multi-switch.linked > button.shell-source-btn:checked {
+  background-color: @accent_bg_color;
+  color: @accent_fg_color;
+}
+
+.shell-source-multi .source-multi-switch.linked > button.shell-source-btn:checked label.shell-source-btn-label {
+  color: @accent_fg_color;
+  font-weight: 600;
 }
