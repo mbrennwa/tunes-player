@@ -34,6 +34,7 @@ debian/debhelper-build-stamp
 debian/files
 debian/pypi-requirements.txt
 debian/.build-venv
+debian/tunes-player/
 *.deb
 *.buildinfo
 *.changes
