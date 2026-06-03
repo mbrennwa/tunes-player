@@ -95,8 +95,8 @@ class PreferencesWindow(Adw.PreferencesWindow):
         application_group = Adw.PreferencesGroup(
             title="New Music",
             description=(
-                "How far back to look for recently added local files and Qobuz "
-                "featured releases. TIDAL new-release rails are not filtered by this window."
+                "How far back to include releases in the New Music view for local files, "
+                "TIDAL, and Qobuz."
             ),
         )
         days = service.config.config.new_music_within_days

@@ -163,6 +163,7 @@ class PlayerService:
             try:
                 tidal_items = self._tidal.list_new_release_items(
                     limit=NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
+                    within_days=within_days,
                 )
                 items = [*items, *tidal_items]
             except TidalUnavailableError:

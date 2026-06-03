@@ -14,6 +14,7 @@ from tunes_player.core.home import (
     NEW_MUSIC_LOCAL_WITHIN_DAYS_MAX,
     NEW_MUSIC_LOCAL_WITHIN_DAYS_MIN,
 )
+from tunes_player.core.shell_state import ShellState, parse_shell_state
 
 APP_NAME = "tunes-player"
 
@@ -37,6 +38,7 @@ class AppConfig:
     qobuz_app_secret: str | None = None
     qobuz_stream_format_id: int = 27
     new_music_within_days: int = NEW_MUSIC_LOCAL_WITHIN_DAYS_DEFAULT
+    shell_state: ShellState = field(default_factory=ShellState)
 
 
 class ConfigManager:
@@ -93,6 +95,7 @@ class ConfigManager:
             new_music_within_days=normalize_new_music_within_days(
                 raw.get("new_music_within_days", NEW_MUSIC_LOCAL_WITHIN_DAYS_DEFAULT),
             ),
+            shell_state=parse_shell_state(raw.get("shell_state")),
         )
         return self._config
 
@@ -107,6 +110,7 @@ class ConfigManager:
             "qobuz_app_secret": self._config.qobuz_app_secret,
             "qobuz_stream_format_id": self._config.qobuz_stream_format_id,
             "new_music_within_days": self._config.new_music_within_days,
+            "shell_state": self._config.shell_state.to_dict(),
         }
         self._path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
@@ -129,4 +133,8 @@ class ConfigManager:
 
     def set_new_music_within_days(self, days: int) -> None:
         self._config.new_music_within_days = normalize_new_music_within_days(days)
+        self.save()
+
+    def set_shell_state(self, state: ShellState) -> None:
+        self._config.shell_state = state
         self.save()

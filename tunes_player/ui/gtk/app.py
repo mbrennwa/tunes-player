@@ -10,44 +10,42 @@ import gi
 gi.require_version("Adw", "1")
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Adw, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
-from tunes_player.core.config import ConfigManager
-from tunes_player.core.home import RecentlyAddedItem
 from tunes_player.core.logging_config import configure_logging
+from tunes_player.core.models import Release, Source
 from tunes_player.core.services import PlayerService
+from tunes_player.core.shell_state import ShellBase, ShellState, apply_source_filter
 from tunes_player.platform.linux.audio import create_volume_controller
 from tunes_player.ui.gtk.art import ArtLoader
 from tunes_player.ui.gtk.errors import attach_error_toasts, show_error_toast
 from tunes_player.ui.gtk.now_playing import NowPlayingBar, attach_media_keys
 from tunes_player.ui.gtk.preferences import PreferencesWindow
-from tunes_player.ui.gtk.util import escape_markup, load_app_css
+from tunes_player.ui.gtk.shell_controller import available_sources, fetch_base_releases
+from tunes_player.ui.gtk.source_multi_switch import SourceMultiSwitch
+from tunes_player.ui.gtk.util import escape_markup, load_app_css, source_label
 from tunes_player.ui.gtk.views import (
     LoadingDiscoverView,
     PlaceholderView,
     QueueSheet,
-    RecentlyAddedGridView,
     ReleaseDetailView,
     ReleaseGridView,
-    SearchResultsView,
 )
-from tunes_player.ui.gtk.album_grid import (
-    ALBUM_GRID_VIEW_MARGIN,
-    SEARCH_VIEW_HORIZONTAL_MARGIN,
-    album_grid_min_content_width,
-)
+from tunes_player.ui.gtk.album_grid import ALBUM_GRID_VIEW_MARGIN, album_grid_min_content_width
 
 _DEFAULT_SIZE = (960, 640)
-_SIDEBAR_WIDTH_PADDING_SP = 16.0
-_DISCOVER_SECTION_TITLES = {
-    "new-music": "New Music",
-    "suggestions": "Suggestions",
+_GRID_ROOT_TAG = "grid-root"
+_PERSIST_DEBOUNCE_MS = 400
+_ONBOARDING_MESSAGE = (
+    "Configure music sources in Settings, then search or choose New Music."
+)
+_PRESET_LABELS = {
+    ShellBase.NEW_MUSIC: "New Music",
+    ShellBase.SUGGESTION: "Suggest Music",
 }
-_NAV_ROOT_TAGS = frozenset({"releases-root", "search-root", "discover-root"})
-_NAV_ROOT_TITLES = {
-    "releases-root": "Browse",
-    "search-root": "Search",
-    "discover-root": "Discover",
+_LOADING_MESSAGES = {
+    ShellBase.NEW_MUSIC: "Loading New Music…",
+    ShellBase.SUGGESTION: "Finding suggestions...",
 }
 
 log = logging.getLogger(__name__)
@@ -58,12 +56,15 @@ class TunesWindow(Adw.ApplicationWindow):
         super().__init__(application=application, title="Tunes")
         self._service = service
         self._art_loader = ArtLoader(service.config.data_dir)
-        self._search_active = False
-        self._discover_current_title = ""
-        self._discover_active_section_id: str | None = None
-        self._discover_load_token = 0
+        self._shell_state = self._load_initial_shell_state()
+        self._load_token = 0
+        self._persist_timeout_id = 0
+        self._updating_chips = False
         self._preferences: PreferencesWindow | None = None
         self._queue_sheet: QueueSheet | None = None
+        self._source_multi: SourceMultiSwitch | None = None
+        self._cached_selection_key: tuple[str, str] | None = None
+        self._cached_releases: list[Release] = []
         self.set_default_size(*_DEFAULT_SIZE)
 
         self._now_playing = NowPlayingBar(service=service, art_loader=self._art_loader)
@@ -77,29 +78,36 @@ class TunesWindow(Adw.ApplicationWindow):
 
         self._toast_overlay = Adw.ToastOverlay()
         self._toast_overlay.set_size_request(-1, -1)
-        self._build_expanded_shell()
+        self._build_shell()
         attach_media_keys(self, service)
         attach_error_toasts(self._toast_overlay, service)
         service.subscribe(lambda event: GLib.idle_add(self._on_service_event, event))
+        self.connect("close-request", self._on_close_request)
         GLib.idle_add(self._startup_playback_probe)
+        GLib.idle_add(self._reload_grid)
 
-    def _build_expanded_shell(self) -> None:
+    def _load_initial_shell_state(self) -> ShellState:
+        state = self._service.config.config.shell_state
+        if not available_sources(self._service):
+            return ShellState()
+        sources = available_sources(self._service)
+        if state.enabled_sources and not state.enabled_sources <= sources:
+            state = ShellState(
+                base=state.base,
+                search_query=state.search_query,
+                enabled_sources=state.enabled_sources & sources,
+            )
+        return state
+
+    def _build_shell(self) -> None:
         self._header = Adw.HeaderBar()
         self._toolbar.add_top_bar(self._header)
 
-        self._window_title = Adw.WindowTitle(title="Browse", subtitle="")
-        self._title_center = Gtk.Box()
-        self._title_center.set_halign(Gtk.Align.CENTER)
-        self._title_center.append(self._window_title)
-        self._header.set_title_widget(self._title_center)
-
-        self._search_entry = Gtk.SearchEntry()
-        self._search_entry.set_placeholder_text("Search library and TIDAL")
-        self._search_entry.set_width_chars(24)
-        self._search_entry.set_max_width_chars(24)
-        self._search_entry.set_hexpand(False)
-        self._search_entry.connect("search-changed", self._on_search_changed)
-        self._search_entry.connect("stop-search", self._on_stop_search)
+        self._window_title = Adw.WindowTitle(title="Tunes", subtitle="")
+        title_center = Gtk.Box()
+        title_center.set_halign(Gtk.Align.CENTER)
+        title_center.append(self._window_title)
+        self._header.set_title_widget(title_center)
 
         self._back_btn = Gtk.Button(icon_name="go-previous-symbolic")
         self._back_btn.set_tooltip_text("Back")
@@ -107,95 +115,420 @@ class TunesWindow(Adw.ApplicationWindow):
         self._back_btn.connect("clicked", self._on_nav_back)
         self._header.pack_start(self._back_btn)
 
-        self._search_button = Gtk.ToggleButton(icon_name="system-search-symbolic")
-        self._search_button.set_tooltip_text("Search")
-        self._search_button.connect("toggled", self._on_search_toggled)
-        self._header.pack_start(self._search_button)
+        settings_action = Gio.SimpleAction.new("settings", None)
+        settings_action.connect("activate", lambda *_a, **_k: self._open_preferences())
+        self.add_action(settings_action)
 
-        self._split = Adw.NavigationSplitView()
-        self._split.set_size_request(-1, -1)
-        self._split.set_hexpand(True)
-        self._split.set_vexpand(True)
-        # Default 25% fraction resizes the sidebar with the window; min=max locks width instead.
-        self._split.set_sidebar_width_fraction(0.0)
-        self._toast_overlay.set_child(self._split)
+        settings_btn = Gtk.MenuButton(icon_name="emblem-system-symbolic")
+        settings_btn.set_tooltip_text("Settings")
+        menu = Gio.Menu.new()
+        menu.append("Settings", "win.settings")
+        settings_btn.set_menu_model(menu)
+        self._header.pack_end(settings_btn)
+
+        shell_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        shell_column.set_vexpand(True)
+        shell_column.set_hexpand(True)
+
+        controls = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        controls.set_margin_top(6)
+        controls.set_margin_bottom(6)
+        controls.set_margin_start(12)
+        controls.set_margin_end(12)
+
+        row1 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row1.set_hexpand(True)
+        self._search_entry = Gtk.SearchEntry()
+        self._search_entry.set_placeholder_text("Search releases…")
+        self._search_entry.set_hexpand(True)
+        self._search_entry.connect("activate", self._on_search_activate)
+        row1.append(self._search_entry)
+
+        self._new_music_btn = Gtk.ToggleButton(label="New Music")
+        self._new_music_btn.connect("toggled", self._on_new_music_toggled)
+        row1.append(self._new_music_btn)
+
+        self._suggestion_btn = Gtk.ToggleButton(label="Suggest Music")
+        self._suggestion_btn.connect("toggled", self._on_suggestion_toggled)
+        row1.append(self._suggestion_btn)
+
+        controls.append(row1)
+
+        self._source_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        controls.append(self._source_row)
+
+        shell_column.append(controls)
+
+        self._main_nav = Adw.NavigationView()
+        self._main_nav.set_vexpand(True)
+        self._main_nav.set_hexpand(True)
+        self._main_nav.connect("notify::visible-page", self._on_nav_visible_page_changed)
+        shell_column.append(self._main_nav)
+
+        self._toast_overlay.set_child(shell_column)
         self._toolbar.set_content(self._toast_overlay)
 
-        self._sidebar_shell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self._sidebar_shell.set_vexpand(True)
-        self._sidebar_shell.set_hexpand(False)
-        self._sidebar_shell.set_halign(Gtk.Align.START)
+        self._apply_window_min_width()
+        self._rebuild_source_filters()
+        self._sync_shell_controls()
 
-        self._sidebar_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self._sidebar_box.set_vexpand(True)
-        self._sidebar_box.set_hexpand(False)
-        self._sidebar_shell.append(self._sidebar_box)
+    def _apply_window_min_width(self) -> None:
+        min_width = album_grid_min_content_width()
+        _min_w, min_h = self.get_size_request()
+        if min_h < 0:
+            min_h = 400
+        self.set_size_request(min_width, min_h)
 
-        self._sidebar_rows: dict[str, Gtk.ListBoxRow] = {}
+    def _album_grid_inner_width(self) -> int:
+        window_width = self.get_width()
+        if window_width < 64:
+            return 0
+        return max(0, window_width - 2 * ALBUM_GRID_VIEW_MARGIN)
 
-        self._sidebar_nav_list = Gtk.ListBox()
-        self._sidebar_nav_list.add_css_class("navigation-sidebar")
-        self._sidebar_nav_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
-        self._sidebar_nav_list.set_vexpand(True)
-        self._sidebar_box.append(self._sidebar_nav_list)
+    def _effective_shell_state(self) -> ShellState:
+        if not available_sources(self._service):
+            return ShellState()
+        return self._shell_state
 
-        for section_id, label, icon in (
-            ("releases", "Browse", "media-optical-symbolic"),
-            ("new-music", "New Music", "starred-symbolic"),
-            ("suggestions", "Suggestions", "dialog-question-symbolic"),
-        ):
-            row = Adw.ActionRow(title=label)
-            row.set_activatable(True)
-            image = Gtk.Image.new_from_icon_name(icon)
-            row.add_prefix(image)
-            self._sidebar_nav_list.append(row)
-            self._sidebar_rows[section_id] = row
-            row.connect("activated", lambda _row, sid=section_id: self._on_sidebar_activated(sid))
+    def _selection_cache_key(self, state: ShellState) -> tuple[str, str]:
+        query = state.search_query.strip() if state.base == ShellBase.SEARCH else ""
+        return (state.base.value, query)
 
-        self._sidebar_settings_list = Gtk.ListBox()
-        self._sidebar_settings_list.add_css_class("navigation-sidebar")
-        self._sidebar_settings_list.set_selection_mode(Gtk.SelectionMode.NONE)
-        settings_row = Adw.ActionRow(title="Settings...")
-        settings_row.set_activatable(True)
-        settings_row.add_prefix(Gtk.Image.new_from_icon_name("emblem-system-symbolic"))
-        self._sidebar_settings_list.append(settings_row)
-        settings_row.connect("activated", self._open_preferences)
-        self._sidebar_box.append(self._sidebar_settings_list)
+    def _selection_identity_changed(self, previous: ShellState, current: ShellState) -> bool:
+        if previous.base != current.base:
+            return True
+        if current.base == ShellBase.SEARCH and previous.search_query != current.search_query:
+            return True
+        return False
 
-        self._apply_fixed_sidebar_width()
-        sidebar_page = Adw.NavigationPage(title="Library", child=self._sidebar_shell, tag="sidebar")
-        self._split.set_sidebar(sidebar_page)
-        self._sidebar_shell.connect("map", lambda *_args: GLib.idle_add(self._apply_fixed_sidebar_width))
+    def _cache_matches(self, state: ShellState) -> bool:
+        return (
+            self._cached_selection_key is not None
+            and self._cached_selection_key == self._selection_cache_key(state)
+        )
 
-        self._content_stack = Gtk.Stack()
-        self._content_stack.set_size_request(-1, -1)
-        self._content_stack.set_vexpand(True)
-        self._releases_nav = Adw.NavigationView()
-        self._discover_nav = Adw.NavigationView()
-        for nav in (self._releases_nav, self._discover_nav):
-            nav.connect("notify::visible-page", self._on_nav_visible_page_changed)
-        self._search_nav = Adw.NavigationView()
-        self._search_nav.connect("notify::visible-page", self._on_nav_visible_page_changed)
-        self._content_stack.add_named(self._releases_nav, "releases")
-        self._content_stack.add_named(self._discover_nav, "discover")
-        self._content_stack.add_named(self._search_nav, "search")
+    def _invalidate_selection_cache(self) -> None:
+        self._cached_selection_key = None
+        self._cached_releases = []
 
-        content_page = Adw.NavigationPage(title="", child=self._content_stack, tag="content")
-        self._split.set_content(content_page)
+    def _store_selection_cache(self, state: ShellState, releases: list[Release]) -> None:
+        self._cached_selection_key = self._selection_cache_key(state)
+        self._cached_releases = list(releases)
 
-        self._sidebar_width_sp = 0.0
-        self._show_releases_root()
-        self._sidebar_nav_list.select_row(self._sidebar_rows["releases"])
+    def _filtered_from_cache(self, state: ShellState) -> list[Release]:
+        return apply_source_filter(self._cached_releases, state.enabled_sources)
+
+    def _display_cached_selection(self, state: ShellState | None = None) -> None:
+        state = state or self._effective_shell_state()
+        if not self._cache_matches(state):
+            self._reload_grid()
+            return
+        releases = self._filtered_from_cache(state)
+        self._sync_header_title(state)
+        self._show_grid(
+            releases=releases,
+            empty_message=self._empty_message(state, releases),
+            title=self._grid_title(state),
+        )
+
+    def _set_shell_state(self, state: ShellState, *, reload: bool = True) -> None:
+        identity_changed = self._selection_identity_changed(self._shell_state, state)
+        self._shell_state = state
+        self._sync_shell_controls()
+        self._schedule_persist()
+        if not reload:
+            return
+        if identity_changed:
+            self._invalidate_selection_cache()
+            self._reload_grid()
+        else:
+            self._display_cached_selection(state)
+
+    def _sync_shell_controls(self) -> None:
+        state = self._shell_state
+        self._updating_preset = True
+        try:
+            self._new_music_btn.set_active(state.base == ShellBase.NEW_MUSIC)
+            self._suggestion_btn.set_active(state.base == ShellBase.SUGGESTION)
+        finally:
+            self._updating_preset = False
+
+        if state.base == ShellBase.SEARCH:
+            current = self._search_entry.get_text()
+            if current != state.search_query:
+                self._search_entry.set_text(state.search_query)
+        elif state.base in (ShellBase.NEW_MUSIC, ShellBase.SUGGESTION):
+            if self._search_entry.get_text():
+                self._search_entry.set_text("")
+
+        self._sync_source_multi()
+
+    def _rebuild_source_filters(self) -> None:
+        sources = available_sources(self._service)
+        if len(sources) <= 1:
+            self._source_row.set_visible(False)
+            if self._shell_state.enabled_sources:
+                self._shell_state = ShellState(
+                    base=self._shell_state.base,
+                    search_query=self._shell_state.search_query,
+                    enabled_sources=frozenset(),
+                )
+            self._source_multi = None
+            child = self._source_row.get_first_child()
+            while child is not None:
+                next_child = child.get_next_sibling()
+                self._source_row.remove(child)
+                child = next_child
+            return
+
+        self._source_row.set_visible(True)
+        if self._source_multi is None:
+            self._source_multi = SourceMultiSwitch(
+                sources=sources,
+                enabled_sources=self._shell_state.enabled_sources,
+                on_changed=self._on_source_multi_changed,
+            )
+            self._source_row.append(self._source_multi)
+        else:
+            self._source_multi.set_sources(sources, self._shell_state.enabled_sources)
+
+    def _sync_source_multi(self) -> None:
+        if self._source_multi is not None:
+            self._source_multi.set_enabled_sources(self._shell_state.enabled_sources)
+
+    def _on_source_multi_changed(self, enabled_sources: frozenset[Source]) -> None:
+        self._set_enabled_sources(enabled_sources)
+
+    def _set_enabled_sources(self, enabled_sources: frozenset[Source]) -> None:
+        state = self._shell_state
+        if state.enabled_sources == enabled_sources:
+            return
+        self._shell_state = ShellState(
+            base=state.base,
+            search_query=state.search_query,
+            enabled_sources=enabled_sources,
+        )
+        self._sync_source_multi()
+        self._schedule_persist()
+        self._display_cached_selection()
+
+    def _on_new_music_toggled(self, button: Gtk.ToggleButton) -> None:
+        if getattr(self, "_updating_preset", False):
+            return
+        if button.get_active():
+            self._activate_preset(ShellBase.NEW_MUSIC)
+        elif self._shell_state.base == ShellBase.NEW_MUSIC:
+            button.set_active(True)
+
+    def _on_suggestion_toggled(self, button: Gtk.ToggleButton) -> None:
+        if getattr(self, "_updating_preset", False):
+            return
+        if button.get_active():
+            self._activate_preset(ShellBase.SUGGESTION)
+        elif self._shell_state.base == ShellBase.SUGGESTION:
+            button.set_active(True)
+
+    def _activate_preset(self, base: ShellBase) -> None:
+        self._set_shell_state(
+            ShellState(
+                base=base,
+                search_query="",
+                enabled_sources=self._shell_state.enabled_sources,
+            ),
+        )
+
+    def _on_search_activate(self, entry: Gtk.SearchEntry) -> None:
+        query = entry.get_text().strip()
+        if not query:
+            return
+        self._set_shell_state(
+            ShellState(
+                base=ShellBase.SEARCH,
+                search_query=query,
+                enabled_sources=self._shell_state.enabled_sources,
+            ),
+        )
+
+    def _schedule_persist(self) -> None:
+        if self._persist_timeout_id:
+            GLib.source_remove(self._persist_timeout_id)
+        self._persist_timeout_id = GLib.timeout_add(
+            _PERSIST_DEBOUNCE_MS,
+            self._persist_shell_state,
+        )
+
+    def _persist_shell_state(self) -> bool:
+        self._persist_timeout_id = 0
+        self._service.config.set_shell_state(self._shell_state)
+        return False
+
+    def _on_close_request(self, *_args: object) -> bool:
+        if self._persist_timeout_id:
+            GLib.source_remove(self._persist_timeout_id)
+            self._persist_timeout_id = 0
+        self._service.config.set_shell_state(self._shell_state)
+        return False
+
+    def _reload_grid(self) -> bool:
+        state = self._effective_shell_state()
+        self._sync_header_title(state)
+
+        if state.base in (ShellBase.NEW_MUSIC, ShellBase.SUGGESTION):
+            self._start_async_load(state.base)
+            return False
+
+        releases = fetch_base_releases(
+            self._service,
+            state.base,
+            search_query=state.search_query,
+        )
+        self._store_selection_cache(state, releases)
+        filtered = self._filtered_from_cache(state)
+        self._show_grid(
+            releases=filtered,
+            empty_message=self._empty_message(state, filtered),
+            title=self._grid_title(state),
+        )
+        return False
+
+    def _start_async_load(self, base: ShellBase) -> None:
+        self._load_token += 1
+        token = self._load_token
+        self._show_grid_loading(base)
+
+        def work() -> None:
+            try:
+                releases = fetch_base_releases(self._service, base)
+                GLib.idle_add(self._finish_async_load, token, base, releases, None)
+            except Exception as exc:
+                log.exception("Shell load failed for %s", base.value)
+                GLib.idle_add(self._finish_async_load, token, base, None, exc)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _finish_async_load(
+        self,
+        token: int,
+        base: ShellBase,
+        releases: list | None,
+        error: BaseException | None,
+    ) -> bool:
+        if token != self._load_token:
+            return False
+        if self._shell_state.base != base:
+            return False
+
+        label = _PRESET_LABELS[base]
+        if error is not None:
+            show_error_toast(
+                self._toast_overlay,
+                f"Could not load {label}. Check your connection and sign-in.",
+            )
+            view = PlaceholderView(
+                title=label,
+                message=f"Could not load {label}. Try again in a moment.",
+            )
+            self._replace_root_page(title=label, child=view)
+            return False
+
+        loaded = releases or []
+        self._store_selection_cache(self._shell_state, loaded)
+        filtered = self._filtered_from_cache(self._shell_state)
+        self._show_grid(
+            releases=filtered,
+            empty_message=self._empty_message(self._shell_state, filtered),
+            title=label,
+        )
+        return False
+
+    def _show_grid_loading(self, base: ShellBase) -> None:
+        title = _PRESET_LABELS[base]
+        message = _LOADING_MESSAGES.get(base, f"Loading {title}…")
+        self._replace_root_page(
+            title=title,
+            child=LoadingDiscoverView(message=message),
+        )
+
+    def _show_grid(
+        self,
+        *,
+        releases: list,
+        empty_message: str | None,
+        title: str,
+    ) -> None:
+        view = ReleaseGridView(
+            releases=releases,
+            on_release_activated=self._open_release,
+            on_release_play=lambda release_id: self._service.play_release(
+                release_id, start_index=0
+            ),
+            empty_message=empty_message,
+            art_loader=self._art_loader,
+            window_inner_width_fn=self._album_grid_inner_width,
+        )
+        self._replace_root_page(title=title, child=view)
+
+    def _empty_message(self, state: ShellState, releases: list) -> str | None:
+        if releases:
+            return None
+        if not available_sources(self._service):
+            return _ONBOARDING_MESSAGE
+        if state.base == ShellBase.NONE:
+            return _ONBOARDING_MESSAGE
+        if state.base == ShellBase.SEARCH:
+            if not state.search_query.strip():
+                return _ONBOARDING_MESSAGE
+            return f'No results for “{state.search_query}”.'
+        if state.base == ShellBase.NEW_MUSIC:
+            days = self._service.config.config.new_music_within_days
+            return (
+                f"Nothing new in the last {days} days.\n"
+                "Add music folders or sign in to TIDAL or Qobuz in Settings → Sources."
+            )
+        if state.base == ShellBase.SUGGESTION:
+            return (
+                "Play music to build suggestions from your library, or sign in to "
+                "TIDAL or Qobuz in Settings → Sources."
+            )
+        if state.enabled_sources:
+            names = ", ".join(
+                source_label(source)
+                for source in sorted(state.enabled_sources, key=lambda s: s.value)
+            )
+            return f"No releases from {names} in this selection."
+        return None
+
+    def _grid_title(self, state: ShellState) -> str:
+        if state.base == ShellBase.SEARCH and state.search_query.strip():
+            return state.search_query
+        return _PRESET_LABELS.get(state.base, "Tunes")
+
+    def _sync_header_title(self, state: ShellState) -> None:
+        if not self._nav_at_root():
+            return
+        self._window_title.set_title(self._grid_title(state))
+
+    def _replace_root_page(self, *, title: str, child: Gtk.Widget) -> None:
+        self._pop_to_root()
+        current = self._main_nav.get_visible_page()
+        if current is not None and current.get_tag() == _GRID_ROOT_TAG:
+            current.set_child(child)
+            current.set_title(escape_markup(title))
+            return
+        self._main_nav.add(
+            Adw.NavigationPage(
+                title=escape_markup(title),
+                child=child,
+                tag=_GRID_ROOT_TAG,
+            ),
+        )
 
     def _release_id_for_current_view(self) -> str | None:
-        nav = self._active_nav_view()
-        if nav is None:
-            return None
-        page = nav.get_visible_page()
+        page = self._main_nav.get_visible_page()
         if page is None:
             return None
         tag = page.get_tag()
-        if not tag or tag in _NAV_ROOT_TAGS:
+        if not tag or tag == _GRID_ROOT_TAG:
             return None
         release = self._service.get_release(tag)
         return tag if release is not None else None
@@ -208,109 +541,6 @@ class TunesWindow(Adw.ApplicationWindow):
                 self._service.play_release(release_id, start_index=0)
                 return
         self._service.toggle_play_pause()
-
-    def _compute_sidebar_width_sp(self) -> float:
-        max_nat = 0
-        for list_box in (self._sidebar_nav_list, self._sidebar_settings_list):
-            row = list_box.get_first_child()
-            while row is not None:
-                _min_w, nat_w, _min_baseline, _nat_baseline = row.measure(
-                    Gtk.Orientation.HORIZONTAL,
-                    -1,
-                )
-                max_nat = max(max_nat, nat_w)
-                row = row.get_next_sibling()
-        return float(max_nat) + _SIDEBAR_WIDTH_PADDING_SP
-
-    def _apply_fixed_sidebar_width(self) -> bool:
-        width_sp = self._compute_sidebar_width_sp()
-        self._sidebar_width_sp = width_sp
-        self._split.set_min_sidebar_width(width_sp)
-        self._split.set_max_sidebar_width(width_sp)
-        self._apply_window_min_width()
-        return False
-
-    def _apply_window_min_width(self) -> None:
-        sidebar = self._sidebar_width_sp or self._split.get_max_sidebar_width()
-        min_width = int(sidebar) + album_grid_min_content_width()
-        _min_w, min_h = self.get_size_request()
-        if min_h < 0:
-            min_h = 400
-        self.set_size_request(min_width, min_h)
-
-    def _sidebar_width_pixels(self) -> int:
-        sidebar_page = self._split.get_sidebar()
-        if sidebar_page is not None:
-            width = sidebar_page.get_width()
-            if width >= 64:
-                return width
-            alloc = sidebar_page.get_allocation()
-            if alloc.width > 0:
-                return alloc.width
-        cached = self._sidebar_width_sp
-        if cached > 0:
-            return int(cached)
-        max_width = self._split.get_max_sidebar_width()
-        return int(max_width) if max_width > 0 else 0
-
-    def _album_grid_inner_width(self) -> int:
-        window_width = self.get_width()
-        if window_width < 64:
-            return 0
-        return max(
-            0,
-            window_width - self._sidebar_width_pixels() - 2 * ALBUM_GRID_VIEW_MARGIN,
-        )
-
-    def _search_grid_inner_width(self) -> int:
-        window_width = self.get_width()
-        if window_width < 64:
-            return 0
-        return max(
-            0,
-            window_width - self._sidebar_width_pixels() - 2 * SEARCH_VIEW_HORIZONTAL_MARGIN,
-        )
-
-    def _replace_root_page(
-        self,
-        nav: Adw.NavigationView,
-        *,
-        title: str,
-        tag: str,
-        child: Gtk.Widget,
-    ) -> None:
-        self._pop_to_root(nav)
-        current = nav.get_visible_page()
-        if current is not None and current.get_tag() == tag:
-            current.set_child(child)
-            current.set_title(escape_markup(title))
-            return
-        nav.add(Adw.NavigationPage(title=escape_markup(title), child=child, tag=tag))
-
-    def _show_releases_root(self) -> None:
-        releases = self._service.list_releases()
-        empty_message = None
-        if not releases:
-            empty_message = (
-                "No releases in your library.\n"
-                "Open Settings, add music folders, and scan your library."
-            )
-        view = ReleaseGridView(
-            releases=releases,
-            on_release_activated=self._open_release,
-            on_release_play=lambda release_id: self._service.play_release(
-                release_id, start_index=0
-            ),
-            empty_message=empty_message,
-            art_loader=self._art_loader,
-            window_inner_width_fn=self._album_grid_inner_width,
-        )
-        self._replace_root_page(
-            self._releases_nav,
-            title="Browse",
-            tag="releases-root",
-            child=view,
-        )
 
     def _open_release(self, release_id: str) -> None:
         release = self._service.get_release(release_id)
@@ -327,216 +557,18 @@ class TunesWindow(Adw.ApplicationWindow):
             child=detail,
             tag=release_id,
         )
-
-        visible = self._content_stack.get_visible_child_name()
-        if visible == "search":
-            nav = self._search_nav
-            if not self._nav_at_root(nav):
-                nav.pop()
-        elif visible == "discover":
-            nav = self._discover_nav
-            self._pop_to_root(nav)
-        else:
-            nav = self._releases_nav
-            self._pop_to_root(nav)
-
-        nav.push(page)
+        self._pop_to_root()
+        self._main_nav.push(page)
         self._sync_header_with_nav()
-
-    def _on_sidebar_activated(self, section_id: str) -> None:
-        if section_id in _DISCOVER_SECTION_TITLES:
-            if self._search_active:
-                self._search_button.set_active(False)
-            self._show_discover_root(section_id)
-            self._content_stack.set_visible_child_name("discover")
-            self._sync_header_with_nav()
-            return
-        if self._search_active:
-            self._search_button.set_active(False)
-        if section_id == "releases":
-            self._pop_to_root(self._releases_nav)
-        self._content_stack.set_visible_child_name(section_id)
-        self._sync_header_with_nav()
-
-    def _show_discover_root(self, section_id: str) -> None:
-        title = _DISCOVER_SECTION_TITLES.get(section_id, "Discover")
-        self._discover_current_title = title
-        self._discover_active_section_id = section_id
-        if section_id in ("new-music", "suggestions"):
-            loading_message = (
-                "Loading New Music…"
-                if section_id == "new-music"
-                else "Loading Suggestions…"
-            )
-            self._replace_root_page(
-                self._discover_nav,
-                title=title,
-                tag="discover-root",
-                child=LoadingDiscoverView(message=loading_message),
-            )
-            self._start_discover_load(section_id)
-            return
-        view = PlaceholderView(
-            title=title,
-            message="Not implemented yet.",
-        )
-        self._replace_root_page(
-            self._discover_nav,
-            title=title,
-            tag="discover-root",
-            child=view,
-        )
-
-    def _start_discover_load(self, section_id: str) -> None:
-        self._discover_load_token += 1
-        token = self._discover_load_token
-
-        def work() -> None:
-            try:
-                if section_id == "new-music":
-                    items = self._service.list_recently_added_items()
-                else:
-                    items = self._service.list_suggestion_items()
-                GLib.idle_add(
-                    self._finish_discover_load,
-                    token,
-                    section_id,
-                    items,
-                    None,
-                )
-            except Exception as exc:
-                log.exception("Discover load failed for %s", section_id)
-                GLib.idle_add(
-                    self._finish_discover_load,
-                    token,
-                    section_id,
-                    None,
-                    exc,
-                )
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _discover_empty_message(
-        self,
-        section_id: str,
-        *,
-        items: list[RecentlyAddedItem],
-    ) -> str | None:
-        if items:
-            return None
-        if section_id == "new-music":
-            days = self._service.config.config.new_music_within_days
-            return (
-                f"Nothing new in the last {days} days.\n"
-                "Scan your library in Settings → Sources, or sign in to TIDAL or Qobuz "
-                "for new releases."
-            )
-        return (
-            "Play music to build suggestions from your library, or sign in to "
-            "TIDAL or Qobuz in Settings → Sources."
-        )
-
-    def _finish_discover_load(
-        self,
-        token: int,
-        section_id: str,
-        items: list[RecentlyAddedItem] | None,
-        error: BaseException | None,
-    ) -> bool:
-        if token != self._discover_load_token:
-            return False
-        if self._discover_active_section_id != section_id:
-            return False
-        if self._content_stack.get_visible_child_name() != "discover":
-            return False
-
-        title = _DISCOVER_SECTION_TITLES.get(section_id, "Discover")
-        if error is not None:
-            show_error_toast(
-                self._toast_overlay,
-                f"Could not load {title}. Check your connection and sign-in.",
-            )
-            view = PlaceholderView(
-                title=title,
-                message=f"Could not load {title}. Try again in a moment.",
-            )
-        else:
-            loaded = items or []
-            view = RecentlyAddedGridView(
-                items=loaded,
-                on_release_activated=self._open_release,
-                on_release_play=lambda release_id: self._service.play_release(
-                    release_id, start_index=0
-                ),
-                empty_message=self._discover_empty_message(section_id, items=loaded),
-                art_loader=self._art_loader,
-                window_inner_width_fn=self._album_grid_inner_width,
-            )
-        self._replace_root_page(
-            self._discover_nav,
-            title=title,
-            tag="discover-root",
-            child=view,
-        )
-        return False
 
     def _search_for_artist(self, artist_name: str) -> None:
         self._search_entry.set_text(artist_name)
-        if not self._search_active:
-            self._search_button.set_active(True)
-
-    def _on_search_toggled(self, button: Gtk.ToggleButton) -> None:
-        active = button.get_active()
-        self._search_active = active
-        if active:
-            self._title_center.remove(self._window_title)
-            self._title_center.append(self._search_entry)
-            self._content_stack.set_visible_child_name("search")
-            self._search_entry.grab_focus()
-            self._refresh_search()
-        else:
-            self._title_center.remove(self._search_entry)
-            self._title_center.append(self._window_title)
-            self._pop_to_root(self._search_nav)
-            self._search_entry.set_text("")
-            if self._content_stack.get_visible_child_name() == "search":
-                self._content_stack.set_visible_child_name("releases")
-            self._sync_header_with_nav()
-
-    def _on_search_changed(self, entry: Gtk.SearchEntry) -> None:
-        if self._search_active:
-            self._refresh_search(entry.get_text())
-
-    def _on_stop_search(self, *_args: object) -> None:
-        self._search_button.set_active(False)
-
-    def _refresh_search(self, query: str | None = None) -> None:
-        if not self._nav_at_root(self._search_nav):
-            self._pop_to_root(self._search_nav)
-        text = query if query is not None else self._search_entry.get_text()
-        if not text.strip():
-            placeholder = Gtk.Label(label="Type to search your library and TIDAL", vexpand=True)
-            placeholder.add_css_class("dim-label")
-            placeholder.set_valign(Gtk.Align.CENTER)
-            self._replace_root_page(
-                self._search_nav,
-                title="Search",
-                tag="search-root",
-                child=placeholder,
-            )
-            return
-        view = SearchResultsView(
-            service=self._service,
-            query=text,
-            on_release_activated=self._open_release,
-            art_loader=self._art_loader,
-            window_inner_width_fn=self._search_grid_inner_width,
-        )
-        self._replace_root_page(
-            self._search_nav,
-            title="Search",
-            tag="search-root",
-            child=view,
+        self._set_shell_state(
+            ShellState(
+                base=ShellBase.SEARCH,
+                search_query=artist_name,
+                enabled_sources=self._shell_state.enabled_sources,
+            ),
         )
 
     def _open_preferences(self, *_args: object) -> None:
@@ -556,23 +588,15 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _on_service_event(self, event: str) -> bool:
         if event == "library_updated":
-            GLib.idle_add(self._refresh_library_after_scan)
+            GLib.idle_add(self._on_sources_or_library_changed)
         elif event == "sources_changed":
-            GLib.idle_add(self._refresh_discover_if_needed)
+            GLib.idle_add(self._on_sources_or_library_changed)
         return False
 
-    def _refresh_library_after_scan(self) -> bool:
-        self._show_releases_root()
-        if self._search_active:
-            self._refresh_search()
-        GLib.idle_add(self._refresh_discover_if_needed)
-        return False
-
-    def _refresh_discover_if_needed(self) -> bool:
-        if self._content_stack.get_visible_child_name() != "discover":
-            return False
-        if self._discover_active_section_id in ("new-music", "suggestions"):
-            self._show_discover_root(self._discover_active_section_id)
+    def _on_sources_or_library_changed(self) -> bool:
+        self._rebuild_source_filters()
+        self._invalidate_selection_cache()
+        self._reload_grid()
         return False
 
     def _open_queue_sheet(self, *_args: object) -> None:
@@ -581,31 +605,21 @@ class TunesWindow(Adw.ApplicationWindow):
             self._queue_sheet.connect("closed", lambda *_: setattr(self, "_queue_sheet", None))
         self._queue_sheet.present(self)
 
-    def _pop_to_root(self, nav: Adw.NavigationView) -> None:
-        page = nav.get_visible_page()
-        while page is not None and page.get_tag() not in _NAV_ROOT_TAGS:
-            nav.pop()
-            page = nav.get_visible_page()
+    def _pop_to_root(self) -> None:
+        page = self._main_nav.get_visible_page()
+        while page is not None and page.get_tag() != _GRID_ROOT_TAG:
+            self._main_nav.pop()
+            page = self._main_nav.get_visible_page()
 
-    def _active_nav_view(self) -> Adw.NavigationView | None:
-        if self._search_active:
-            return self._search_nav
-        section = self._content_stack.get_visible_child_name()
-        if section == "releases":
-            return self._releases_nav
-        if section == "discover":
-            return self._discover_nav
-        return None
-
-    def _nav_at_root(self, nav: Adw.NavigationView) -> bool:
-        page = nav.get_visible_page()
+    def _nav_at_root(self) -> bool:
+        page = self._main_nav.get_visible_page()
         if page is None:
             return True
-        return page.get_tag() in _NAV_ROOT_TAGS
+        return page.get_tag() == _GRID_ROOT_TAG
 
     def _title_for_nav_page(self, page: Adw.NavigationPage) -> str | None:
         tag = page.get_tag()
-        if not tag or tag in _NAV_ROOT_TAGS:
+        if not tag or tag == _GRID_ROOT_TAG:
             return None
         release = self._service.get_release(tag)
         if release is not None:
@@ -613,37 +627,29 @@ class TunesWindow(Adw.ApplicationWindow):
         return None
 
     def _sync_header_with_nav(self) -> None:
-        nav = self._active_nav_view()
-        if nav is None:
-            self._back_btn.set_visible(False)
-            return
-        at_root = self._nav_at_root(nav)
+        at_root = self._nav_at_root()
         self._back_btn.set_visible(not at_root)
-        page = nav.get_visible_page()
-        if page is None:
-            self._window_title.set_title("Tunes")
+        if not at_root:
+            page = self._main_nav.get_visible_page()
+            if page is not None:
+                title = self._title_for_nav_page(page)
+                if title:
+                    self._window_title.set_title(title)
             return
-        if at_root:
-            if self._content_stack.get_visible_child_name() == "discover":
-                self._window_title.set_title(self._discover_current_title or "Discover")
-            else:
-                self._window_title.set_title(_NAV_ROOT_TITLES.get(page.get_tag(), "Tunes"))
-            return
-        title = self._title_for_nav_page(page)
-        if title:
-            self._window_title.set_title(title)
+        self._sync_header_title(self._effective_shell_state())
 
     def _on_nav_back(self, *_args: object) -> None:
-        nav = self._active_nav_view()
-        if nav is None or self._nav_at_root(nav):
+        if self._nav_at_root():
             return
-        nav.pop()
+        self._main_nav.pop()
 
     def _on_nav_visible_page_changed(self, *_args: object) -> None:
         self._sync_header_with_nav()
 
 
 def run() -> int:
+    from tunes_player.core.config import ConfigManager
+
     load_app_css()
     config = ConfigManager()
     config.load()

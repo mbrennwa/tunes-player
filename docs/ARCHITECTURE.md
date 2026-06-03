@@ -84,12 +84,12 @@ others) with rationale and collisions are in **[docs/NAMING.md](NAMING.md)**.
 | `PlaybackEngine` + `MpvEngine` | Done — queue, skip, seek, events |
 | Device volume + bit-perfect profile | Partial — PipeWire/Pulse via `wpctl`/`pactl`; exclusive ALSA not done |
 | MPRIS + GDK media keys | Done |
-| GTK shell (Browse, New Music, Suggestions, search, queue sheet) | Done |
+| GTK shell (search, New Music, Suggest Music, source filter, queue sheet) | Done |
 | Settings (Sources, Audio, Application, Diagnostics) | Done |
-| TIDAL (OAuth, search, playback, New Music, Suggestions) | Done |
-| Qobuz (credentials, login, search, playback, New Music, Suggestions) | Done |
+| TIDAL (OAuth, search, playback, New Music, Suggest Music) | Done |
+| Qobuz (credentials, login, search, playback, New Music, Suggest Music) | Done |
 | Federated search (phase A) | Done in `PlayerService.search()` — no separate `catalog/` module yet |
-| New Music + Suggestions aggregation | Done in `core/home.py` + `PlayerService` |
+| New Music + Suggest Music aggregation | Done in `core/home.py` + `PlayerService` |
 | Deezer | Not started |
 | Minimized compact controller | Not started |
 | UPnP / AES67 output | Not started |
@@ -204,27 +204,27 @@ Apple Music** (sidebar library + album detail), **Roon** (persistent Now Playing
 queue overlay — not multi-zone or DSP UI). Tunes stays **library-first**, **GNOME-native**,
 and simpler than Roon.
 
-**Structure:** one window, three zones — *browse in the middle, control at the bottom*.
+**Structure:** one window — *music shell in the middle, control at the bottom*.
 
 ```text
-┌ Header: back · search · (title) ─────────────────────────────┐
-├ Sidebar ──┬ Main pane (navigation stacks) ────────────────────┤
-│ Browse    │  Local release grid · release detail (art + tracks)│
-│ New Music │  Merged recently-added grid (local + streaming)    │
-│ Suggestions│ Merged suggestion grid (continue, editorial, etc.) │
-│ Settings… │  Search toggled from header → federated results   │
-│           │  Queue opens as sheet from Now Playing bar         │
-├───────────┴───────────────────────────────────────────────────┤
-│ Now Playing bar: art · title · transport · volume · queue   │
-└───────────────────────────────────────────────────────────────┘
+┌ Header: back · (title) · Settings menu ────────────────────────┐
+├ Search… · New Music · Suggest Music ────────────────────────────┤
+├ [All] [Local] [TIDAL] [Qobuz]  (only if multiple sources) ─────┤
+├ Main pane: release grid → release detail (single NavigationView) ┤
+├─────────────────────────────────────────────────────────────────┤
+│ Now Playing bar: art · title · transport · volume · queue       │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-**Sidebar (current):** **Browse** (local indexed releases), **New Music**, **Suggestions**,
-and **Settings…** at the bottom. Fixed-width sidebar via `AdwNavigationSplitView`
-(`ui/gtk/app.py`). There is no separate Artists browse section.
+**Shell (`ui/gtk/app.py`):** every grid is a **bounded selection** — federated **search**
+(Enter in the search field), **New Music**, or **Suggest Music** — optionally narrowed by
+**source chips** (shown only when more than one source is configured). There is no
+full-catalog browse and no sidebar. **Settings** opens from the header menu
+(`AdwPreferencesWindow`). Session state (`shell_state` in `config.json`) restores the
+last selection on relaunch; first launch with no sources shows an onboarding empty state.
 
-**Main pane:** `AdwNavigationView` per section — release grid → release detail; header
-search toggles a federated results view (local + signed-in TIDAL/Qobuz).
+**Main pane:** one `AdwNavigationView` — grid root → release detail. Queue opens as a
+sheet from the Now Playing bar.
 
 **Now Playing bar:** always visible in expanded mode; shared widget with [minimized
 mode](#minimized-player-compact-controller). Optional subtitle for audiophile context
@@ -245,7 +245,7 @@ lyrics, streaming source badges in browse views.
 
 | Page | Contents |
 |------|----------|
-| **Application** | New Music cutoff (days) — local and Qobuz featured releases |
+| **Application** | New Music cutoff (days) — local, TIDAL, and Qobuz new-release selection |
 | **Sources** | **Local files:** music folders, scan library. **Streaming:** TIDAL sign-in/out (OAuth via browser); Qobuz App ID/Secret, save credentials, email/password sign-in/out |
 | **Audio** | Bit-perfect toggle (subtitle reflects device vs software volume), output device dropdown (PipeWire/Pulse sinks) |
 | **Diagnostics** | Log file path (copy button) |
@@ -260,8 +260,7 @@ files live in **core/backends/** and `platformdirs` config/data dirs. Settings U
 
 **Where streaming appears outside Settings:**
 
-- **Browse:** local indexed releases only.
-- **New Music / Suggestions:** merged grids from local + signed-in services.
+- **New Music / Suggest Music:** merged selections from local + signed-in services.
 - **Search:** federated release results (local first, then streaming append).
 - **Release detail / playback:** same views for `local:…`, `tidal:…`, `qobuz:…` IDs.
 - **Now Playing:** quality hint (e.g. FLAC metadata, “TIDAL”, “QOBUZ”); source badge deferred.
@@ -564,16 +563,16 @@ Favorites / star ratings are not implemented yet.
 
 ### Discover views (implemented)
 
-**New Music** — flat album grid (`RecentlyAddedGridView`). `PlayerService.list_recently_added_items()`
+**New Music** — flat release grid (`ReleaseGridView`). `PlayerService.list_recently_added_items()`
 merges:
 
 - Local releases added within **New Music cutoff** days (Settings → Application; default 90).
-- TIDAL new-release rails (when signed in; not filtered by cutoff).
+- TIDAL new-release rails (when signed in; filtered by the same cutoff).
 - Qobuz featured new/recent releases (when signed in; filtered by cutoff).
 
 Deduped by `release.id`, sorted by `added_ns`, capped at 300.
 
-**Suggestions** — flat album grid (same UX as New Music). `PlayerService.list_suggestion_items()`
+**Suggest Music** — flat release grid (same widget). `PlayerService.list_suggestion_items()`
 collects TIDAL track radio (when playing TIDAL), **continue listening** (`play_history`),
 TIDAL / Qobuz editorial catalogs, and local **rediscover**, then dedupes by `release.id`.
 

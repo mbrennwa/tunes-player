@@ -290,6 +290,7 @@ class TidalClient:
         self,
         *,
         limit: int = NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
+        within_days: int = 30,
     ) -> list[RecentlyAddedItem]:
         """Albums from TIDAL new-release style curated rails (expanded view-all lists)."""
         if not self.is_logged_in():
@@ -313,7 +314,8 @@ class TidalClient:
                             raw,
                             tidal_album_mod=tidal_album_mod,
                             tidal_media_mod=tidal_media_mod,
-                            apply_date_filter=False,
+                            apply_date_filter=True,
+                            within_days=within_days,
                         )
                         if item is None or item.release.id in seen_album_ids:
                             continue
@@ -398,8 +400,13 @@ class TidalClient:
         try:
             tidal_track = session.track(numeric)
             radio_tracks = tidal_track.get_track_radio(limit=limit * 3)
-        except Exception:
-            log.exception("Failed to load TIDAL similar tracks for %s", seed_track_id)
+        except Exception as exc:
+            # Track radio is optional for Suggestion; TIDAL often returns 5xx here.
+            log.warning(
+                "TIDAL track radio unavailable for %s: %s",
+                seed_track_id,
+                exc,
+            )
             return []
         items: list[RecentlyAddedItem] = []
         seen: set[str] = set()

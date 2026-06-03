@@ -1,4 +1,4 @@
-"""Browse and detail views."""
+"""Release grid and detail views."""
 
 from __future__ import annotations
 
@@ -11,18 +11,15 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
-from tunes_player.core.home import RecentlyAddedItem
 from tunes_player.core.models import Release, ReleaseCompleteness, Track
 from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.album_grid import (
     ALBUM_GRID_SPACING,
     ALBUM_GRID_VIEW_MARGIN,
-    SEARCH_VIEW_HORIZONTAL_MARGIN,
     album_grid_content_inner_width,
     album_grid_layout,
     album_grid_min_content_width,
     album_grid_resolve_inner_width,
-    search_grid_min_content_width,
 )
 from tunes_player.ui.gtk.art import ArtLoader
 from tunes_player.ui.gtk.util import (
@@ -244,133 +241,6 @@ class ReleaseGridView(Gtk.ScrolledWindow):
 
     def _on_viewport_width_changed(self, *_args: object) -> None:
         GLib.idle_add(self._tile_grid._sync_layout_idle)
-
-
-class RecentlyAddedGridView(ReleaseGridView):
-    def __init__(
-        self,
-        *,
-        items: list[RecentlyAddedItem],
-        on_release_activated: Callable[[str], None],
-        on_release_play: Callable[[str], None],
-        empty_message: str | None = None,
-        art_loader: ArtLoader | None = None,
-        window_inner_width_fn: Callable[[], int] | None = None,
-    ) -> None:
-        newest_first = sorted(
-            items,
-            key=lambda item: (-item.added_ns, item.release.title.casefold()),
-        )
-        super().__init__(
-            releases=[item.release for item in newest_first],
-            on_release_activated=on_release_activated,
-            on_release_play=on_release_play,
-            empty_message=empty_message,
-            art_loader=art_loader,
-            window_inner_width_fn=window_inner_width_fn,
-        )
-
-
-class SearchResultsView(Gtk.ScrolledWindow):
-    def __init__(
-        self,
-        *,
-        service: PlayerService,
-        query: str,
-        on_release_activated: Callable[[str], None],
-        art_loader: ArtLoader | None = None,
-        window_inner_width_fn: Callable[[], int] | None = None,
-    ) -> None:
-        super().__init__(vexpand=True, hscrollbar_policy=Gtk.PolicyType.AUTOMATIC)
-        self.set_propagate_natural_width(False)
-        self.add_css_class("view")
-        self._window_inner_width_fn = window_inner_width_fn
-        self._last_viewport_inner = 0
-        self._last_window_inner = 0
-        self._root_width_notify_id = 0
-
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, vexpand=True)
-        box.set_hexpand(True)
-        box.set_halign(Gtk.Align.FILL)
-        box.set_margin_top(12)
-        box.set_margin_bottom(12)
-        box.set_margin_start(12)
-        box.set_margin_end(12)
-        self.set_child(box)
-        self._results_box = box
-        self.connect("notify::width", self._on_viewport_width_changed)
-        self.connect("map", self._on_view_map)
-        self.connect("unmap", self._on_view_unmap)
-
-        results = service.search(query)
-        if not results.releases:
-            empty = Gtk.Label(label=f'No results for “{query}”', vexpand=True)
-            empty.add_css_class("dim-label")
-            box.append(empty)
-            return
-
-        box.append(_section_label("Releases"))
-        release_grid = ReleaseTileGrid(inner_width_fn=self._search_album_tile_inner_width)
-        release_grid.set_hexpand(True)
-        release_grid.set_halign(Gtk.Align.FILL)
-        release_shell = _FixedMinWidthShell(search_grid_min_content_width())
-        release_shell.append(release_grid)
-        box.append(release_shell)
-        self._search_album_grid = release_grid
-        for release in results.releases:
-            release_grid.append_release(
-                release,
-                on_activate=lambda release_id=release.id: on_release_activated(release_id),
-                on_play=lambda release_id=release.id: service.play_release(
-                    release_id, start_index=0
-                ),
-                art_loader=art_loader,
-                small=True,
-            )
-        GLib.idle_add(release_grid._sync_layout_idle)
-
-    def _viewport_inner_width(self) -> int:
-        width = self.get_width()
-        if width < 1:
-            width = self.get_allocation().width
-        if width < 1:
-            return 0
-        return album_grid_content_inner_width(
-            width,
-            margin_start=SEARCH_VIEW_HORIZONTAL_MARGIN,
-            margin_end=SEARCH_VIEW_HORIZONTAL_MARGIN,
-        )
-
-    def _search_album_tile_inner_width(self) -> int:
-        viewport = self._viewport_inner_width()
-        window = self._window_inner_width_fn() if self._window_inner_width_fn else 0
-        inner, self._last_viewport_inner, self._last_window_inner = album_grid_resolve_inner_width(
-            viewport_inner=viewport,
-            window_inner=window,
-            last_viewport_inner=self._last_viewport_inner,
-            last_window_inner=self._last_window_inner,
-        )
-        return inner
-
-    def _on_view_map(self, *_args: object) -> None:
-        root = self.get_root()
-        if root is not None and not self._root_width_notify_id:
-            self._root_width_notify_id = root.connect(
-                "notify::width",
-                self._on_viewport_width_changed,
-            )
-
-    def _on_view_unmap(self, *_args: object) -> None:
-        if self._root_width_notify_id:
-            root = self.get_root()
-            if root is not None:
-                root.disconnect(self._root_width_notify_id)
-            self._root_width_notify_id = 0
-
-    def _on_viewport_width_changed(self, *_args: object) -> None:
-        grid = getattr(self, "_search_album_grid", None)
-        if grid is not None:
-            GLib.idle_add(grid._sync_layout_idle)
 
 
 class QueueSheet(Adw.Dialog):
@@ -1036,4 +906,4 @@ def _release_card(
 AlbumGridView = ReleaseGridView
 AlbumDetailView = ReleaseDetailView
 AlbumTileGrid = ReleaseTileGrid
-RecentlyAddedListView = RecentlyAddedGridView
+RecentlyAddedListView = ReleaseGridView
