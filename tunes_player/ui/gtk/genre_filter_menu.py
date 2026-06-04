@@ -62,10 +62,10 @@ class GenreFilterMenu(Gtk.Box):
         self.append(self._menu_btn)
 
         popover_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        popover_box.set_margin_top(8)
-        popover_box.set_margin_bottom(8)
-        popover_box.set_margin_start(10)
-        popover_box.set_margin_end(10)
+        popover_box.set_margin_top(4)
+        popover_box.set_margin_bottom(4)
+        popover_box.set_margin_start(6)
+        popover_box.set_margin_end(6)
         popover_box.set_size_request(_LIST_WIDTH, -1)
 
         self._search_entry = Gtk.SearchEntry()
@@ -89,11 +89,12 @@ class GenreFilterMenu(Gtk.Box):
         clear_btn.add_css_class("flat")
         clear_btn.add_css_class("genre-filter-clear")
         clear_btn.set_halign(Gtk.Align.START)
-        clear_btn.set_margin_top(6)
+        clear_btn.set_margin_top(4)
         clear_btn.connect("clicked", self._on_clear_clicked)
         popover_box.append(clear_btn)
 
         self._popover = Gtk.Popover()
+        self._popover.add_css_class("genre-filter-popover")
         self._popover.set_child(popover_box)
         self._popover.set_parent(self._menu_btn)
 
@@ -135,8 +136,10 @@ class GenreFilterMenu(Gtk.Box):
 
         for genre in self._genres:
             check = Gtk.CheckButton(label=genre)
-            check.set_margin_start(4)
-            check.set_margin_end(4)
+            check.set_margin_start(2)
+            check.set_margin_end(2)
+            check.set_margin_top(1)
+            check.set_margin_bottom(1)
             check.connect("toggled", self._on_check_toggled)
 
             row = Gtk.ListBoxRow()

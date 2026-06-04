@@ -127,12 +127,29 @@ button.artist-link:hover label {
   font-weight: 400;
 }
 
+.genre-filter-popover {
+  padding: 4px;
+}
+
 .genre-filter-list row {
   padding: 0;
 }
 
+.genre-filter-list checkbutton {
+  min-height: 0;
+  padding: 1px 2px;
+}
+
+.genre-filter-list checkbutton label {
+  font-size: 11px;
+  font-weight: 400;
+}
+
 .genre-filter-clear {
-  font-size: 0.8em;
+  min-height: 0;
+  padding: 2px 2px;
+  font-size: 11px;
+  font-weight: 400;
   opacity: 0.85;
 }
 
