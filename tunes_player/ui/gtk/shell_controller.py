@@ -50,6 +50,8 @@ def fetch_filtered_releases(
     enabled_sources: frozenset[Source] | None = None,
     enabled_genres: frozenset[str] | None = None,
     enabled_release_types: frozenset[str] | None = None,
+    sort_key: str | None = None,
+    sort_descending: bool = True,
 ) -> list[Release]:
     releases = fetch_base_releases(service, base, search_query=search_query)
     return apply_shell_view_filters(
@@ -57,4 +59,6 @@ def fetch_filtered_releases(
         enabled_sources=enabled_sources or frozenset(),
         enabled_genres=enabled_genres or frozenset(),
         enabled_release_types=enabled_release_types or frozenset(),
+        sort_key=sort_key,
+        sort_descending=sort_descending,
     )

@@ -109,6 +109,18 @@ button.artist-link:hover label {
   opacity: 0.92;
 }
 
+.shell-source-multi .shell-sort-direction-btn {
+  min-height: 18px;
+  min-width: 0;
+  padding: 0 4px 0 0;
+  margin: 0;
+}
+
+.shell-source-multi .shell-sort-direction-btn label.shell-source-btn-label {
+  padding: 0;
+  margin: 0;
+}
+
 .shell-controls .shell-source-row {
   min-height: 0;
 }

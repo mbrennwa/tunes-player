@@ -15,10 +15,15 @@ from tunes_player.core.shell_state import (
     RELEASE_TYPE_FILTER_EP,
     RELEASE_TYPE_FILTER_OTHER,
     RELEASE_TYPE_FILTER_SINGLE,
+    SORT_KEY_ALBUM,
+    SORT_KEY_ARTIST,
+    SORT_KEY_SOURCE,
+    SORT_KEY_YEAR,
     ShellBase,
     ShellState,
     apply_genre_filter,
     apply_release_type_filter,
+    apply_shell_sort,
     apply_source_filter,
     genres_in_selection,
     parse_shell_state,
@@ -34,15 +39,18 @@ def _release(
     release_id: str,
     source: Source,
     *,
+    title: str = "Title",
+    artist_name: str = "Artist",
+    year: int | None = 2024,
     genre: str | None = "Rock",
     release_type: ReleaseType = ReleaseType.ALBUM,
 ) -> Release:
     return Release(
         id=release_id,
-        title="Title",
-        artist_name="Artist",
+        title=title,
+        artist_name=artist_name,
         source=source,
-        year=2024,
+        year=year,
         genre=genre,
         release_type=release_type,
     )
@@ -56,6 +64,8 @@ class TestShellStateParsing(unittest.TestCase):
         self.assertEqual(state.enabled_sources, frozenset())
         self.assertEqual(state.enabled_genres, frozenset())
         self.assertEqual(state.enabled_release_types, frozenset())
+        self.assertIsNone(state.sort_key)
+        self.assertTrue(state.sort_descending)
         self.assertEqual(state.cached_releases, ())
 
     def test_roundtrip_dict(self) -> None:
@@ -85,6 +95,115 @@ class TestShellStateParsing(unittest.TestCase):
         )
         restored = ShellState.from_dict(state.to_dict())
         self.assertEqual(restored.enabled_release_types, state.enabled_release_types)
+
+    def test_sort_state_roundtrip(self) -> None:
+        state = ShellState(
+            sort_key=SORT_KEY_YEAR,
+            sort_descending=False,
+        )
+        restored = ShellState.from_dict(state.to_dict())
+        self.assertEqual(restored.sort_key, SORT_KEY_YEAR)
+        self.assertFalse(restored.sort_descending)
+
+    def test_sort_descending_only_persisted_when_not_default(self) -> None:
+        state = ShellState(sort_key=SORT_KEY_ALBUM, sort_descending=True)
+        payload = state.to_dict()
+        self.assertEqual(payload["sort_key"], SORT_KEY_ALBUM)
+        self.assertNotIn("sort_descending", payload)
+
+        state_asc = ShellState(sort_key=SORT_KEY_ALBUM, sort_descending=False)
+        payload_asc = state_asc.to_dict()
+        self.assertFalse(payload_asc["sort_descending"])
+
+
+class TestApplyShellSort(unittest.TestCase):
+    def test_none_preserves_input_order(self) -> None:
+        releases = [
+            _release("c", Source.LOCAL),
+            _release("a", Source.TIDAL),
+            _release("b", Source.QOBUZ),
+        ]
+        sorted_releases = apply_shell_sort(
+            releases,
+            sort_key=None,
+            sort_descending=True,
+        )
+        self.assertEqual([r.id for r in sorted_releases], ["c", "a", "b"])
+
+    def test_year_descending_missing_years_last(self) -> None:
+        releases = [
+            _release("old", Source.LOCAL, year=1990, title="B"),
+            _release("none", Source.LOCAL, year=None, title="A"),
+            _release("new", Source.LOCAL, year=2020, title="C"),
+        ]
+        ordered = apply_shell_sort(
+            releases,
+            sort_key=SORT_KEY_YEAR,
+            sort_descending=True,
+        )
+        self.assertEqual([r.id for r in ordered], ["new", "old", "none"])
+
+    def test_year_ascending_missing_years_last(self) -> None:
+        releases = [
+            _release("new", Source.LOCAL, year=2020),
+            _release("none", Source.LOCAL, year=None),
+            _release("old", Source.LOCAL, year=1990),
+        ]
+        ordered = apply_shell_sort(
+            releases,
+            sort_key=SORT_KEY_YEAR,
+            sort_descending=False,
+        )
+        self.assertEqual([r.id for r in ordered], ["old", "new", "none"])
+
+    def test_album_case_insensitive(self) -> None:
+        releases = [
+            _release("b", Source.LOCAL, title="beta"),
+            _release("a", Source.LOCAL, title="Alpha"),
+        ]
+        ordered = apply_shell_sort(
+            releases,
+            sort_key=SORT_KEY_ALBUM,
+            sort_descending=True,
+        )
+        self.assertEqual([r.id for r in ordered], ["a", "b"])
+
+    def test_artist_case_insensitive(self) -> None:
+        releases = [
+            _release("b", Source.LOCAL, artist_name="zebra"),
+            _release("a", Source.LOCAL, artist_name="Apple"),
+        ]
+        ordered = apply_shell_sort(
+            releases,
+            sort_key=SORT_KEY_ARTIST,
+            sort_descending=True,
+        )
+        self.assertEqual([r.id for r in ordered], ["a", "b"])
+
+    def test_album_descending_z_to_a(self) -> None:
+        releases = [
+            _release("a", Source.LOCAL, title="Alpha"),
+            _release("b", Source.LOCAL, title="beta"),
+        ]
+        ordered = apply_shell_sort(
+            releases,
+            sort_key=SORT_KEY_ALBUM,
+            sort_descending=False,
+        )
+        self.assertEqual([r.id for r in ordered], ["b", "a"])
+
+    def test_source_ordering(self) -> None:
+        releases = [
+            _release("t", Source.TIDAL),
+            _release("l", Source.LOCAL),
+            _release("q", Source.QOBUZ),
+        ]
+        ordered = apply_shell_sort(
+            releases,
+            sort_key=SORT_KEY_SOURCE,
+            sort_descending=True,
+        )
+        self.assertEqual([r.id for r in ordered], ["l", "q", "t"])
 
 
 class TestReleaseTypeFilter(unittest.TestCase):

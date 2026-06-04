@@ -42,6 +42,19 @@ _VALID_RELEASE_TYPE_FILTERS = frozenset(
     }
 )
 
+SORT_KEY_YEAR = "year"
+SORT_KEY_ALBUM = "album"
+SORT_KEY_ARTIST = "artist"
+SORT_KEY_SOURCE = "source"
+_VALID_SORT_KEYS = frozenset(
+    {
+        SORT_KEY_YEAR,
+        SORT_KEY_ALBUM,
+        SORT_KEY_ARTIST,
+        SORT_KEY_SOURCE,
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ShellState:
@@ -53,6 +66,9 @@ class ShellState:
     enabled_genres: frozenset[str] = field(default_factory=frozenset)
     # Empty set = all release-type buckets enabled. Non-empty = OR on filter buckets.
     enabled_release_types: frozenset[str] = field(default_factory=frozenset)
+    # None = preserve cache order; otherwise single-field sort after filters.
+    sort_key: str | None = None
+    sort_descending: bool = True
     # Serialized grid rows for instant restore on relaunch (no API refetch).
     cached_releases: tuple[dict[str, Any], ...] = ()
 
@@ -69,6 +85,10 @@ class ShellState:
             payload["enabled_genres"] = sorted(self.enabled_genres)
         if self.enabled_release_types:
             payload["enabled_release_types"] = sorted(self.enabled_release_types)
+        if self.sort_key is not None:
+            payload["sort_key"] = self.sort_key
+        if self.sort_descending is not True:
+            payload["sort_descending"] = self.sort_descending
         if self.cached_releases:
             payload["cached_releases"] = list(self.cached_releases)
         return payload
@@ -88,6 +108,7 @@ class ShellState:
         enabled_sources = _parse_enabled_sources(raw)
         enabled_genres = _parse_enabled_genres(raw)
         enabled_release_types = _parse_enabled_release_types(raw)
+        sort_key, sort_descending = _parse_sort_state(raw)
         cached_releases = _parse_cached_releases(raw)
         return cls(
             base=base,
@@ -95,6 +116,8 @@ class ShellState:
             enabled_sources=enabled_sources,
             enabled_genres=enabled_genres,
             enabled_release_types=enabled_release_types,
+            sort_key=sort_key,
+            sort_descending=sort_descending,
             cached_releases=cached_releases,
         )
 
@@ -189,6 +212,17 @@ def _parse_cached_releases(raw: dict[str, Any]) -> tuple[dict[str, Any], ...]:
         if payloads:
             return tuple(payloads)
     return ()
+
+
+def _parse_sort_state(raw: dict[str, Any]) -> tuple[str | None, bool]:
+    sort_key_raw = raw.get("sort_key")
+    sort_key = None
+    if isinstance(sort_key_raw, str) and sort_key_raw in _VALID_SORT_KEYS:
+        sort_key = sort_key_raw
+    sort_descending = raw.get("sort_descending", True)
+    if isinstance(sort_descending, bool):
+        return sort_key, sort_descending
+    return sort_key, True
 
 
 def _parse_enabled_release_types(raw: dict[str, Any]) -> frozenset[str]:
@@ -312,19 +346,68 @@ def apply_genre_filter(
     ]
 
 
+def _year_sort_key(release: Release, *, sort_descending: bool) -> tuple:
+    title_key = release.title.casefold()
+    if release.year is None:
+        return (1, 0, title_key, release.id)
+    year = release.year
+    if sort_descending:
+        return (0, -year, title_key, release.id)
+    return (0, year, title_key, release.id)
+
+
+def _text_sort_key(release: Release, *, sort_key: str) -> tuple:
+    title_key = release.title.casefold()
+    if sort_key == SORT_KEY_ALBUM:
+        return (title_key, release.id)
+    if sort_key == SORT_KEY_ARTIST:
+        return (release.artist_name.casefold(), title_key, release.id)
+    if sort_key == SORT_KEY_SOURCE:
+        return (release.source.value, title_key, release.id)
+    return (title_key, release.id)
+
+
+def apply_shell_sort(
+    releases: list[Release],
+    *,
+    sort_key: str | None,
+    sort_descending: bool,
+) -> list[Release]:
+    if not sort_key or sort_key not in _VALID_SORT_KEYS:
+        return list(releases)
+    if sort_key == SORT_KEY_YEAR:
+        return sorted(
+            releases,
+            key=lambda release: _year_sort_key(release, sort_descending=sort_descending),
+        )
+    # Down arrow (sort_descending=True): A→Z; up arrow: Z→A. Year uses the opposite convention.
+    return sorted(
+        releases,
+        key=lambda release: _text_sort_key(release, sort_key=sort_key),
+        reverse=not sort_descending,
+    )
+
+
 def apply_shell_view_filters(
     releases: list[Release],
     *,
     enabled_sources: frozenset[Source],
     enabled_genres: frozenset[str],
     enabled_release_types: frozenset[str] | None = None,
+    sort_key: str | None = None,
+    sort_descending: bool = True,
 ) -> list[Release]:
     filtered = apply_source_filter(releases, enabled_sources)
     filtered = apply_release_type_filter(
         filtered,
         enabled_release_types or frozenset(),
     )
-    return apply_genre_filter(filtered, enabled_genres)
+    filtered = apply_genre_filter(filtered, enabled_genres)
+    return apply_shell_sort(
+        filtered,
+        sort_key=sort_key,
+        sort_descending=sort_descending,
+    )
 
 
 def releases_from_recently_added(items: list[RecentlyAddedItem]) -> list[Release]:
