@@ -242,3 +242,13 @@ button.artist-link:hover label {
   color: @accent_fg_color;
   font-weight: 600;
 }
+
+/* TIDAL PKCE sign-in: visible URL field inside Adw.Dialog */
+.tidal-pkce-signin .tidal-pkce-url-entry {
+  min-height: 2.75rem;
+  padding: 0.55rem 0.75rem;
+}
+
+.tidal-pkce-signin .tidal-pkce-steps list {
+  background: none;
+}

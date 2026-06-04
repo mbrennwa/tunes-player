@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import webbrowser
+from collections.abc import Callable
 from importlib import resources
 
 import gi
@@ -107,3 +108,21 @@ def open_external_uri(uri: str) -> tuple[bool, str | None]:
         return True, None
 
     return False, last_error or "Could not open link"
+
+
+def read_clipboard_text(on_ready: Callable[[str | None], None]) -> None:
+    """Read plain text from the clipboard (async); calls on_ready on the main loop."""
+    display = Gdk.Display.get_default()
+    if display is None:
+        on_ready(None)
+        return
+    clipboard = display.get_clipboard()
+
+    def finish(_clip: Gdk.Clipboard, result: Gio.AsyncResult, _user_data: object) -> None:
+        try:
+            text = clipboard.read_text_finish(result)
+        except GLib.Error:
+            text = None
+        on_ready(text.strip() if text else None)
+
+    clipboard.read_text_async(None, finish, None)

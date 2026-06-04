@@ -104,6 +104,8 @@ class PlayerService:
         self._queue_index = -1
         self._current_track: Track | None = None
         self._quality_hint = ""
+        self._tidal_playback_format_label: str | None = None
+        self._tidal_playback_format_track_id: str | None = None
         self._playback_note: str | None = None
         self._bit_perfect_playback = False
         self._output_profile: PlaybackOutputProfile | None = None
@@ -365,17 +367,16 @@ class PlayerService:
     def tidal_account_label(self) -> str | None:
         return self._tidal.account_label()
 
-    def tidal_begin_login(self) -> tuple[str, float]:
-        return self._tidal.begin_oauth()
+    def tidal_begin_pkce_login(self) -> str:
+        """Start PKCE sign-in (required for lossless streams)."""
+        return self._tidal.begin_pkce_login()
 
-    def tidal_poll_login(self) -> str:
-        return self._tidal.poll_oauth()
+    def tidal_complete_pkce_login(self, redirect_url: str) -> None:
+        self._tidal.complete_pkce_login(redirect_url)
+        self._emit("sources_changed")
 
-    def tidal_cancel_login(self) -> None:
-        self._tidal.cancel_oauth()
-
-    def tidal_oauth_error(self) -> str | None:
-        return self._tidal.oauth_error_message()
+    def tidal_needs_lossless_relogin(self) -> bool:
+        return self._tidal.needs_lossless_relogin()
 
     def tidal_logout(self) -> None:
         self._tidal.logout()
@@ -857,6 +858,16 @@ class PlayerService:
             )
         return self._compute_playback_profile_for_track(track)
 
+    def _tidal_quality_hint_for_track(self, track_id: str) -> str:
+        if (
+            self._tidal_playback_format_track_id == track_id
+            and self._tidal_playback_format_label
+        ):
+            return self._tidal_playback_format_label
+        if self._tidal is not None:
+            return self._tidal.stream_format_label(track_id)
+        return "Unknown format"
+
     def _apply_path_info(self, path_info: PlaybackPathInfo) -> None:
         self._bit_perfect_playback = path_info.bit_perfect_playback
         self._playback_note = path_info.playback_note
@@ -868,11 +879,7 @@ class PlayerService:
         if track is None:
             return
         if track.id.startswith("tidal:"):
-            base_hint = (
-                self._tidal.stream_format_label(track.id)
-                if self._tidal is not None
-                else "Unknown format"
-            )
+            base_hint = self._tidal_quality_hint_for_track(track.id)
         elif track.id.startswith("qobuz:"):
             from tunes_player.core.playback_quality import qobuz_stream_format_label
 
@@ -1017,6 +1024,11 @@ class PlayerService:
         profile, path_info = self._compute_playback_profile_for_track(track)
         self._output_profile = profile
         self._apply_path_info(path_info)
+        self._set_current_track(
+            track,
+            format_label=source.format_label,
+            playback_note=path_info.playback_note,
+        )
         engine.load(source.playback_target, start_sec=pos, output_profile=profile)
         if not playing:
             engine.pause()
@@ -1172,14 +1184,18 @@ class PlayerService:
         playback_note: str | None = None,
     ) -> None:
         self._current_track = track
+        if track.source.value != "tidal":
+            self._tidal_playback_format_track_id = None
+            self._tidal_playback_format_label = None
         if format_label is not None:
             base_hint = format_label
+            if track.source.value == "tidal":
+                self._tidal_playback_format_track_id = track.id
+                self._tidal_playback_format_label = format_label
         elif track.source.value == "tidal":
-            base_hint = (
-                self._tidal.stream_format_label(track.id)
-                if self._tidal is not None
-                else "Unknown format"
-            )
+            self._tidal_playback_format_track_id = None
+            self._tidal_playback_format_label = None
+            base_hint = self._tidal_quality_hint_for_track(track.id)
         elif track.source.value == "qobuz":
             from tunes_player.core.playback_quality import qobuz_stream_format_label
 

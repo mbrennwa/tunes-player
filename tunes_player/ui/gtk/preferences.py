@@ -13,7 +13,7 @@ from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 from tunes_player.core.audio_labels import endpoint_dropdown_label
 from tunes_player.core.library import ScanResult
 from tunes_player.core.services import PlayerService
-from tunes_player.ui.gtk.util import escape_markup, open_external_uri
+from tunes_player.ui.gtk.util import escape_markup, open_external_uri, read_clipboard_text
 
 
 class PreferencesWindow(Adw.PreferencesWindow):
@@ -146,8 +146,8 @@ class PreferencesWindow(Adw.PreferencesWindow):
         tidal_group = Adw.PreferencesGroup(
             title="Streaming",
             description=(
-                "Requires your own TIDAL subscription. Sign in with your browser "
-                "for full-length playback."
+                "Requires your own TIDAL subscription. Sign-in opens your browser; "
+                "copy the address bar afterward to finish connecting in Tunes."
             ),
         )
         tidal_group.add(self._tidal_status_row)
@@ -214,9 +214,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self.add(diagnostics_page)
         self.set_visible_page(sources_page)
 
-        self._tidal_oauth_poll_id = 0
-        self._tidal_sign_in_dialog: Adw.AlertDialog | None = None
-        self._tidal_sign_in_dialog_presented = False
+        self._tidal_pkce_dialog: Adw.Dialog | None = None
         self._updating_output_dropdown = False
         self._reload_folders()
         self._reload_tidal_status()
@@ -455,7 +453,16 @@ class PreferencesWindow(Adw.PreferencesWindow):
         display = Gdk.Display.get_default()
         if display is None:
             return
-        display.get_clipboard().set(Gdk.ContentProvider.new_for_string(text))
+        clipboard = display.get_clipboard()
+        try:
+            clipboard.set_content(Gdk.ContentProvider.new_for_string(text))
+        except (AttributeError, TypeError):
+            clipboard.set_content(
+                Gdk.ContentProvider.new_for_bytes(
+                    "text/plain;charset=utf-8",
+                    GLib.Bytes.new(text.encode("utf-8")),
+                )
+            )
 
     def _copy_log_path(self, log_path: object) -> None:
         self._copy_text(str(log_path))
@@ -481,9 +488,13 @@ class PreferencesWindow(Adw.PreferencesWindow):
 
         if service.tidal_is_logged_in():
             label = service.tidal_account_label()
-            self._tidal_status_row.set_subtitle(
-                f"Connected as {label}" if label else "Connected"
-            )
+            base = f"Connected as {label}" if label else "Connected"
+            if service.tidal_needs_lossless_relogin():
+                self._tidal_status_row.set_subtitle(
+                    f"{base} — sign out and sign in again for lossless (CD) quality"
+                )
+            else:
+                self._tidal_status_row.set_subtitle(base)
             self._tidal_sign_in_btn.set_sensitive(False)
             self._tidal_sign_out_btn.set_sensitive(True)
         else:
@@ -493,94 +504,178 @@ class PreferencesWindow(Adw.PreferencesWindow):
 
     def _on_tidal_sign_in_clicked(self, *_args: object) -> None:
         try:
-            url, expires_in = self._service.tidal_begin_login()
+            login_url = self._service.tidal_begin_pkce_login()
         except Exception as exc:
             self._tidal_status_row.set_subtitle(f"Sign-in failed: {exc}")
             return
+        self._tidal_status_row.set_subtitle("Finish sign-in in the dialog…")
+        self._present_tidal_pkce_sign_in(login_url)
 
-        expires_msg = f"Finish within about {int(expires_in)} seconds."
-        body = (
-            "Choose Open in browser, then log in with your TIDAL account and "
-            "approve access. This window updates when you are done.\n\n"
-            "If the TIDAL page shows a letter code, you can ignore it—no need to "
-            "type it into tunes-player. "
-            f"{expires_msg}"
+    def _present_tidal_pkce_sign_in(self, login_url: str) -> None:
+        dialog = Adw.Dialog()
+        dialog.set_title("Connect TIDAL")
+        dialog.set_content_width(480)
+        dialog.set_content_height(440)
+        dialog.add_css_class("tidal-pkce-signin")
+        self._tidal_pkce_dialog = dialog
+
+        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        header.set_show_start_title_buttons(False)
+        toolbar.add_top_bar(header)
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        content.set_margin_top(8)
+        content.set_margin_bottom(8)
+        content.set_margin_start(12)
+        content.set_margin_end(12)
+
+        intro = Gtk.Label(
+            label="Sign in on TIDAL’s website, then paste the browser address here.",
+            wrap=True,
+            xalign=0,
         )
+        intro.add_css_class("title-4")
+        content.append(intro)
 
-        self._tidal_status_row.set_subtitle("Waiting for browser sign-in…")
-        if self._tidal_oauth_poll_id == 0:
-            self._tidal_oauth_poll_id = GLib.timeout_add(500, self._poll_tidal_oauth)
+        steps = Gtk.ListBox()
+        steps.add_css_class("boxed-list")
+        steps.add_css_class("tidal-pkce-steps")
+        steps.set_selection_mode(Gtk.SelectionMode.NONE)
 
-        dialog = Adw.AlertDialog(
-            heading="Sign in to TIDAL",
-            body=body,
+        step1 = Adw.ActionRow(
+            title="1. Sign in",
+            subtitle="Your browser opens the TIDAL login page.",
         )
-        dialog.add_response("cancel", "Cancel")
-        dialog.add_response("copy", "Copy link")
-        dialog.add_response("open", "Open in browser")
-        dialog.set_response_appearance("open", Adw.ResponseAppearance.SUGGESTED)
-        dialog.set_default_response("open")
-        dialog.set_close_response("cancel")
-        self._tidal_sign_in_dialog = dialog
+        open_again = Gtk.Button(label="Open again")
+        open_again.add_css_class("flat")
+        open_again.set_valign(Gtk.Align.CENTER)
+        step1.add_suffix(open_again)
+        steps.append(step1)
 
-        def on_dialog_closed(_dlg: Adw.AlertDialog) -> None:
-            self._tidal_sign_in_dialog_presented = False
-            if self._tidal_sign_in_dialog is _dlg:
-                self._tidal_sign_in_dialog = None
+        step2 = Adw.ActionRow(
+            title="2. Copy the address bar",
+            subtitle=(
+                "After sign-in, TIDAL shows “Page not found”—that is normal. "
+                "Copy the full URL (it must contain code=)."
+            ),
+        )
+        steps.append(step2)
 
-        def on_response(_dlg: Adw.AlertDialog, response: str) -> None:
-            if response == "cancel":
-                self._tidal_sign_in_dialog_presented = False
-                self._tidal_sign_in_dialog = None
-                if self._tidal_oauth_poll_id != 0:
-                    GLib.source_remove(self._tidal_oauth_poll_id)
-                    self._tidal_oauth_poll_id = 0
-                self._service.tidal_cancel_login()
-                self._reload_tidal_status()
-                return
-            if response == "copy":
-                self._copy_text(url)
-                return
-            if response == "open":
-                ok, err = open_external_uri(url)
-                if not ok:
-                    err_dialog = Adw.AlertDialog(
-                        heading="Could not open browser",
-                        body=f"{err or 'Unknown error'}\n\nOpen this link manually:\n{url}",
-                    )
-                    err_dialog.add_response("close", "Close")
-                    err_dialog.present(self)
+        step3 = Adw.ActionRow(
+            title="3. Paste below and connect",
+            subtitle="Use the field under these steps.",
+        )
+        steps.append(step3)
+        content.append(steps)
 
-        dialog.connect("closed", on_dialog_closed)
-        dialog.connect("response", on_response)
-        dialog.present(self)
-        self._tidal_sign_in_dialog_presented = True
+        url_label = Gtk.Label(
+            label="Address from your browser",
+            xalign=0,
+        )
+        url_label.add_css_class("heading")
+        content.append(url_label)
 
-    def _dismiss_tidal_sign_in_dialog(self) -> None:
-        if not self._tidal_sign_in_dialog_presented:
-            self._tidal_sign_in_dialog = None
-            return
-        dialog = self._tidal_sign_in_dialog
-        self._tidal_sign_in_dialog = None
-        self._tidal_sign_in_dialog_presented = False
-        if dialog is not None:
+        url_entry = Gtk.Entry()
+        url_entry.set_placeholder_text("https://…?code=…")
+        url_entry.set_hexpand(True)
+        url_entry.add_css_class("tidal-pkce-url-entry")
+        paste_btn = Gtk.Button(icon_name="edit-paste-symbolic")
+        paste_btn.set_tooltip_text("Paste from clipboard")
+        paste_btn.set_valign(Gtk.Align.CENTER)
+        entry_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=8,
+            margin_top=8,
+            margin_bottom=8,
+            margin_start=12,
+            margin_end=12,
+        )
+        entry_row.append(url_entry)
+        entry_row.append(paste_btn)
+        url_list = Gtk.ListBox()
+        url_list.add_css_class("boxed-list")
+        url_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        url_list_row = Gtk.ListBoxRow()
+        url_list_row.set_child(entry_row)
+        url_list.append(url_list_row)
+        content.append(url_list)
+
+        toolbar.set_content(content)
+
+        bottom = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=8,
+            margin_top=8,
+            margin_bottom=12,
+            margin_start=12,
+            margin_end=12,
+        )
+        connect_btn = Gtk.Button(label="Connect")
+        connect_btn.add_css_class("suggested-action")
+        connect_btn.add_css_class("pill")
+        connect_btn.set_halign(Gtk.Align.FILL)
+        connect_btn.set_hexpand(True)
+        bottom.append(connect_btn)
+        toolbar.add_bottom_bar(bottom)
+
+        dialog.set_child(toolbar)
+
+        def close_dialog() -> None:
+            if self._tidal_pkce_dialog is dialog:
+                self._tidal_pkce_dialog = None
             dialog.close()
 
-    def _poll_tidal_oauth(self) -> bool:
-        status = self._service.tidal_poll_login()
-        if status == "pending":
-            return True
-        self._tidal_oauth_poll_id = 0
-        if status == "success":
-            self._dismiss_tidal_sign_in_dialog()
+        def on_open(*_args: object) -> None:
+            ok, err = open_external_uri(login_url)
+            if not ok:
+                self._tidal_status_row.set_subtitle(
+                    err or "Could not open browser"
+                )
+
+        def on_paste(*_args: object) -> None:
+            def apply_text(text: str | None) -> None:
+                if text:
+                    url_entry.set_text(text)
+                    url_entry.grab_focus()
+
+            read_clipboard_text(apply_text)
+
+        def on_connect(*_args: object) -> None:
+            redirect_url = url_entry.get_text().strip()
+            if not redirect_url:
+                url_entry.grab_focus()
+                self._tidal_status_row.set_subtitle(
+                    "Paste the address from your browser’s location bar."
+                )
+                return
+            try:
+                self._service.tidal_complete_pkce_login(redirect_url)
+            except Exception as exc:
+                self._tidal_status_row.set_subtitle(f"Sign-in failed: {exc}")
+                return
+            close_dialog()
             self._reload_tidal_status()
             self._service.notify_sources_changed()
-        elif status == "failed":
-            self._dismiss_tidal_sign_in_dialog()
-            err = self._service.tidal_oauth_error()
-            self._tidal_status_row.set_subtitle(err or "Sign-in failed or timed out")
+
+        def on_closed(*_args: object) -> None:
+            if self._tidal_pkce_dialog is dialog:
+                self._tidal_pkce_dialog = None
             self._reload_tidal_status()
-        return False
+
+        open_again.connect("clicked", on_open)
+        paste_btn.connect("clicked", on_paste)
+        connect_btn.connect("clicked", on_connect)
+        url_entry.connect("activate", on_connect)
+        dialog.connect("closed", on_closed)
+        dialog.present(self)
+
+        def open_browser_and_focus_entry() -> bool:
+            on_open()
+            url_entry.grab_focus()
+            return False
+
+        GLib.idle_add(open_browser_and_focus_entry)
 
     def _on_tidal_sign_out_clicked(self, *_args: object) -> None:
         self._service.tidal_logout()
