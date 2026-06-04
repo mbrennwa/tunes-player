@@ -29,6 +29,19 @@ _VALID_RELEASE_TYPES = frozenset(item.value for item in ReleaseType)
 
 NO_GENRE_LABEL = "(No genre)"
 
+RELEASE_TYPE_FILTER_ALBUM = "album"
+RELEASE_TYPE_FILTER_SINGLE = "single"
+RELEASE_TYPE_FILTER_EP = "ep"
+RELEASE_TYPE_FILTER_OTHER = "other"
+_VALID_RELEASE_TYPE_FILTERS = frozenset(
+    {
+        RELEASE_TYPE_FILTER_ALBUM,
+        RELEASE_TYPE_FILTER_SINGLE,
+        RELEASE_TYPE_FILTER_EP,
+        RELEASE_TYPE_FILTER_OTHER,
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ShellState:
@@ -38,6 +51,8 @@ class ShellState:
     enabled_sources: frozenset[Source] = field(default_factory=frozenset)
     # Empty set = no genre filter. Non-empty = OR match on release genre buckets.
     enabled_genres: frozenset[str] = field(default_factory=frozenset)
+    # Empty set = all release-type buckets enabled. Non-empty = OR on filter buckets.
+    enabled_release_types: frozenset[str] = field(default_factory=frozenset)
     # Serialized grid rows for instant restore on relaunch (no API refetch).
     cached_releases: tuple[dict[str, Any], ...] = ()
 
@@ -52,6 +67,8 @@ class ShellState:
             )
         if self.enabled_genres:
             payload["enabled_genres"] = sorted(self.enabled_genres)
+        if self.enabled_release_types:
+            payload["enabled_release_types"] = sorted(self.enabled_release_types)
         if self.cached_releases:
             payload["cached_releases"] = list(self.cached_releases)
         return payload
@@ -70,12 +87,14 @@ class ShellState:
             search_query = ""
         enabled_sources = _parse_enabled_sources(raw)
         enabled_genres = _parse_enabled_genres(raw)
+        enabled_release_types = _parse_enabled_release_types(raw)
         cached_releases = _parse_cached_releases(raw)
         return cls(
             base=base,
             search_query=search_query,
             enabled_sources=enabled_sources,
             enabled_genres=enabled_genres,
+            enabled_release_types=enabled_release_types,
             cached_releases=cached_releases,
         )
 
@@ -172,6 +191,17 @@ def _parse_cached_releases(raw: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     return ()
 
 
+def _parse_enabled_release_types(raw: dict[str, Any]) -> frozenset[str]:
+    enabled_raw = raw.get("enabled_release_types")
+    if not isinstance(enabled_raw, list):
+        return frozenset()
+    return frozenset(
+        str(item)
+        for item in enabled_raw
+        if isinstance(item, str) and item in _VALID_RELEASE_TYPE_FILTERS
+    )
+
+
 def _parse_enabled_genres(raw: dict[str, Any]) -> frozenset[str]:
     enabled_raw = raw.get("enabled_genres")
     if not isinstance(enabled_raw, list):
@@ -244,6 +274,29 @@ def prune_enabled_genres(
     return frozenset(genre for genre in enabled_genres if genre in available)
 
 
+def release_type_filter_bucket(release: Release) -> str:
+    if release.release_type == ReleaseType.ALBUM:
+        return RELEASE_TYPE_FILTER_ALBUM
+    if release.release_type == ReleaseType.SINGLE:
+        return RELEASE_TYPE_FILTER_SINGLE
+    if release.release_type == ReleaseType.EP:
+        return RELEASE_TYPE_FILTER_EP
+    return RELEASE_TYPE_FILTER_OTHER
+
+
+def apply_release_type_filter(
+    releases: list[Release],
+    enabled_release_types: frozenset[str],
+) -> list[Release]:
+    if not enabled_release_types:
+        return list(releases)
+    return [
+        release
+        for release in releases
+        if release_type_filter_bucket(release) in enabled_release_types
+    ]
+
+
 def apply_genre_filter(
     releases: list[Release],
     enabled_genres: frozenset[str],
@@ -264,8 +317,13 @@ def apply_shell_view_filters(
     *,
     enabled_sources: frozenset[Source],
     enabled_genres: frozenset[str],
+    enabled_release_types: frozenset[str] | None = None,
 ) -> list[Release]:
     filtered = apply_source_filter(releases, enabled_sources)
+    filtered = apply_release_type_filter(
+        filtered,
+        enabled_release_types or frozenset(),
+    )
     return apply_genre_filter(filtered, enabled_genres)
 
 

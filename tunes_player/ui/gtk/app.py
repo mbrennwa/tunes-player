@@ -31,6 +31,7 @@ from tunes_player.ui.gtk.now_playing import NowPlayingBar, attach_media_keys
 from tunes_player.ui.gtk.preferences import PreferencesWindow
 from tunes_player.ui.gtk.shell_controller import available_sources, fetch_base_releases
 from tunes_player.ui.gtk.genre_filter_menu import GenreFilterMenu
+from tunes_player.ui.gtk.release_type_multi_switch import ReleaseTypeMultiSwitch
 from tunes_player.ui.gtk.source_multi_switch import SourceMultiSwitch
 from tunes_player.ui.gtk.util import escape_markup, load_app_css, source_label
 from tunes_player.ui.gtk.views import (
@@ -74,6 +75,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._queue_sheet: QueueSheet | None = None
         self._source_multi: SourceMultiSwitch | None = None
         self._genre_filter: GenreFilterMenu | None = None
+        self._release_type_multi: ReleaseTypeMultiSwitch | None = None
         self._cached_selection_key: tuple[str, str] | None = None
         self._cached_releases: list[Release] = []
         self.set_default_size(*_DEFAULT_SIZE)
@@ -109,6 +111,7 @@ class TunesWindow(Adw.ApplicationWindow):
                 search_query=state.search_query,
                 enabled_sources=state.enabled_sources & sources,
                 enabled_genres=state.enabled_genres,
+                enabled_release_types=state.enabled_release_types,
             )
         return state
 
@@ -175,6 +178,14 @@ class TunesWindow(Adw.ApplicationWindow):
         self._source_row.set_hexpand(False)
         self._source_row.set_halign(Gtk.Align.START)
         filter_row.append(self._source_row)
+
+        self._release_type_slot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self._release_type_slot.add_css_class("shell-release-type-slot")
+        self._release_type_slot.set_visible(False)
+        self._release_type_slot.set_hexpand(False)
+        self._release_type_slot.set_halign(Gtk.Align.START)
+        self._release_type_slot.set_margin_start(24)
+        filter_row.append(self._release_type_slot)
 
         self._genre_filter_slot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         self._genre_filter_slot.add_css_class("shell-genre-filter-slot")
@@ -243,6 +254,7 @@ class TunesWindow(Adw.ApplicationWindow):
     def _store_selection_cache(self, state: ShellState, releases: list[Release]) -> None:
         self._cached_selection_key = self._selection_cache_key(state)
         self._cached_releases = list(releases)
+        self._sync_release_type_multi()
         self._sync_genre_filter()
 
     def _filtered_from_cache(self, state: ShellState) -> list[Release]:
@@ -250,6 +262,7 @@ class TunesWindow(Adw.ApplicationWindow):
             self._cached_releases,
             enabled_sources=state.enabled_sources,
             enabled_genres=state.enabled_genres,
+            enabled_release_types=state.enabled_release_types,
         )
 
     def _display_cached_selection(self, state: ShellState | None = None) -> None:
@@ -272,6 +285,7 @@ class TunesWindow(Adw.ApplicationWindow):
                 search_query=state.search_query,
                 enabled_sources=state.enabled_sources,
                 enabled_genres=frozenset(),
+                enabled_release_types=state.enabled_release_types,
                 cached_releases=(),
             )
         self._shell_state = state
@@ -303,7 +317,44 @@ class TunesWindow(Adw.ApplicationWindow):
                 self._search_entry.set_text("")
 
         self._sync_source_multi()
+        self._sync_release_type_multi()
         self._sync_genre_filter()
+
+    def _sync_release_type_multi(self) -> None:
+        show = bool(self._cached_releases)
+        self._release_type_slot.set_visible(show)
+        if not show:
+            return
+        if self._release_type_multi is None:
+            self._release_type_multi = ReleaseTypeMultiSwitch(
+                enabled_release_types=self._shell_state.enabled_release_types,
+                on_changed=self._on_release_type_multi_changed,
+            )
+            self._release_type_slot.append(self._release_type_multi)
+        else:
+            self._release_type_multi.set_enabled_release_types(
+                self._shell_state.enabled_release_types,
+            )
+
+    def _on_release_type_multi_changed(self, enabled_release_types: frozenset[str]) -> None:
+        self._set_enabled_release_types(enabled_release_types)
+
+    def _set_enabled_release_types(self, enabled_release_types: frozenset[str]) -> None:
+        state = self._shell_state
+        if state.enabled_release_types == enabled_release_types:
+            return
+        self._shell_state = ShellState(
+            base=state.base,
+            search_query=state.search_query,
+            enabled_sources=state.enabled_sources,
+            enabled_genres=state.enabled_genres,
+            enabled_release_types=enabled_release_types,
+            cached_releases=state.cached_releases,
+        )
+        if self._release_type_multi is not None:
+            self._release_type_multi.set_enabled_release_types(enabled_release_types)
+        self._schedule_persist()
+        self._display_cached_selection()
 
     def _sync_genre_filter(self) -> None:
         available = genres_in_selection(self._cached_releases)
@@ -316,6 +367,7 @@ class TunesWindow(Adw.ApplicationWindow):
                 search_query=state.search_query,
                 enabled_sources=state.enabled_sources,
                 enabled_genres=pruned,
+                enabled_release_types=state.enabled_release_types,
                 cached_releases=state.cached_releases,
             )
             state = self._shell_state
@@ -344,6 +396,7 @@ class TunesWindow(Adw.ApplicationWindow):
             search_query=state.search_query,
             enabled_sources=state.enabled_sources,
             enabled_genres=enabled_genres,
+            enabled_release_types=state.enabled_release_types,
             cached_releases=state.cached_releases,
         )
         if self._genre_filter is not None:
@@ -361,6 +414,7 @@ class TunesWindow(Adw.ApplicationWindow):
                     search_query=self._shell_state.search_query,
                     enabled_sources=frozenset(),
                     enabled_genres=self._shell_state.enabled_genres,
+                    enabled_release_types=self._shell_state.enabled_release_types,
                 )
             self._source_multi = None
             child = self._source_row.get_first_child()
@@ -397,6 +451,7 @@ class TunesWindow(Adw.ApplicationWindow):
             search_query=state.search_query,
             enabled_sources=enabled_sources,
             enabled_genres=state.enabled_genres,
+            enabled_release_types=state.enabled_release_types,
         )
         self._sync_source_multi()
         self._schedule_persist()
@@ -425,6 +480,7 @@ class TunesWindow(Adw.ApplicationWindow):
                 search_query="",
                 enabled_sources=self._shell_state.enabled_sources,
                 enabled_genres=self._shell_state.enabled_genres,
+                enabled_release_types=self._shell_state.enabled_release_types,
             ),
         )
 
@@ -438,6 +494,7 @@ class TunesWindow(Adw.ApplicationWindow):
                 search_query=query,
                 enabled_sources=self._shell_state.enabled_sources,
                 enabled_genres=self._shell_state.enabled_genres,
+                enabled_release_types=self._shell_state.enabled_release_types,
             ),
         )
 
@@ -461,6 +518,7 @@ class TunesWindow(Adw.ApplicationWindow):
             search_query=state.search_query,
             enabled_sources=state.enabled_sources,
             enabled_genres=state.enabled_genres,
+            enabled_release_types=state.enabled_release_types,
             cached_releases=cached_payloads,
         )
 
@@ -620,6 +678,8 @@ class TunesWindow(Adw.ApplicationWindow):
             )
         if state.enabled_genres:
             return "No releases match the selected genres."
+        if state.enabled_release_types:
+            return "No releases match the selected release types."
         if state.enabled_sources:
             names = ", ".join(
                 source_label(source)
@@ -696,6 +756,7 @@ class TunesWindow(Adw.ApplicationWindow):
                 search_query=artist_name,
                 enabled_sources=self._shell_state.enabled_sources,
                 enabled_genres=self._shell_state.enabled_genres,
+                enabled_release_types=self._shell_state.enabled_release_types,
             ),
         )
 

@@ -135,6 +135,29 @@ class TestReleaseFromQobuz(unittest.TestCase):
         self.assertEqual(release.source, Source.QOBUZ)
         self.assertEqual(release.year, 2024)
         self.assertIsNotNone(release.art_uri)
+        self.assertEqual(release.release_type.value, "album")
+
+    def test_product_type_ep(self) -> None:
+        album = {
+            "id": "ep1",
+            "title": "Short Run",
+            "artist": {"name": "Band"},
+            "tracks_count": 4,
+            "product_type": "ep",
+        }
+        release = release_from_qobuz(album)
+        self.assertEqual(release.release_type.value, "ep")
+
+    def test_product_type_single(self) -> None:
+        album = {
+            "id": "s1",
+            "title": "Hit",
+            "artist": {"name": "Band"},
+            "tracks_count": 1,
+            "product_type": "single",
+        }
+        release = release_from_qobuz(album)
+        self.assertEqual(release.release_type.value, "single")
 
 
 if __name__ == "__main__":

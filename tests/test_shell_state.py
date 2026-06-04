@@ -8,18 +8,24 @@ import unittest
 from pathlib import Path
 
 from tunes_player.core.config import ConfigManager
-from tunes_player.core.models import Release, Source
+from tunes_player.core.models import Release, ReleaseType, Source
 from tunes_player.core.shell_state import (
     NO_GENRE_LABEL,
+    RELEASE_TYPE_FILTER_ALBUM,
+    RELEASE_TYPE_FILTER_EP,
+    RELEASE_TYPE_FILTER_OTHER,
+    RELEASE_TYPE_FILTER_SINGLE,
     ShellBase,
     ShellState,
     apply_genre_filter,
+    apply_release_type_filter,
     apply_source_filter,
     genres_in_selection,
     parse_shell_state,
     prune_enabled_genres,
     release_from_cache_payload,
     release_to_cache_payload,
+    release_type_filter_bucket,
     releases_from_cache_payloads,
 )
 
@@ -29,6 +35,7 @@ def _release(
     source: Source,
     *,
     genre: str | None = "Rock",
+    release_type: ReleaseType = ReleaseType.ALBUM,
 ) -> Release:
     return Release(
         id=release_id,
@@ -37,6 +44,7 @@ def _release(
         source=source,
         year=2024,
         genre=genre,
+        release_type=release_type,
     )
 
 
@@ -47,6 +55,7 @@ class TestShellStateParsing(unittest.TestCase):
         self.assertEqual(state.search_query, "")
         self.assertEqual(state.enabled_sources, frozenset())
         self.assertEqual(state.enabled_genres, frozenset())
+        self.assertEqual(state.enabled_release_types, frozenset())
         self.assertEqual(state.cached_releases, ())
 
     def test_roundtrip_dict(self) -> None:
@@ -69,6 +78,55 @@ class TestShellStateParsing(unittest.TestCase):
     def test_legacy_source_filter(self) -> None:
         restored = ShellState.from_dict({"source_filter": "qobuz"})
         self.assertEqual(restored.enabled_sources, frozenset({Source.QOBUZ}))
+
+    def test_enabled_release_types_roundtrip(self) -> None:
+        state = ShellState(
+            enabled_release_types=frozenset({RELEASE_TYPE_FILTER_EP, RELEASE_TYPE_FILTER_SINGLE}),
+        )
+        restored = ShellState.from_dict(state.to_dict())
+        self.assertEqual(restored.enabled_release_types, state.enabled_release_types)
+
+
+class TestReleaseTypeFilter(unittest.TestCase):
+    def test_buckets(self) -> None:
+        self.assertEqual(
+            release_type_filter_bucket(_release("a", Source.LOCAL)),
+            RELEASE_TYPE_FILTER_ALBUM,
+        )
+        self.assertEqual(
+            release_type_filter_bucket(
+                _release("s", Source.LOCAL, release_type=ReleaseType.SINGLE),
+            ),
+            RELEASE_TYPE_FILTER_SINGLE,
+        )
+        self.assertEqual(
+            release_type_filter_bucket(
+                _release("e", Source.LOCAL, release_type=ReleaseType.EP),
+            ),
+            RELEASE_TYPE_FILTER_EP,
+        )
+        self.assertEqual(
+            release_type_filter_bucket(
+                _release("x", Source.LOCAL, release_type=ReleaseType.SYNTHETIC),
+            ),
+            RELEASE_TYPE_FILTER_OTHER,
+        )
+
+    def test_apply_release_type_filter(self) -> None:
+        releases = [
+            _release("a", Source.LOCAL, release_type=ReleaseType.ALBUM),
+            _release("s", Source.TIDAL, release_type=ReleaseType.SINGLE),
+            _release("e", Source.QOBUZ, release_type=ReleaseType.EP),
+        ]
+        filtered = apply_release_type_filter(
+            releases,
+            frozenset({RELEASE_TYPE_FILTER_SINGLE, RELEASE_TYPE_FILTER_EP}),
+        )
+        self.assertEqual([r.id for r in filtered], ["s", "e"])
+
+    def test_empty_filter_is_passthrough(self) -> None:
+        releases = [_release("a", Source.LOCAL)]
+        self.assertEqual(len(apply_release_type_filter(releases, frozenset())), 1)
 
 
 class TestReleaseCachePayload(unittest.TestCase):

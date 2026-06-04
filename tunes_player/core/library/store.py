@@ -29,6 +29,7 @@ _RELEASE_GROUP_SELECT = """
         MAX(t.is_synthetic) AS is_synthetic,
         MAX(t.total_tracks) AS total_tracks_tag,
         MAX(t.track_number) AS max_track_number,
+        MAX(t.release_type_tag) AS release_type_tag,
         MIN(t.genre) AS genre,
         SUM(f.duration_sec) AS duration_sec
     FROM tracks t
@@ -421,11 +422,14 @@ class LibraryStore:
         is_synthetic = bool(int(row["is_synthetic"] or 0))
         total_tracks_tag = row["total_tracks_tag"]
         max_track_number = row["max_track_number"]
+        tag_raw = row["release_type_tag"]
+        release_type_tag = str(tag_raw) if tag_raw else None
         completeness, release_type, expected = infer_release_metadata(
             track_count=track_count,
             is_synthetic=is_synthetic,
             total_tracks_tag=int(total_tracks_tag) if total_tracks_tag is not None else None,
             max_track_number=int(max_track_number) if max_track_number is not None else None,
+            release_type_tag=release_type_tag,
         )
         duration = row["duration_sec"]
         return Release(

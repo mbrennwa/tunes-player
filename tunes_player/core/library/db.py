@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS tracks (
     year INTEGER,
     is_synthetic INTEGER NOT NULL DEFAULT 0,
     total_tracks INTEGER,
-    genre TEXT
+    genre TEXT,
+    release_type_tag TEXT
 );
 
 CREATE TABLE IF NOT EXISTS album_art (
@@ -161,6 +162,8 @@ def _migrate(connection: sqlite3.Connection) -> None:
         _migrate_v5(connection)
     if stored_version < 6:
         connection.executescript(_MIGRATION_V6_PLAY_HISTORY)
+    if stored_version < 7:
+        _add_column_if_missing(connection, "tracks", "release_type_tag", "TEXT")
     if stored_version < SCHEMA_VERSION:
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",

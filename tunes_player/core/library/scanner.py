@@ -52,6 +52,7 @@ class _ParsedTrack:
     year: int | None
     genre: str | None
     total_tracks: int | None
+    release_type_tag: str | None
 
 
 class LibraryScanner:
@@ -249,8 +250,9 @@ class LibraryScanner:
             """
             INSERT INTO tracks(
                 id, file_id, album_id, title, artist, album_artist, album,
-                disc_number, track_number, year, is_synthetic, total_tracks, genre
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                disc_number, track_number, year, is_synthetic, total_tracks, genre,
+                release_type_tag
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ids.track_id(parsed.path),
@@ -266,6 +268,7 @@ class LibraryScanner:
                 1 if parsed.is_synthetic else 0,
                 parsed.total_tracks,
                 parsed.genre,
+                parsed.release_type_tag,
             ),
         )
 
@@ -322,7 +325,22 @@ def _parse_file(path: Path, mtime_ns: int, size_bytes: int) -> _ParsedTrack:
         year=tags.get("year"),
         genre=tags.get("genre"),
         total_tracks=total_tracks,
+        release_type_tag=_release_type_tag_from_tags(tags),
     )
+
+
+def _release_type_tag_from_tags(tags: dict) -> str | None:
+    for key in (
+        "releasetype",
+        "release_type",
+        "albumtype",
+        "musicbrainz_albumtype",
+        "musicbrainz album type",
+    ):
+        value = tags.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
 
 
 def _album_tag_missing(album: str | None) -> bool:
@@ -368,8 +386,35 @@ def _read_mutagen_id3(path: Path) -> dict:
 
     audio = MP3(path, ID3=EasyID3)
     tags = _tags_from_easyid3(audio.tags or {})
+    tags.update(_id3_extra_tags(path))
     tags.update(_audio_info(audio.info))
     return tags
+
+
+def _id3_extra_tags(path: Path) -> dict:
+    """Read MusicBrainz album type and similar TXXX frames not in EasyID3."""
+    from mutagen.mp3 import MP3
+
+    try:
+        audio = MP3(path)
+    except Exception:
+        return {}
+    if audio.tags is None:
+        return {}
+    extra: dict = {}
+    for frame in audio.tags.values():
+        frame_id = getattr(frame, "FrameID", "")
+        if frame_id != "TXXX":
+            continue
+        desc = str(getattr(frame, "desc", "") or "")
+        desc_key = desc.strip().casefold()
+        if desc_key not in {"musicbrainz album type", "albumtype", "release type"}:
+            continue
+        text = getattr(frame, "text", None)
+        if text:
+            extra["musicbrainz_albumtype"] = str(text[0])
+            break
+    return extra
 
 
 def _read_mutagen_vorbis(path: Path) -> dict:
@@ -441,6 +486,10 @@ def _tags_from_vorbis(audio) -> dict:
         ("tracktotal", "totaltracks"),
         ("date", "year"),
         ("genre", "genre"),
+        ("releasetype", "releasetype"),
+        ("release-type", "releasetype"),
+        ("musicbrainz_albumtype", "musicbrainz_albumtype"),
+        ("musicbrainz album type", "musicbrainz_albumtype"),
     ):
         value = getter(key)
         if not value:
@@ -466,6 +515,9 @@ def _tags_from_easyid3(tags) -> dict:
         ("tracktotal", "totaltracks"),
         ("date", "year"),
         ("genre", "genre"),
+        ("releasetype", "releasetype"),
+        ("release-type", "releasetype"),
+        ("musicbrainz_albumtype", "musicbrainz_albumtype"),
     ):
         if key not in tags:
             continue
