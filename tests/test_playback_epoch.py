@@ -20,10 +20,13 @@ class _FakeEngine:
         self._playing = True
         self.loaded_uri: str | None = None
 
-    def load(self, uri: str, *, start_sec: float = 0) -> None:
+    def load(self, uri: str, *, start_sec: float = 0, output_profile: object = None) -> None:
         self.loaded_uri = uri
         self._position_sec = start_sec
         self._playing = True
+
+    def set_output_profile(self, profile: object) -> None:
+        pass
 
     def play(self) -> None:
         self._playing = True

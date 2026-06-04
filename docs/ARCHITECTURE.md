@@ -82,7 +82,7 @@ others) with rationale and collisions are in **[docs/NAMING.md](NAMING.md)**.
 | `Release` / `Track` models | Done — unified release across local + streaming |
 | `PlayableSource` + `resolve_track` | Done (`core/backends/`) |
 | `PlaybackEngine` + `MpvEngine` | Done — queue, skip, seek, events |
-| Device volume + bit-perfect profile | Partial — PipeWire/Pulse via `wpctl`/`pactl`; exclusive ALSA not done |
+| Device volume + bit-perfect profile | Done (Linux) — ALSA direct, format match, optional exclusive access, honest playback labels |
 | MPRIS + GDK media keys | Done |
 | GTK shell (search, New Releases, Suggest Music, source filter, queue sheet) | Done |
 | Settings (Sources, Audio, Application, Diagnostics) | Done |
@@ -753,31 +753,22 @@ Today only the mpv-side half is done (volume 100%, ReplayGain off, device/sink
 volume when `_unity_gain_profile()` is true). PCM may still be resampled or
 mixed by PipeWire/Pulse before the DAC.
 
-**Done:**
+**Done (Linux v1):**
 
-- [x] mpv soft gain disabled when bit-perfect is effective (`volume=100`, no ReplayGain).
-- [x] Volume slider routes to **VolumeController** (PipeWire/Pulse sink), not mpv gain.
-- [x] UI indicates bit-perfect vs software-volume fallback (derived from output path, not a toggle).
+- [x] mpv soft gain disabled when unity-gain path is active (`volume=100`, no ReplayGain).
+- [x] Volume slider routes to **VolumeController** (PipeWire/Pulse sink or ALSA mixer).
+- [x] UI indicates bit-perfect playback vs software-volume fallback and resample notes.
 - [x] Output device selection does not change the system default sink (Tunes-only routing).
 - [x] Output list shows bit-perfect potential per sink (heuristic labels).
+- [x] Direct ALSA `hw:` path with per-track rate/format matching (`alsa_caps`, `output_profile`).
+- [x] Optional **Exclusive device access** (Settings) — suspends PipeWire nodes on card via `pw-cli`.
+- [x] Honest labels when resampling (e.g. `resampling 192 → 96 kHz`); no false “bit-perfect” claim.
 
-**Still needed for proper bit-perfect:**
+**Still needed (later):**
 
-- [ ] **Output path** — when bit-perfect is on, prefer direct ALSA (or a PipeWire
-  pro-audio / exclusive node) instead of the default mixed/resampling sink path.
-- [ ] **Exclusive / hog mode** — where supported, take exclusive device access so
-  nothing else resamples or mixes on that output.
-- [ ] **Rate and format matching** — configure mpv/AO so output matches source sample
-  rate, bit depth, and channel layout (no silent resampling).
-- [ ] **Device selection** — let users pick a specific ALSA `hw:` (or equivalent)
-  device, not only a Pulse/PipeWire sink name.
-- [ ] **Profile wiring** — apply the above in `engines/mpv.py` + `platform/linux/audio.py`
-  when constructing `MpvEngine` (see [Bit-perfect playback](#bit-perfect-playback-requirement));
-  keep PipeWire-first path for non-bit-perfect / device-volume use.
-- [ ] **UI honesty** — show which output path is active (e.g. sink vs direct ALSA,
-  exclusive on/off) so users know bit-perfect status is intact.
-- [ ] **Platform parity (later)** — WASAPI exclusive (Windows), CoreAudio hog mode
-  (macOS); same `PlaybackEngine` profile idea, different platform backends.
+- [ ] **Platform parity** — WASAPI exclusive (Windows), CoreAudio hog mode (macOS).
+- [ ] **PipeWire pro-audio node** — optional exclusive path without full PW suspend.
+- [ ] **Mixer at 100%** footnote when claiming bit-perfect playback with hardware volume &lt; max.
 
 ---
 

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
+
+if TYPE_CHECKING:
+    from tunes_player.core.playback.output_profile import PlaybackOutputProfile
 
 EngineEvent = Literal[
     "position_changed",
@@ -16,7 +19,15 @@ EngineEvent = Literal[
 class PlaybackEngine(Protocol):
     """Load URIs and emit lifecycle events from a background thread."""
 
-    def load(self, uri: str, *, start_sec: float = 0) -> None: ...
+    def load(
+        self,
+        uri: str,
+        *,
+        start_sec: float = 0,
+        output_profile: PlaybackOutputProfile | None = None,
+    ) -> None: ...
+
+    def set_output_profile(self, profile: PlaybackOutputProfile | None) -> None: ...
 
     def play(self) -> None: ...
 

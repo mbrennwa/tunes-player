@@ -38,6 +38,24 @@ def _format_sample_rate_hz(hz: int) -> str:
     return f"{khz:g} kHz"
 
 
+def format_rate_label(hz: int) -> str:
+    """Short rate label for resample notes (e.g. 192 kHz)."""
+    return _format_sample_rate_hz(hz)
+
+
+def format_playback_status(
+    format_label: str,
+    *,
+    playback_note: str | None = None,
+) -> str:
+    """Combine file format line with honest playback path note."""
+    if not playback_note:
+        return format_label
+    if playback_note == "bit-perfect playback":
+        return f"{format_label} · {playback_note}"
+    return f"{format_label} · {playback_note}"
+
+
 def local_file_format_label(metadata: FileMetadata | None) -> str:
     """Lossless: bit-depth / sample-rate; lossy: compression codec (e.g. MP3)."""
     if metadata is None:

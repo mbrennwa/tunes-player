@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 
 from tunes_player.core.config import ConfigManager
+from unittest.mock import patch
+
 from tunes_player.platform.linux.audio import (
     NullVolumeController,
     _parse_wpctl_sink_line,
@@ -37,10 +39,25 @@ class WpctlParsingTests(unittest.TestCase):
         self.assertIn("HD Audio", match.group("name"))
 
     def test_parse_status_block_finds_sinks(self) -> None:
-        endpoints = _parse_wpctl_status_sinks(_WPCTL_SAMPLE)
+        def fake_inspect(sink_id: str) -> tuple[str | None, str | None]:
+            mapping = {
+                "48": ("alsa_output.pci.analog-stereo", "HD Audio Controller Analog Stereo"),
+                "68": ("alsa_output.pci.hdmi-stereo", "HDMI Stereo"),
+            }
+            return mapping.get(sink_id, (None, None))
+
+        with patch(
+            "tunes_player.platform.linux.audio._wpctl_inspect_sink",
+            side_effect=fake_inspect,
+        ):
+            endpoints = _parse_wpctl_status_sinks(_WPCTL_SAMPLE)
         self.assertEqual(len(endpoints), 2)
-        self.assertEqual(endpoints[0].id, "48")
+        self.assertEqual(endpoints[0].id, "pw:alsa_output.pci.analog-stereo")
+        self.assertEqual(endpoints[0].name, "alsa_output.pci.analog-stereo")
+        self.assertEqual(endpoints[0].description, "HD Audio Controller Analog Stereo")
+        self.assertEqual(endpoints[0].control_id, "48")
         self.assertTrue(endpoints[0].is_default)
+        self.assertEqual(endpoints[1].id, "pw:alsa_output.pci.hdmi-stereo")
         self.assertEqual(endpoints[1].bit_perfect_potential, "capable")
 
     def test_null_controller_lists_system_default(self) -> None:

@@ -17,6 +17,21 @@ def is_alsa_endpoint_id(endpoint_id: str | None) -> bool:
     return bool(endpoint_id and endpoint_id.startswith("alsa:"))
 
 
+def pipewire_endpoint_id(sink_name: str) -> str:
+    """Stable config id for a PipeWire/Pulse sink (wpctl numeric ids change)."""
+    return f"pw:{sink_name}"
+
+
+def is_pipewire_endpoint_id(endpoint_id: str | None) -> bool:
+    return bool(endpoint_id and endpoint_id.startswith("pw:"))
+
+
+def pipewire_name_from_endpoint_id(endpoint_id: str) -> str | None:
+    if not is_pipewire_endpoint_id(endpoint_id):
+        return None
+    return endpoint_id[3:]
+
+
 @dataclass(frozen=True, slots=True)
 class VolumeEndpoint:
     id: str
@@ -24,6 +39,8 @@ class VolumeEndpoint:
     description: str
     is_default: bool = False
     bit_perfect_potential: BitPerfectPotential = "none"
+    # wpctl/pactl target (numeric id); config uses stable ``id`` instead.
+    control_id: str | None = None
 
 
 class VolumeController(Protocol):

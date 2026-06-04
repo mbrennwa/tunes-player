@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from tunes_player.core.playback.engine import EngineEvent
+from tunes_player.core.playback.output_profile import PlaybackOutputProfile
 
 if TYPE_CHECKING:
     from mpv import MPV
@@ -19,17 +20,19 @@ _POSITION_INTERVAL_SEC = 0.1
 
 def create_mpv_engine(
     *,
-    bit_perfect: bool = False,
+    unity_gain: bool = False,
     volume: float = 0.72,
     audio_device: str | None = None,
     use_device_output: bool = False,
+    output_profile: PlaybackOutputProfile | None = None,
     on_event: EngineCallback | None = None,
 ) -> MpvEngine:
     return MpvEngine(
-        bit_perfect=bit_perfect,
+        unity_gain=unity_gain,
         volume=volume,
         audio_device=audio_device,
         use_device_output=use_device_output,
+        output_profile=output_profile,
         on_event=on_event,
     )
 
@@ -50,12 +53,17 @@ class MpvEngine:
     def __init__(
         self,
         *,
-        bit_perfect: bool = False,
+        unity_gain: bool = False,
         volume: float = 0.72,
         audio_device: str | None = None,
         use_device_output: bool = False,
+        output_profile: PlaybackOutputProfile | None = None,
         on_event: EngineCallback | None = None,
+        # Back-compat for tests
+        bit_perfect: bool | None = None,
     ) -> None:
+        if bit_perfect is not None:
+            unity_gain = bit_perfect
         try:
             import mpv as mpv_module
         except OSError as exc:
@@ -68,9 +76,10 @@ class MpvEngine:
             ) from exc
 
         self._mpv_module = mpv_module
-        self._bit_perfect = bit_perfect
+        self._unity_gain = unity_gain
         self._volume = volume
-        self._software_volume = not bit_perfect and not use_device_output
+        self._output_profile = output_profile
+        self._software_volume = not unity_gain and not use_device_output
         self._on_event = on_event
         self._loaded_uri: str | None = None
         self._position_sec = 0.0
@@ -88,20 +97,14 @@ class MpvEngine:
             "input_vo_keyboard": False,
             "ytdl": False,
         }
-        # Skip JACK in the probe order — it is rarely used and spams stderr when absent.
-        if use_device_output:
-            # Route through PipeWire/Pulse so wpctl/pactl sink volume affects playback.
-            options["ao"] = "pipewire,pulse,alsa,sndio"
-        else:
-            options["ao"] = "sndio,pulse,alsa,pipewire"
-        if bit_perfect:
+        options.update(_base_audio_options(output_profile, use_device_output))
+        if unity_gain:
             options["volume"] = 100
             options["replaygain"] = "no"
         else:
             options["volume"] = max(0.0, min(100.0, volume * 100.0))
 
         self._player: MPV = mpv_module.MPV(**options)
-        # TIDAL (and other DASH/HLS) manifests fetch HTTPS segments via ffmpeg.
         self._configure_stream_demuxer()
         if audio_device:
             self._player.audio_device = audio_device
@@ -122,10 +125,29 @@ class MpvEngine:
         if audio_device:
             self._player.audio_device = audio_device
 
+    def set_output_profile(self, profile: PlaybackOutputProfile | None) -> None:
+        self._output_profile = profile
+        if profile is None or not profile.direct_alsa:
+            return
+        self._player.ao = "alsa"
+        if profile.use_exclusive:
+            self._player.audio_exclusive = "yes"
+        else:
+            self._player.audio_exclusive = "no"
+
     def set_event_callback(self, callback: EngineCallback | None) -> None:
         self._on_event = callback
 
-    def load(self, uri: str, *, start_sec: float = 0) -> None:
+    def load(
+        self,
+        uri: str,
+        *,
+        start_sec: float = 0,
+        output_profile: PlaybackOutputProfile | None = None,
+    ) -> None:
+        profile = output_profile if output_profile is not None else self._output_profile
+        if profile is not None:
+            self._apply_track_format(profile)
         self._loaded_uri = uri
         self._track_end_signaled = False
         self._position_sec = max(0.0, start_sec)
@@ -138,6 +160,22 @@ class MpvEngine:
         self._playing = True
         self._emit("duration_changed")
         self._emit("playing_changed")
+
+    def _apply_track_format(self, profile: PlaybackOutputProfile) -> None:
+        if not profile.direct_alsa:
+            return
+        self._player.replaygain = "no"
+        self._player.volume = 100
+        if profile.allow_resample:
+            self._player.audio_resample = "yes"
+        else:
+            self._player.audio_resample = "no"
+        if profile.target_rate is not None:
+            self._player.audio_samplerate = profile.target_rate
+        if profile.audio_format is not None:
+            self._player.audio_format = profile.audio_format
+        if profile.target_channels is not None:
+            self._player.audio_channels = profile.target_channels
 
     def play(self) -> None:
         if self._loaded_uri is None:
@@ -180,12 +218,13 @@ class MpvEngine:
 
     def set_volume(self, level: float) -> None:
         self._volume = max(0.0, min(1.0, level))
-        if self._bit_perfect:
+        if self._unity_gain:
             return
         self._apply_software_volume()
 
     def set_bit_perfect(self, enabled: bool) -> None:
-        self._bit_perfect = enabled
+        """Unity gain in mpv (no soft volume)."""
+        self._unity_gain = enabled
         self._player.replaygain = "no"
         if enabled or not self._software_volume:
             self._player.volume = 100
@@ -272,7 +311,6 @@ class MpvEngine:
 
         @player.property_observer("eof-reached")
         def _on_eof_reached(_name: str, value: object) -> None:
-            # keep_open=yes pauses at EOF without an end-file(EOF) event.
             if self._eof_reached(value):
                 self._signal_track_finished()
 
@@ -291,3 +329,17 @@ class MpvEngine:
     def _emit(self, event: EngineEvent) -> None:
         if self._on_event is not None:
             self._on_event(event)
+
+
+def _base_audio_options(
+    profile: PlaybackOutputProfile | None,
+    use_device_output: bool,
+) -> dict[str, object]:
+    if profile is not None and profile.direct_alsa:
+        opts: dict[str, object] = {"ao": "alsa", "replaygain": "no"}
+        if profile.use_exclusive:
+            opts["audio_exclusive"] = "yes"
+        return opts
+    if use_device_output:
+        return {"ao": "pipewire,pulse,alsa,sndio"}
+    return {"ao": "sndio,pulse,alsa,pipewire"}

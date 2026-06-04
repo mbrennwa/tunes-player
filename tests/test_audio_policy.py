@@ -38,16 +38,17 @@ class _SinkVolumeController:
     def list_endpoints(self) -> list[VolumeEndpoint]:
         return [
             VolumeEndpoint(
-                id="42",
+                id="pw:alsa_output.usb-Foo",
                 name="alsa_output.usb-Foo",
                 description="USB DAC",
                 is_default=True,
                 bit_perfect_potential="capable",
+                control_id="42",
             )
         ]
 
     def get_active_endpoint_id(self) -> str | None:
-        return "42"
+        return "pw:alsa_output.usb-Foo"
 
     def set_active_endpoint(self, endpoint_id: str) -> None:
         self._config.output_sink_id = endpoint_id
@@ -96,7 +97,7 @@ class AudioPolicyTests(unittest.TestCase):
             service = PlayerService(config=config, volume_controller=_SinkVolumeController(config.config))
             state = service.get_playback_state()
             self.assertTrue(state.device_volume)
-            self.assertTrue(state.bit_perfect)
+            self.assertFalse(state.bit_perfect_playback)
             self.assertFalse(state.mpv_soft_volume)
 
     def test_software_volume_when_no_sink_and_fallback_allowed(self) -> None:
@@ -106,7 +107,7 @@ class AudioPolicyTests(unittest.TestCase):
             service = PlayerService(config=config, volume_controller=None)
             state = service.get_playback_state()
             self.assertFalse(state.device_volume)
-            self.assertFalse(state.bit_perfect)
+            self.assertFalse(state.bit_perfect_playback)
             self.assertTrue(state.mpv_soft_volume)
 
     def test_no_volume_control_when_fallback_disabled(self) -> None:
@@ -118,7 +119,7 @@ class AudioPolicyTests(unittest.TestCase):
             service = PlayerService(config=config, volume_controller=None)
             state = service.get_playback_state()
             self.assertTrue(state.no_volume_control)
-            self.assertTrue(state.bit_perfect)
+            self.assertFalse(state.bit_perfect_playback)
 
     def test_output_using_fallback_when_saved_sink_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -135,8 +136,8 @@ class AudioPolicyTests(unittest.TestCase):
             config = ConfigManager(Path(tmp) / "config.json")
             config.load()
             controller = _SinkVolumeController(config.config)
-            controller.set_active_endpoint("42")
-            self.assertEqual(config.config.output_sink_id, "42")
+            controller.set_active_endpoint("pw:alsa_output.usb-Foo")
+            self.assertEqual(config.config.output_sink_id, "pw:alsa_output.usb-Foo")
 
 
 if __name__ == "__main__":

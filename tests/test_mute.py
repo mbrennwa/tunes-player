@@ -32,7 +32,10 @@ class _VolumeEngine:
     def set_event_callback(self, callback: object) -> None:
         pass
 
-    def load(self, uri: str, *, start_sec: float = 0) -> None:
+    def load(self, uri: str, *, start_sec: float = 0, output_profile: object = None) -> None:
+        pass
+
+    def set_output_profile(self, profile: object) -> None:
         pass
 
     def play(self) -> None:

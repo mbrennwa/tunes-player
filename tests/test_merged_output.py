@@ -117,6 +117,52 @@ class MergedOutputTests(unittest.TestCase):
                 self.assertFalse(controller.uses_device_volume)
                 self.assertEqual(controller.mpv_audio_device(), "alsa/hw:0,0")
 
+    def test_exclusive_access_supported_for_alsa_hw(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ConfigManager(Path(tmp) / "config.json")
+            config.load()
+            controller = LinuxOutputController(config.config)
+            with (
+                patch.object(
+                    controller,
+                    "_alsa_volume_endpoints",
+                    return_value=[
+                        VolumeEndpoint(
+                            id="alsa:hw:0:0",
+                            name="hw:0,0",
+                            description="ALSA",
+                            bit_perfect_potential="direct",
+                        )
+                    ],
+                ),
+                patch.object(controller, "_list_sink_endpoints", return_value=[]),
+            ):
+                controller.set_active_endpoint("alsa:hw:0:0")
+                self.assertTrue(controller.exclusive_access_supported())
+
+    def test_exclusive_access_not_supported_for_pw_sink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ConfigManager(Path(tmp) / "config.json")
+            config.load()
+            controller = LinuxOutputController(config.config)
+            with (
+                patch.object(controller, "_alsa_volume_endpoints", return_value=[]),
+                patch.object(
+                    controller,
+                    "_list_sink_endpoints",
+                    return_value=[
+                        VolumeEndpoint(
+                            id="99",
+                            name="pw-sink",
+                            description="PW",
+                            is_default=True,
+                        )
+                    ],
+                ),
+            ):
+                controller.set_active_endpoint("99")
+                self.assertFalse(controller.exclusive_access_supported())
+
     def test_create_volume_controller_returns_merged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = ConfigManager(Path(tmp) / "config.json")

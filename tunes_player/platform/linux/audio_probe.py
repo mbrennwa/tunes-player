@@ -43,7 +43,7 @@ def probe_linux_audio_stack() -> LinuxAudioStackInfo:
                     backend="PipeWire",
                     detail="WirePlumber (wpctl)",
                     settings_hint=(
-                        "ALSA hardware is listed first (preferred for bit-perfect). "
+                        "ALSA hardware is listed first (preferred for bit-perfect playback). "
                         "PipeWire sinks are available for mixer volume control."
                     ),
                 )

@@ -26,7 +26,13 @@ from tunes_player.core.library import LibraryStore, ScanResult
 from tunes_player.core.library.scan_worker import create_scan_process
 from tunes_player.core.models import Album, Release, Source, Track
 from tunes_player.core.playback.engine import EngineEvent, PlaybackEngine
-from tunes_player.core.volume import VolumeController, VolumeEndpoint
+from tunes_player.core.playback.output_profile import (
+    PlaybackOutputProfile,
+    PlaybackPathInfo,
+    compute_output_profile,
+)
+from tunes_player.core.playback_quality import format_playback_status
+from tunes_player.core.volume import VolumeController, VolumeEndpoint, is_alsa_endpoint_id
 
 EventCallback = Callable[[str], None]
 Unsubscribe = Callable[[], None]
@@ -52,7 +58,8 @@ class PlaybackState:
     queue: tuple[Track, ...]
     queue_index: int
     quality_hint: str
-    bit_perfect: bool
+    bit_perfect_playback: bool
+    playback_note: str | None
     device_volume: bool
     mpv_soft_volume: bool
     no_volume_control: bool
@@ -87,12 +94,21 @@ class PlayerService:
                 self._volume = self._volume_controller.get_level()
             except OSError:
                 self._device_volume = False
+        normalize = getattr(
+            self._volume_controller, "normalize_output_sink_config", None
+        )
+        if callable(normalize) and normalize():
+            self._config_manager.save()
         self._device_output_fallback = False
         self._is_playing = False
         self._queue: list[Track] = []
         self._queue_index = -1
         self._current_track: Track | None = None
         self._quality_hint = ""
+        self._playback_note: str | None = None
+        self._bit_perfect_playback = False
+        self._output_profile: PlaybackOutputProfile | None = None
+        self._exclusive_session: object | None = None
         self._position_sec = 0.0
         self._position_synced_at: float | None = None
         self._duration_sec: float | None = None
@@ -491,7 +507,8 @@ class PlayerService:
             queue=tuple(self._queue),
             queue_index=self._queue_index,
             quality_hint=self._quality_hint,
-            bit_perfect=self._unity_gain_profile(),
+            bit_perfect_playback=self._bit_perfect_playback,
+            playback_note=self._playback_note,
             device_volume=self._device_volume,
             mpv_soft_volume=self._mpv_soft_volume(),
             no_volume_control=self._no_volume_control(),
@@ -712,33 +729,21 @@ class PlayerService:
     def set_output_sink(self, endpoint_id: str) -> None:
         if self._volume_controller is None:
             return
+        self._release_exclusive_session()
         self._volume_controller.set_active_endpoint(endpoint_id)
+        self._config_manager.config.output_sink_id = endpoint_id
         self._config_manager.save()
-        self._device_volume = self._has_device_volume()
-        engine = self._engine
-        if engine is not None:
-            if hasattr(engine, "set_bit_perfect"):
-                engine.set_bit_perfect(self._unity_gain_profile())
-            engine.set_volume(self._mpv_volume_level())
-            device = self._mpv_audio_device()
-            if device and hasattr(engine, "set_audio_device"):
-                engine.set_audio_device(device)
-            track = self._current_track
-            if track is not None:
-                source = resolve_track(
-                    self._store, track.id, tidal=self._tidal, qobuz=self._qobuz
-                )
-                if source is not None:
-                    pos = engine.get_position()
-                    playing = engine.is_playing()
-                    engine.load(source.playback_target, start_sec=pos)
-                    if not playing:
-                        engine.pause()
+        self._rebuild_engine_for_output_change()
         self._emit("playback_changed")
 
     def list_output_sinks(self) -> list[VolumeEndpoint]:
         if self._volume_controller is None:
             return []
+        normalize = getattr(
+            self._volume_controller, "normalize_output_sink_config", None
+        )
+        if callable(normalize) and normalize():
+            self._config_manager.save()
         return self._volume_controller.list_endpoints()
 
     def get_linux_audio_stack_info(self) -> object:
@@ -758,10 +763,25 @@ class PlayerService:
         self._allow_software_volume_fallback = enabled
         self._config_manager.config.allow_software_volume_fallback = enabled
         self._config_manager.save()
-        engine = self._engine
-        if engine is not None:
-            engine.set_bit_perfect(self._unity_gain_profile())
-            engine.set_volume(self._mpv_volume_level())
+        self._apply_engine_volume_policy()
+        self._emit("playback_changed")
+
+    def exclusive_access_supported(self) -> bool:
+        controller = self._volume_controller
+        if controller is None:
+            return False
+        supported = getattr(controller, "exclusive_access_supported", None)
+        if callable(supported):
+            return bool(supported())
+        return False
+
+    def set_exclusive_device_access(self, enabled: bool) -> None:
+        if enabled == self._config_manager.config.exclusive_device_access:
+            return
+        self._config_manager.config.exclusive_device_access = enabled
+        self._config_manager.save()
+        self._release_exclusive_session()
+        self._rebuild_engine_for_output_change()
         self._emit("playback_changed")
 
     def poll_playback(self) -> None:
@@ -774,6 +794,7 @@ class PlayerService:
             self._handle_engine_event(event)
 
     def shutdown(self) -> None:
+        self._release_exclusive_session()
         if self._engine is not None:
             self._engine.quit()
             self._engine = None
@@ -791,7 +812,141 @@ class PlayerService:
         controller = self._volume_controller
         return controller is not None and controller.available() and controller.uses_device_volume
 
+    def _active_endpoint_id(self) -> str | None:
+        if self._volume_controller is None:
+            return None
+        return self._volume_controller.get_active_endpoint_id()
+
+    def _hw_caps_for_endpoint(self, endpoint_id: str | None):
+        if not is_alsa_endpoint_id(endpoint_id):
+            return None
+        try:
+            from tunes_player.platform.linux.alsa_caps import caps_for_endpoint
+
+            return caps_for_endpoint(
+                endpoint_id,
+                data_dir=self._config_manager.data_dir,
+            )
+        except ImportError:
+            return None
+
+    def _compute_playback_profile_for_track(
+        self, track: Track
+    ) -> tuple[PlaybackOutputProfile, PlaybackPathInfo]:
+        file_meta = None
+        if track.id.startswith("local:"):
+            file_meta = self._store.get_file_metadata(track.id)
+        return compute_output_profile(
+            file_meta=file_meta,
+            hw_caps=self._hw_caps_for_endpoint(self._active_endpoint_id()),
+            endpoint_id=self._active_endpoint_id(),
+            exclusive_enabled=self._config_manager.config.exclusive_device_access,
+            device_volume=self._device_volume,
+            mpv_soft_volume=self._mpv_soft_volume(),
+        )
+
+    def _compute_playback_profile_for_current(
+        self,
+    ) -> tuple[PlaybackOutputProfile, PlaybackPathInfo]:
+        track = self._current_track
+        if track is None:
+            return compute_output_profile(
+                file_meta=None,
+                hw_caps=self._hw_caps_for_endpoint(self._active_endpoint_id()),
+                endpoint_id=self._active_endpoint_id(),
+                exclusive_enabled=self._config_manager.config.exclusive_device_access,
+                device_volume=self._device_volume,
+                mpv_soft_volume=self._mpv_soft_volume(),
+            )
+        return self._compute_playback_profile_for_track(track)
+
+    def _apply_path_info(self, path_info: PlaybackPathInfo) -> None:
+        self._bit_perfect_playback = path_info.bit_perfect_playback
+        self._playback_note = path_info.playback_note
+
+    def _acquire_exclusive_session_if_needed(self, profile: PlaybackOutputProfile) -> None:
+        if not profile.direct_alsa or not profile.use_exclusive:
+            return
+        controller = self._volume_controller
+        if controller is None:
+            return
+        card_getter = getattr(controller, "active_alsa_card", None)
+        if not callable(card_getter):
+            return
+        card = card_getter()
+        if card is None:
+            return
+        try:
+            from tunes_player.platform.linux.exclusive_session import (
+                acquire_exclusive_session,
+            )
+
+            self._exclusive_session = acquire_exclusive_session(card)
+        except ImportError:
+            pass
+
+    def _release_exclusive_session(self) -> None:
+        if self._exclusive_session is None:
+            return
+        try:
+            from tunes_player.platform.linux.exclusive_session import (
+                release_exclusive_session,
+            )
+
+            release_exclusive_session(self._exclusive_session)
+        except ImportError:
+            pass
+        self._exclusive_session = None
+
+    def _apply_engine_volume_policy(self) -> None:
+        engine = self._engine
+        if engine is None:
+            return
+        if hasattr(engine, "set_bit_perfect"):
+            engine.set_bit_perfect(self._unity_gain_profile())
+        engine.set_volume(self._mpv_volume_level())
+
+    def _rebuild_engine_for_output_change(self) -> None:
+        self._device_volume = self._has_device_volume()
+        track = self._current_track
+        pos = 0.0
+        playing = False
+        engine = self._engine
+        if engine is not None:
+            pos = engine.get_position()
+            playing = engine.is_playing()
+        self._reset_engine()
+        if track is None:
+            return
+        source = resolve_track(
+            self._store, track.id, tidal=self._tidal, qobuz=self._qobuz
+        )
+        if source is None:
+            return
+        engine = self._ensure_engine()
+        if engine is None:
+            return
+        profile, path_info = self._compute_playback_profile_for_track(track)
+        self._output_profile = profile
+        self._apply_path_info(path_info)
+        self._acquire_exclusive_session_if_needed(profile)
+        self._set_current_track(
+            track,
+            format_label=source.format_label,
+            playback_note=path_info.playback_note,
+        )
+        if hasattr(engine, "set_output_profile"):
+            engine.set_output_profile(profile)
+        engine.load(
+            source.playback_target,
+            start_sec=pos,
+            output_profile=profile,
+        )
+        if not playing:
+            engine.pause()
+
     def _reset_engine(self) -> None:
+        self._release_exclusive_session()
         engine = self._engine
         if engine is not None:
             engine.quit()
@@ -837,7 +992,10 @@ class PlayerService:
         if engine is None:
             self._notify_playback_unavailable()
             return False
-        engine.load(source.playback_target, start_sec=pos)
+        profile, path_info = self._compute_playback_profile_for_track(track)
+        self._output_profile = profile
+        self._apply_path_info(path_info)
+        engine.load(source.playback_target, start_sec=pos, output_profile=profile)
         if not playing:
             engine.pause()
         engine.set_volume(self._volume)
@@ -882,11 +1040,15 @@ class PlayerService:
         try:
             from tunes_player.engines.mpv import create_mpv_engine
 
+            profile, path_info = self._compute_playback_profile_for_current()
+            self._output_profile = profile
+            self._apply_path_info(path_info)
             self._engine = create_mpv_engine(
-                bit_perfect=self._unity_gain_profile(),
+                unity_gain=self._unity_gain_profile(),
                 volume=self._mpv_volume_level(),
                 audio_device=self._mpv_audio_device(),
-                use_device_output=self._device_volume,
+                use_device_output=self._device_volume and not profile.direct_alsa,
+                output_profile=profile,
                 on_event=self._on_engine_event,
             )
         except RuntimeError as exc:
@@ -919,9 +1081,24 @@ class PlayerService:
             self._notify_playback_unavailable()
             return
         self._engine_error = None
-        self._set_current_track(track, format_label=source.format_label)
+        profile, path_info = self._compute_playback_profile_for_track(track)
+        self._output_profile = profile
+        self._apply_path_info(path_info)
+        self._set_current_track(
+            track,
+            format_label=source.format_label,
+            playback_note=path_info.playback_note,
+        )
         self._record_playback(track)
-        engine.load(source.playback_target, start_sec=source.start_sec)
+        self._release_exclusive_session()
+        self._acquire_exclusive_session_if_needed(profile)
+        if self._engine is not None and hasattr(self._engine, "set_output_profile"):
+            self._engine.set_output_profile(profile)
+        engine.load(
+            source.playback_target,
+            start_sec=source.start_sec,
+            output_profile=profile,
+        )
         if not resume:
             engine.pause()
         self._sync_from_engine()
@@ -966,14 +1143,18 @@ class PlayerService:
         return None
 
     def _set_current_track(
-        self, track: Track, *, format_label: str | None = None
+        self,
+        track: Track,
+        *,
+        format_label: str | None = None,
+        playback_note: str | None = None,
     ) -> None:
         self._playback_epoch += 1
         self._current_track = track
         if format_label is not None:
-            self._quality_hint = format_label
+            base_hint = format_label
         elif track.source.value == "tidal":
-            self._quality_hint = (
+            base_hint = (
                 self._tidal.stream_format_label(track.id)
                 if self._tidal is not None
                 else "Unknown format"
@@ -981,12 +1162,14 @@ class PlayerService:
         elif track.source.value == "qobuz":
             from tunes_player.core.playback_quality import qobuz_stream_format_label
 
-            self._quality_hint = qobuz_stream_format_label(
+            base_hint = qobuz_stream_format_label(
                 self._config_manager.config.qobuz_stream_format_id
             )
         else:
             metadata = self._store.get_file_metadata(track.id)
-            self._quality_hint = LibraryStore.quality_hint(metadata)
+            base_hint = LibraryStore.quality_hint(metadata)
+        note = playback_note if playback_note is not None else self._playback_note
+        self._quality_hint = format_playback_status(base_hint, playback_note=note)
         self._duration_sec = track.duration_sec
         self._reset_playback_position(0.0)
 

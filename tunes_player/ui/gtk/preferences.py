@@ -83,6 +83,18 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._output_row.set_activatable_widget(self._output_dropdown)
         audio.add(self._output_row)
 
+        self._exclusive_row = Adw.SwitchRow(
+            title="Exclusive device access",
+            subtitle=(
+                "Other apps can share the device; may prevent bit-perfect playback."
+            ),
+            active=service.config.config.exclusive_device_access,
+        )
+        self._exclusive_row.connect(
+            "notify::active", self._on_exclusive_device_access_changed
+        )
+        audio.add(self._exclusive_row)
+
         self._software_volume_row = Adw.SwitchRow(
             title="Allow software volume",
             subtitle="For devices with fixed volume",
@@ -205,6 +217,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._tidal_oauth_poll_id = 0
         self._tidal_sign_in_dialog: Adw.AlertDialog | None = None
         self._tidal_sign_in_dialog_presented = False
+        self._updating_output_dropdown = False
         self._reload_folders()
         self._reload_tidal_status()
         self._reload_qobuz_status()
@@ -302,42 +315,89 @@ class PreferencesWindow(Adw.PreferencesWindow):
         if row is None:
             return
         state = self._service.get_playback_state()
-        row.set_sensitive(not state.device_volume)
+        has_device_volume = state.device_volume
+        row.set_sensitive(not has_device_volume)
+        row.handler_block_by_func(self._on_software_volume_fallback_changed)
+        if has_device_volume:
+            row.set_active(False)
+        else:
+            row.set_active(self._service.config.config.allow_software_volume_fallback)
+        row.handler_unblock_by_func(self._on_software_volume_fallback_changed)
+
+    def _sync_exclusive_row(self) -> None:
+        row = getattr(self, "_exclusive_row", None)
+        if row is None:
+            return
+        supported = self._service.exclusive_access_supported()
+        row.set_sensitive(supported)
+        row.handler_block_by_func(self._on_exclusive_device_access_changed)
+        if supported:
+            active = self._service.config.config.exclusive_device_access
+            row.set_active(active)
+            if active:
+                row.set_subtitle("Other apps are paused while Tunes is playing.")
+            else:
+                row.set_subtitle(
+                    "Other apps can share the device; may prevent bit-perfect playback."
+                )
+        else:
+            row.set_active(False)
+            row.set_subtitle("Exclusive access not supported on this device")
+            if self._service.config.config.exclusive_device_access:
+                self._service.set_exclusive_device_access(False)
+        row.handler_unblock_by_func(self._on_exclusive_device_access_changed)
+
+    def _on_exclusive_device_access_changed(self, row: Adw.SwitchRow, *_args: object) -> None:
+        self._service.set_exclusive_device_access(row.get_active())
+        self._sync_exclusive_row()
 
     def _reload_output_sinks(self) -> None:
-        endpoints = self._service.list_output_sinks()
-        if not endpoints:
-            self._output_row.set_sensitive(False)
-            self._output_row.set_subtitle("No controllable sinks found")
-            self._output_dropdown.set_model(Gtk.StringList.new([]))
+        self._updating_output_dropdown = True
+        try:
+            self._output_dropdown.handler_block_by_func(self._on_output_changed)
+            endpoints = self._service.list_output_sinks()
+            if not endpoints:
+                self._output_row.set_sensitive(False)
+                self._output_row.set_subtitle("No controllable sinks found")
+                self._output_dropdown.set_model(Gtk.StringList.new([]))
+                self._sync_software_volume_row()
+                self._sync_exclusive_row()
+                return
+
+            self._output_row.set_sensitive(True)
+            names = [endpoint_dropdown_label(endpoint) for endpoint in endpoints]
+            self._output_dropdown.set_model(Gtk.StringList.new(names))
+
+            active_id = self._service.config.config.output_sink_id
+            selected = 0
+            for index, endpoint in enumerate(endpoints):
+                if endpoint.id == active_id or (
+                    active_id is None and endpoint.is_default
+                ):
+                    selected = index
+                    break
+            self._output_dropdown.set_selected(selected)
+            self._output_row.set_subtitle(self._output_row_subtitle())
             self._sync_software_volume_row()
-            return
-
-        self._output_row.set_sensitive(True)
-        names = [endpoint_dropdown_label(endpoint) for endpoint in endpoints]
-        self._output_dropdown.set_model(Gtk.StringList.new(names))
-
-        active_id = self._service.config.config.output_sink_id
-        selected = 0
-        for index, endpoint in enumerate(endpoints):
-            if endpoint.id == active_id or (active_id is None and endpoint.is_default):
-                selected = index
-                break
-        self._output_dropdown.handler_block_by_func(self._on_output_changed)
-        self._output_dropdown.set_selected(selected)
-        self._output_dropdown.handler_unblock_by_func(self._on_output_changed)
-        self._output_row.set_subtitle(self._output_row_subtitle())
-        self._sync_software_volume_row()
+            self._sync_exclusive_row()
+        finally:
+            self._output_dropdown.handler_unblock_by_func(self._on_output_changed)
+            self._updating_output_dropdown = False
 
     def _on_output_changed(self, dropdown: Gtk.DropDown, *_args: object) -> None:
+        if self._updating_output_dropdown:
+            return
         endpoints = self._service.list_output_sinks()
         index = dropdown.get_selected()
         if index < 0 or index >= len(endpoints):
             return
         endpoint = endpoints[index]
+        if endpoint.id == self._service.config.config.output_sink_id:
+            return
         self._service.set_output_sink(endpoint.id)
         self._output_row.set_subtitle(self._output_row_subtitle())
         self._sync_software_volume_row()
+        self._sync_exclusive_row()
 
     def _on_scan_clicked(self, *_args: object) -> None:
         if self._service.is_scanning():
@@ -406,6 +466,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
             self._reload_qobuz_status()
         elif event in ("playback_changed", "volume_changed"):
             self._sync_software_volume_row()
+            self._sync_exclusive_row()
         return False
 
     def _reload_tidal_status(self) -> None:

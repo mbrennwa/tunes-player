@@ -34,6 +34,7 @@ class AppConfig:
     music_folder_added_at: dict[str, float] = field(default_factory=dict)
     output_sink_id: str | None = None
     allow_software_volume_fallback: bool = True
+    exclusive_device_access: bool = False
     qobuz_app_id: str | None = None
     qobuz_app_secret: str | None = None
     qobuz_stream_format_id: int = 27
@@ -91,6 +92,7 @@ class ConfigManager:
             allow_software_volume_fallback=bool(
                 raw.get("allow_software_volume_fallback", True)
             ),
+            exclusive_device_access=bool(raw.get("exclusive_device_access", False)),
             qobuz_app_id=str(app_id).strip() if app_id else None,
             qobuz_app_secret=str(app_secret).strip() if app_secret else None,
             qobuz_stream_format_id=format_id,
@@ -108,6 +110,7 @@ class ConfigManager:
             "music_folder_added_at": dict(self._config.music_folder_added_at),
             "output_sink_id": self._config.output_sink_id,
             "allow_software_volume_fallback": self._config.allow_software_volume_fallback,
+            "exclusive_device_access": self._config.exclusive_device_access,
             "qobuz_app_id": self._config.qobuz_app_id,
             "qobuz_app_secret": self._config.qobuz_app_secret,
             "qobuz_stream_format_id": self._config.qobuz_stream_format_id,
