@@ -3,6 +3,7 @@
 **Tunes** is a shell to find, discover, and play music from local files and streaming
 catalogs. It is free and open source, built for Linux (GNOME/GTK).
 
+![](data/screenshots/tunes-player.png)
 
 ## Status
 
