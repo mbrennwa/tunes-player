@@ -74,6 +74,30 @@
   border-radius: 0;
 }
 
+/* Track list: square edges flush with hero header (boxed-list rounds list + first row) */
+.release-detail-view list.boxed-list.release-detail-tracks {
+  border-radius: 0;
+  margin-top: 0;
+}
+
+.release-detail-view list.boxed-list.release-detail-tracks > row,
+.release-detail-view list.boxed-list.release-detail-tracks > row.expander row.header {
+  border-radius: 0;
+}
+
+.release-detail-view list.boxed-list.release-detail-tracks > row:first-child,
+.release-detail-view list.boxed-list.release-detail-tracks > row:first-child.expander row.header {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+.release-detail-view list.boxed-list.release-detail-tracks > row:last-child,
+.release-detail-view list.boxed-list.release-detail-tracks > row:last-child.expander:not(:checked),
+.release-detail-view list.boxed-list.release-detail-tracks > row:last-child.expander:not(:checked) row.header {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
 /* Release detail: artist name opens search */
 button.artist-link {
   padding: 0;
