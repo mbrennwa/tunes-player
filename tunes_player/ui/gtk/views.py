@@ -929,6 +929,31 @@ def _overlay_artist_link(name: str, *, on_activate: Callable[[], None]) -> Gtk.B
     return button
 
 
+def _overlay_artist_year_row(
+    release: Release,
+    *,
+    on_artist_search: Callable[[str], None] | None,
+) -> Gtk.Box:
+    """Grid tile overlay: artist (optionally linked) and release year."""
+    row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+    row.set_halign(Gtk.Align.START)
+
+    if on_artist_search is not None:
+        row.append(
+            _overlay_artist_link(
+                release.artist_name,
+                on_activate=lambda name=release.artist_name: on_artist_search(name),
+            )
+        )
+    else:
+        row.append(_overlay_label(release.artist_name, extra_classes=("album-card-meta",)))
+
+    year = str(release.year) if release.year else None
+    if year:
+        row.append(_overlay_label(f" · {year}", extra_classes=("album-card-meta",)))
+    return row
+
+
 def _release_card(
     release: Release,
     *,
@@ -995,17 +1020,12 @@ def _release_card(
     overlay.add_overlay(labels)
 
     labels.append(_overlay_label(release.title, extra_classes=("album-card-title",)))
-    if on_artist_search is not None:
-        labels.append(
-            _overlay_artist_link(
-                release.artist_name,
-                on_activate=lambda name=release.artist_name: on_artist_search(name),
-            )
-        )
-    else:
-        labels.append(_overlay_label(release.artist_name, extra_classes=("album-card-meta",)))
-    track_hint = _format_release_track_count(release)
-    meta = join_detail(source_label(release.source), track_hint)
+    labels.append(_overlay_artist_year_row(release, on_artist_search=on_artist_search))
+    meta = join_detail(
+        _format_release_track_count(release),
+        release.genre,
+        source_label(release.source),
+    )
     labels.append(_overlay_label(meta, extra_classes=("album-card-meta",)))
 
     return shell
