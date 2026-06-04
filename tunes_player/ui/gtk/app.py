@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import gi
 
@@ -64,6 +64,14 @@ _LOADING_MESSAGES = {
 log = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class _SelectionSnapshot:
+    """Shell state plus unfiltered cache for selection-history Back."""
+
+    state: ShellState
+    releases: tuple[Release, ...]
+
+
 class TunesWindow(Adw.ApplicationWindow):
     def __init__(self, *, application: Adw.Application, service: PlayerService) -> None:
         super().__init__(application=application, title=_APP_WINDOW_TITLE)
@@ -81,6 +89,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._sort_switch: ReleaseSortSwitch | None = None
         self._cached_selection_key: tuple[str, str] | None = None
         self._cached_releases: list[Release] = []
+        self._selection_stack: list[_SelectionSnapshot] = []
         self.set_default_size(*_DEFAULT_SIZE)
         self.set_icon_name("tunes-player")
 
@@ -288,9 +297,18 @@ class TunesWindow(Adw.ApplicationWindow):
             title=self._grid_title(state),
         )
 
-    def _set_shell_state(self, state: ShellState, *, reload: bool = True) -> None:
+    def _set_shell_state(
+        self,
+        state: ShellState,
+        *,
+        reload: bool = True,
+        clear_selection_history: bool = True,
+        restoring_history: bool = False,
+    ) -> None:
         identity_changed = self._selection_identity_changed(self._shell_state, state)
-        if identity_changed:
+        if identity_changed and clear_selection_history:
+            self._clear_selection_history()
+        if identity_changed and not restoring_history:
             state = replace(
                 state,
                 enabled_genres=frozenset(),
@@ -300,13 +318,13 @@ class TunesWindow(Adw.ApplicationWindow):
         self._shell_state = state
         self._sync_shell_controls()
         self._schedule_persist()
-        if not reload:
-            return
-        if identity_changed:
-            self._invalidate_selection_cache()
-            self._reload_grid()
-        else:
-            self._display_cached_selection(state)
+        if reload:
+            if identity_changed:
+                self._invalidate_selection_cache()
+                self._reload_grid()
+            else:
+                self._display_cached_selection(state)
+        self._sync_header_with_nav()
 
     def _sync_shell_controls(self) -> None:
         state = self._shell_state
@@ -500,17 +518,29 @@ class TunesWindow(Adw.ApplicationWindow):
         )
 
     def _on_search_activate(self, entry: Gtk.SearchEntry) -> None:
-        query = entry.get_text().strip()
-        if not query:
+        self._navigate_to_search(entry.get_text())
+
+    def _navigate_to_search(self, query: str) -> None:
+        """Run a search query, keeping prior results on the selection Back stack."""
+        text = query.strip()
+        if not text:
             return
-        self._set_shell_state(
-            replace(
-                self._shell_state,
-                base=ShellBase.SEARCH,
-                search_query=query,
-                cached_releases=(),
-            ),
+        next_state = replace(
+            self._shell_state,
+            base=ShellBase.SEARCH,
+            search_query=text,
+            cached_releases=(),
         )
+        same_query = (
+            self._shell_state.base == ShellBase.SEARCH
+            and self._shell_state.search_query.strip() == text
+        )
+        if not same_query and self._selection_identity_changed(self._shell_state, next_state):
+            self._push_selection_history()
+        if not self._nav_at_root():
+            self._main_nav.pop()
+        self._search_entry.set_text(text)
+        self._set_shell_state(next_state, clear_selection_history=False)
 
     def _schedule_persist(self) -> None:
         if self._persist_timeout_id:
@@ -757,18 +787,37 @@ class TunesWindow(Adw.ApplicationWindow):
         self._main_nav.push(page)
         self._sync_header_with_nav()
 
+    def _clear_selection_history(self) -> None:
+        self._selection_stack.clear()
+
+    def _capture_selection_snapshot(self) -> _SelectionSnapshot:
+        state = self._shell_state
+        if self._cache_matches(state) and self._cached_releases:
+            payloads = tuple(
+                release_to_cache_payload(release) for release in self._cached_releases
+            )
+            state = replace(state, cached_releases=payloads)
+        return _SelectionSnapshot(state=state, releases=tuple(self._cached_releases))
+
+    def _push_selection_history(self) -> None:
+        self._selection_stack.append(self._capture_selection_snapshot())
+
+    def _restore_selection_snapshot(self, snapshot: _SelectionSnapshot) -> None:
+        releases = list(snapshot.releases)
+        if not releases and snapshot.state.cached_releases:
+            releases = releases_from_cache_payloads(snapshot.state.cached_releases)
+        self._shell_state = snapshot.state
+        self._sync_shell_controls()
+        if releases:
+            self._store_selection_cache(snapshot.state, releases)
+        else:
+            self._invalidate_selection_cache()
+        self._display_cached_selection()
+        self._schedule_persist()
+        self._sync_header_with_nav()
+
     def _search_for_artist(self, artist_name: str) -> None:
-        if not self._nav_at_root():
-            self._main_nav.pop()
-        self._search_entry.set_text(artist_name)
-        self._set_shell_state(
-            replace(
-                self._shell_state,
-                base=ShellBase.SEARCH,
-                search_query=artist_name,
-                cached_releases=(),
-            ),
-        )
+        self._navigate_to_search(artist_name)
 
     def _open_preferences(self, *_args: object) -> None:
         if self._preferences is None:
@@ -816,15 +865,21 @@ class TunesWindow(Adw.ApplicationWindow):
             return True
         return page.get_tag() == _GRID_ROOT_TAG
 
+    def _can_go_back(self) -> bool:
+        return not self._nav_at_root() or bool(self._selection_stack)
+
     def _sync_header_with_nav(self) -> None:
         at_root = self._nav_at_root()
         self._shell_controls.set_visible(at_root)
-        self._back_btn.set_visible(not at_root)
+        self._back_btn.set_visible(self._can_go_back())
 
     def _on_nav_back(self, *_args: object) -> None:
-        if self._nav_at_root():
+        if not self._nav_at_root():
+            self._main_nav.pop()
+            self._sync_header_with_nav()
             return
-        self._main_nav.pop()
+        if self._selection_stack:
+            self._restore_selection_snapshot(self._selection_stack.pop())
 
     def _on_nav_visible_page_changed(self, *_args: object) -> None:
         self._sync_header_with_nav()
