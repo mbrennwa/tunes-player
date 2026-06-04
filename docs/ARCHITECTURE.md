@@ -26,13 +26,13 @@ live here.
   [Media keys](#media-keys-requirement)).
 - Integrate **streaming** (Tidal, Deezer, Qobuz) via provider-specific APIs
   (official developer paths where available; see [Streaming](#streaming)).
-  **TIDAL** and **Qobuz** are implemented; **Deezer** is not started.
+  **TIDAL** and **Qobuz** are implemented; **Deezer** is deferred ([#3](https://github.com/mbrennwa/tunes-player/issues/3)).
 - Present sources as **one searchable library** (see [Unified catalog](#unified-catalog)).
 - **Simple** Libadwaita GUI; native GNOME look (not Qt on Linux).
 
 ### Out of scope for v0.1
 
-- **Deezer** streaming backend.
+- **Deezer** streaming backend (deferred — [#3](https://github.com/mbrennwa/tunes-player/issues/3)).
 - Unified cross-source deduplication (beyond basic federated search).
 - **Playlists** (create, edit, browse) — see [Main window layout](#main-window-layout-minimal).
 - macOS / Windows UI.
@@ -90,7 +90,7 @@ others) with rationale and collisions are in **[docs/NAMING.md](NAMING.md)**.
 | Qobuz (credentials, login, search, playback, New Releases, Suggest Music) | Done |
 | Federated search (phase A) | Done in `PlayerService.search()` — no separate `catalog/` module yet |
 | New Releases + Suggest Music aggregation | Done in `core/home.py` + `PlayerService` |
-| Deezer | Not started |
+| Deezer | Deferred ([#3](https://github.com/mbrennwa/tunes-player/issues/3)) — blocked on official full playback |
 | Minimized compact controller | Not started |
 | UPnP / AES67 output | Not started |
 | DEB packaging | Not started |
@@ -611,7 +611,13 @@ README includes a user-facing [disclaimer](../README.md#streaming-disclaimer).
 
 **TIDAL** and **Qobuz** backends are implemented in `core/backends/` with OAuth or
 account login, federated search, stream URL resolution at play time, and New Releases /
-Suggestions feeds. **Deezer** is planned next.
+Suggestions feeds.
+
+**Deezer** is **deferred** ([#3](https://github.com/mbrennwa/tunes-player/issues/3)): the
+documented API exposes 30-second previews, not full-track URLs for mpv; new OAuth app
+registration on the developer portal is often unavailable. Unofficial ARL/gateway
+playback used by other FOSS tools is out of scope until Deezer offers a supported
+full-playback path (e.g. partnership).
 
 One **provider abstraction** pattern — auth, catalog/search, resolve `PlayableSource` at
 play time — is shared across backends via `resolve_track()` and `PlayerService`.
@@ -626,7 +632,7 @@ for lossless streaming — plan per provider:
 |----------|--------------|-----------------|
 | **Tidal** | Official developer platform; OAuth via `tidalapi` | **Done** — first streaming backend |
 | **Qobuz** | JSON API; user-supplied app credentials | **Done** — in-tree REST client |
-| **Deezer** | Documented developer API | **Not started** — planned second streaming backend |
+| **Deezer** | Documented developer API (previews only); partnership TBD | **Deferred** ([#3](https://github.com/mbrennwa/tunes-player/issues/3)) |
 
 Optional: contact Qobuz about third-party open-source clients. Official app credentials
 for Tunes would switch the default from user-supplied keys to bundled defaults without
@@ -639,13 +645,13 @@ tunes_player/core/backends/
   playable.py, resolve.py, local.py
   tidal/       # TidalClient — oauth, search, streams, home feeds (tidalapi)
   qobuz/       # QobuzClient — config credentials, session, signed stream URLs
-  deezer/      # (planned)
+  deezer/      # (deferred — #3)
 ```
 
 ### Auth and credentials
 
 - **Tidal:** OAuth via developer registration; tokens in config (see `platformdirs`).
-- **Deezer:** documented API auth (details when implementing).
+- **Deezer:** deferred — see [#3](https://github.com/mbrennwa/tunes-player/issues/3); no backend until official full playback is available.
 - **Qobuz:** see [Qobuz credentials](#qobuz-credentials).
 
 #### Qobuz credentials
@@ -732,7 +738,7 @@ Status as of current tree — see [Implementation status](#implementation-status
 5. DEB package with declared depends (`python3-gi`, `gir1.2-adw-1`, `mpv`, …). **Not started**
 6. **UPnP / DLNA Media Renderer** output. **Not started**
 7. ~~**Streaming — Tidal**.~~ **Done**
-8. **Streaming — Deezer**. **Not started**
+8. **Streaming — Deezer**. **Deferred** ([#3](https://github.com/mbrennwa/tunes-player/issues/3))
 9. ~~**Streaming — Qobuz**.~~ **Done**
 10. ~~Federated catalog search (phase A).~~ **Done** in `PlayerService.search()`
 11. Heuristic dedup / prefer-local. **Not started**
@@ -748,7 +754,7 @@ Trackable open items. Ordered milestones are in [Roadmap](#roadmap-ordered) abov
 
 ### Streaming
 
-- [ ] **Deezer backend** — auth, search, playback, home feeds (second streaming provider).
+- [ ] **Deezer backend** — blocked on official full playback ([#3](https://github.com/mbrennwa/tunes-player/issues/3)); revisit after partnership or API change.
 
 ### Discover / recommendations
 
