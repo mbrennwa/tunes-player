@@ -26,13 +26,15 @@ live here.
   [Media keys](#media-keys-requirement)).
 - Integrate **streaming** (Tidal, Deezer, Qobuz) via provider-specific APIs
   (official developer paths where available; see [Streaming](#streaming)).
-  **TIDAL** and **Qobuz** are implemented; **Deezer** is deferred ([#3](https://github.com/mbrennwa/tunes-player/issues/3)).
+  **TIDAL** and **Qobuz** are implemented; **Deezer** ([#3](https://github.com/mbrennwa/tunes-player/issues/3))
+  and **Spotify** ([#4](https://github.com/mbrennwa/tunes-player/issues/4)) are deferred.
 - Present sources as **one searchable library** (see [Unified catalog](#unified-catalog)).
 - **Simple** Libadwaita GUI; native GNOME look (not Qt on Linux).
 
 ### Out of scope for v0.1
 
 - **Deezer** streaming backend (deferred — [#3](https://github.com/mbrennwa/tunes-player/issues/3)).
+- **Spotify** streaming backend (deferred — [#4](https://github.com/mbrennwa/tunes-player/issues/4)).
 - Unified cross-source deduplication (beyond basic federated search).
 - **Playlists** (create, edit, browse) — see [Main window layout](#main-window-layout-minimal).
 - macOS / Windows UI.
@@ -91,6 +93,7 @@ others) with rationale and collisions are in **[docs/NAMING.md](NAMING.md)**.
 | Federated search (phase A) | Done in `PlayerService.search()` — no separate `catalog/` module yet |
 | New Releases + Suggest Music aggregation | Done in `core/home.py` + `PlayerService` |
 | Deezer | Deferred ([#3](https://github.com/mbrennwa/tunes-player/issues/3)) — blocked on official full playback |
+| Spotify | Deferred ([#4](https://github.com/mbrennwa/tunes-player/issues/4)) — no mpv-compatible official playback path |
 | Minimized compact controller | Not started |
 | UPnP / AES67 output | Not started |
 | DEB packaging | Not started |
@@ -619,6 +622,12 @@ registration on the developer portal is often unavailable. Unofficial ARL/gatewa
 playback used by other FOSS tools is out of scope until Deezer offers a supported
 full-playback path (e.g. partnership).
 
+**Spotify** is **deferred** ([#4](https://github.com/mbrennwa/tunes-player/issues/4)): the Web API
+does not expose full-track URLs for mpv; playback requires the Web Playback SDK, Spotify
+Connect, or the official app. Development Mode is capped (e.g. authorized-user limits) and
+intended for non-commercial use. Unofficial librespot-style integration is out of scope
+until a supported native path exists.
+
 One **provider abstraction** pattern — auth, catalog/search, resolve `PlayableSource` at
 play time — is shared across backends via `resolve_track()` and `PlayerService`.
 
@@ -633,6 +642,7 @@ for lossless streaming — plan per provider:
 | **Tidal** | Official developer platform; OAuth via `tidalapi` | **Done** — first streaming backend |
 | **Qobuz** | JSON API; user-supplied app credentials | **Done** — in-tree REST client |
 | **Deezer** | Documented developer API (previews only); partnership TBD | **Deferred** ([#3](https://github.com/mbrennwa/tunes-player/issues/3)) |
+| **Spotify** | Web API + SDK/Connect (no direct stream URLs) | **Deferred** ([#4](https://github.com/mbrennwa/tunes-player/issues/4)) |
 
 Optional: contact Qobuz about third-party open-source clients. Official app credentials
 for Tunes would switch the default from user-supplied keys to bundled defaults without
@@ -646,12 +656,14 @@ tunes_player/core/backends/
   tidal/       # TidalClient — oauth, search, streams, home feeds (tidalapi)
   qobuz/       # QobuzClient — config credentials, session, signed stream URLs
   deezer/      # (deferred — #3)
+  spotify/     # (deferred — #4)
 ```
 
 ### Auth and credentials
 
 - **Tidal:** OAuth via developer registration; tokens in config (see `platformdirs`).
 - **Deezer:** deferred — see [#3](https://github.com/mbrennwa/tunes-player/issues/3); no backend until official full playback is available.
+- **Spotify:** deferred — see [#4](https://github.com/mbrennwa/tunes-player/issues/4); no backend until a supported native playback path exists.
 - **Qobuz:** see [Qobuz credentials](#qobuz-credentials).
 
 #### Qobuz credentials
@@ -690,6 +702,7 @@ update) replace app id/secret; session tokens are separate.
 |----------|------------|--------------|
 | Tidal | `tidalapi` | LGPL-3.0 — OK inside GPL app |
 | Deezer | TBD (REST/client) | Confirm before linking |
+| Spotify | TBD (SDK/Connect) | Confirm before linking |
 | Qobuz | in-tree client (urllib) | No third-party SDK linked |
 
 See [License rationale](#license-rationale).
@@ -745,6 +758,7 @@ Status as of current tree — see [Implementation status](#implementation-status
 12. Optional Qt UI for macOS. **Not started**
 13. Playlists UI. **Not started**
 14. **(Optional)** AES67 / Dante LAN output. **Not started**
+15. **Streaming — Spotify**. **Deferred** ([#4](https://github.com/mbrennwa/tunes-player/issues/4))
 
 ---
 
@@ -755,6 +769,7 @@ Trackable open items. Ordered milestones are in [Roadmap](#roadmap-ordered) abov
 ### Streaming
 
 - [ ] **Deezer backend** — blocked on official full playback ([#3](https://github.com/mbrennwa/tunes-player/issues/3)); revisit after partnership or API change.
+- [ ] **Spotify backend** — blocked on supported native playback ([#4](https://github.com/mbrennwa/tunes-player/issues/4)); Web API/SDK/Connect unlike mpv URL backends.
 
 ### Discover / recommendations
 

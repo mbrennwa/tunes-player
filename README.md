@@ -19,7 +19,7 @@ catalogs. It is free and open source, built for Linux (GNOME/GTK).
 
 ### Not yet implemented
 
-macOS/Windows ports, Deezer (deferred, [#3](https://github.com/mbrennwa/tunes-player/issues/3)), playlists UI, cross-source deduplication, minimized compact controller, UPnP/AES67 output, inbound volume sync from hardware. Full roadmap and contributor handoff: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (rename notes: [docs/NAMING.md](docs/NAMING.md)).
+macOS/Windows ports, Deezer (deferred, [#3](https://github.com/mbrennwa/tunes-player/issues/3)), Spotify (deferred, [#4](https://github.com/mbrennwa/tunes-player/issues/4)), playlists UI, cross-source deduplication, minimized compact controller, UPnP/AES67 output, inbound volume sync from hardware. Full roadmap and contributor handoff: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (rename notes: [docs/NAMING.md](docs/NAMING.md)).
 
 ## Design
 
