@@ -66,7 +66,6 @@ class PlaybackState:
     output_using_fallback: bool
     position_sec: float
     duration_sec: float | None
-    playback_epoch: int
 
 
 class PlayerService:
@@ -112,7 +111,6 @@ class PlayerService:
         self._position_sec = 0.0
         self._position_synced_at: float | None = None
         self._duration_sec: float | None = None
-        self._playback_epoch = 0
         self._engine: PlaybackEngine | None = None
         self._engine_error: str | None = None
         self._engine_events: Queue[EngineEvent] = Queue()
@@ -515,7 +513,6 @@ class PlayerService:
             output_using_fallback=self._output_using_fallback(),
             position_sec=self._playback_position(),
             duration_sec=self._duration_sec,
-            playback_epoch=self._playback_epoch,
         )
 
     def play_track(self, track_id: str) -> None:
@@ -1174,7 +1171,6 @@ class PlayerService:
         format_label: str | None = None,
         playback_note: str | None = None,
     ) -> None:
-        self._playback_epoch += 1
         self._current_track = track
         if format_label is not None:
             base_hint = format_label
@@ -1208,16 +1204,8 @@ class PlayerService:
     def _playback_position(self) -> float:
         return self._position_sec
 
-    def _apply_engine_position(self, position_sec: float, *, allow_backward: bool = False) -> None:
-        position = max(0.0, position_sec)
-        if not allow_backward:
-            if self._is_playing:
-                # mpv time-pos flickers at track start; never snap backward while playing.
-                if position < self._position_sec:
-                    return
-            elif position < self._position_sec:
-                return
-        self._position_sec = position
+    def _apply_engine_position(self, position_sec: float) -> None:
+        self._position_sec = max(0.0, position_sec)
         self._position_synced_at = time.monotonic()
 
     def _sync_playback_position_from_engine(self) -> None:

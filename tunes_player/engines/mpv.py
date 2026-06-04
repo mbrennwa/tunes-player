@@ -205,9 +205,7 @@ class MpvEngine:
         pos = self._player.time_pos
         self._playing = False
         if pos is not None:
-            new_pos = float(pos)
-            if new_pos >= self._position_sec:
-                self._position_sec = new_pos
+            self._position_sec = float(pos)
         self._emit("playing_changed")
         self._emit("position_changed")
 
@@ -254,9 +252,7 @@ class MpvEngine:
     def get_position(self) -> float:
         pos = self._player.time_pos
         if pos is not None:
-            new_pos = float(pos)
-            if new_pos >= self._position_sec:
-                self._position_sec = new_pos
+            self._position_sec = float(pos)
         return self._position_sec
 
     def get_duration(self) -> float | None:
@@ -302,10 +298,7 @@ class MpvEngine:
         def _on_time_pos(_name: str, value: float | None) -> None:
             if value is None or value < 0:
                 return
-            new_pos = float(value)
-            if new_pos < self._position_sec:
-                return
-            self._position_sec = new_pos
+            self._position_sec = float(value)
             now = time.monotonic()
             if now - self._last_position_emit >= _POSITION_INTERVAL_SEC:
                 self._last_position_emit = now
