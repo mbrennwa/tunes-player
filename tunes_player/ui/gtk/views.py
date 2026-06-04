@@ -32,7 +32,7 @@ from tunes_player.ui.gtk.util import (
 
 _ALBUM_TILE_ART_PIXELS = 512
 _ALBUM_TILE_ART_PIXELS_SMALL = 384
-_ALBUM_DETAIL_ART_SIZE = 220
+_ALBUM_DETAIL_ART_MIN = 220
 _ALBUM_TILE_DEFAULT_EDGE = 200
 _RELEASE_ART_PLAY_SIZE_RATIO = 0.30
 _RELEASE_ART_PLAY_INSET_RATIO = 0.036
@@ -349,47 +349,53 @@ class ReleaseDetailView(Gtk.Box):
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
         self.add_css_class("view")
+        self.add_css_class("release-detail-view")
 
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
-        header.set_margin_top(12)
-        header.set_margin_bottom(6)
-        header.set_margin_start(18)
-        header.set_margin_end(18)
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        header.add_css_class("release-detail-header")
         header.set_vexpand(False)
         header.set_hexpand(True)
         self.append(header)
 
         header_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
         header_row.set_halign(Gtk.Align.START)
-        header_row.set_valign(Gtk.Align.START)
-        header_row.set_hexpand(False)
+        header_row.set_valign(Gtk.Align.FILL)
+        header_row.set_hexpand(True)
         header_row.set_vexpand(False)
         header.append(header_row)
 
-        art_box = Gtk.Box()
-        art_box.add_css_class("card")
-        art_box.set_halign(Gtk.Align.START)
-        art_box.set_valign(Gtk.Align.START)
         tracks = service.get_release_tracks(release.id)
 
-        art_box.append(
-            _square_art_with_play(
-                release,
-                size=_ALBUM_DETAIL_ART_SIZE,
-                art_loader=art_loader,
-                css_class="album-detail-art",
-                on_play=lambda: service.play_release(release.id, start_index=0),
-                playable=bool(tracks),
-            )
+        art_frame = _square_art_with_play(
+            release,
+            size=_ALBUM_DETAIL_ART_MIN,
+            art_loader=art_loader,
+            css_class="album-detail-art",
+            on_play=lambda: service.play_release(release.id, start_index=0),
+            playable=bool(tracks),
+            fill_cell=True,
         )
-        header_row.append(art_box)
+        art_frame.set_valign(Gtk.Align.FILL)
+        header_row.append(art_frame)
 
         details_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         details_column.set_hexpand(False)
         details_column.set_vexpand(False)
         details_column.set_halign(Gtk.Align.START)
-        details_column.set_valign(Gtk.Align.START)
+        details_column.set_valign(Gtk.Align.CENTER)
+        details_column.set_margin_top(12)
+        details_column.set_margin_bottom(12)
+        details_column.set_margin_end(18)
         header_row.append(details_column)
+
+        _bind_detail_hero_art_sync(
+            header_row,
+            art_frame,
+            details_column,
+            release=release,
+            art_loader=art_loader,
+            min_edge=_ALBUM_DETAIL_ART_MIN,
+        )
 
         details_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         details_text.set_halign(Gtk.Align.START)
@@ -711,6 +717,77 @@ def _reset_album_tile_size(card: Gtk.Widget) -> None:
     card.set_size_request(-1, -1)
 
 
+def _find_art_picture(root: Gtk.Widget) -> Gtk.Picture | None:
+    if isinstance(root, Gtk.Picture):
+        return root
+    child = root.get_first_child()
+    while child is not None:
+        found = _find_art_picture(child)
+        if found is not None:
+            return found
+        child = child.get_next_sibling()
+    return None
+
+
+def _bind_detail_hero_art_sync(
+    header_row: Gtk.Box,
+    art_frame: Gtk.Widget,
+    details_column: Gtk.Box,
+    *,
+    release: Release,
+    art_loader: ArtLoader | None,
+    min_edge: int,
+) -> None:
+    """Keep detail cover square and flush with the hero header row height."""
+    state: dict[str, int] = {"edge": 0, "pixel_size": 0}
+
+    def sync(*_args: object) -> None:
+        _sync_detail_hero_art(
+            header_row,
+            art_frame,
+            details_column,
+            release=release,
+            art_loader=art_loader,
+            min_edge=min_edge,
+            state=state,
+        )
+
+    for widget in (header_row, details_column, art_frame):
+        widget.connect("notify::height", sync)
+    header_row.connect("map", sync)
+    GLib.idle_add(sync)
+
+
+def _sync_detail_hero_art(
+    header_row: Gtk.Box,
+    art_frame: Gtk.Widget,
+    details_column: Gtk.Box,
+    *,
+    release: Release,
+    art_loader: ArtLoader | None,
+    min_edge: int,
+    state: dict[str, int],
+) -> None:
+    row_h = header_row.get_allocated_height()
+    if row_h < 1:
+        _min_h, row_h, _min_b, _nat_b = header_row.measure(Gtk.Orientation.VERTICAL, -1)
+    if row_h < 1:
+        _min_h, row_h, _min_b, _nat_b = details_column.measure(Gtk.Orientation.VERTICAL, -1)
+    edge = max(min_edge, row_h)
+    if edge == state.get("edge"):
+        return
+    state["edge"] = edge
+    _apply_album_tile_size(art_frame, edge)
+    last_px = state.get("pixel_size", 0)
+    if art_loader is None or edge <= last_px:
+        return
+    picture = _find_art_picture(art_frame)
+    if picture is None:
+        return
+    state["pixel_size"] = edge
+    art_loader.set_picture(picture, release.art_uri, pixel_size=edge)
+
+
 def _find_release_art_play_button(root: Gtk.Widget) -> Gtk.Button | None:
     if isinstance(root, Gtk.Button) and root.has_css_class("release-art-play"):
         return root
@@ -811,6 +888,7 @@ def _square_art_with_play(
     css_class: str = "album-card-art",
     on_play: Callable[[], None] | None = None,
     playable: bool = True,
+    fill_cell: bool = False,
 ) -> Gtk.Widget:
     """Fixed square cover with optional top-left play overlay."""
     frame = Gtk.Box()
@@ -818,24 +896,23 @@ def _square_art_with_play(
     frame.add_css_class("release-art-shell")
     frame.set_size_request(size, size)
     frame.set_halign(Gtk.Align.FILL)
-    frame.set_valign(Gtk.Align.START)
+    frame.set_valign(Gtk.Align.FILL if fill_cell else Gtk.Align.START)
     frame.set_hexpand(False)
     frame.set_vexpand(False)
 
     overlay = Gtk.Overlay()
     overlay.set_halign(Gtk.Align.FILL)
     overlay.set_valign(Gtk.Align.FILL)
-    overlay.set_hexpand(False)
-    overlay.set_vexpand(False)
+    overlay.set_hexpand(fill_cell)
+    overlay.set_vexpand(fill_cell)
     frame.append(overlay)
 
     art = Gtk.Picture()
     art.set_halign(Gtk.Align.FILL)
     art.set_valign(Gtk.Align.FILL)
-    # Critical: do not let the cover expand horizontally in the header row.
-    # The frame has a fixed square size; expanding here would push album details away.
-    art.set_hexpand(False)
-    art.set_vexpand(False)
+    # Grid tiles use a fixed square frame; detail hero resizes via _sync_detail_hero_art.
+    art.set_hexpand(fill_cell)
+    art.set_vexpand(fill_cell)
     art.set_can_shrink(True)
     art.set_content_fit(Gtk.ContentFit.COVER)
     if art_loader is not None:

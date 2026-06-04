@@ -58,6 +58,22 @@
   text-decoration: underline;
 }
 
+/* Release detail hero: cover flush to pane edges, no card padding */
+.release-detail-view .release-detail-header {
+  min-width: 0;
+}
+
+.release-detail-view .album-detail-art {
+  padding: 0;
+  min-width: 0;
+  min-height: 0;
+  border-radius: 0;
+}
+
+.release-detail-view .album-detail-art picture {
+  border-radius: 0;
+}
+
 /* Release detail: artist name opens search */
 button.artist-link {
   padding: 0;
