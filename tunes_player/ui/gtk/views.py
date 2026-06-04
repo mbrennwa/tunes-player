@@ -34,6 +34,10 @@ _ALBUM_TILE_ART_PIXELS = 512
 _ALBUM_TILE_ART_PIXELS_SMALL = 384
 _ALBUM_DETAIL_ART_SIZE = 220
 _ALBUM_TILE_DEFAULT_EDGE = 200
+_RELEASE_ART_PLAY_SIZE_RATIO = 0.30
+_RELEASE_ART_PLAY_INSET_RATIO = 0.036
+_RELEASE_ART_PLAY_MIN_SIZE = 36
+_RELEASE_ART_PLAY_MAX_SIZE = 66
 
 
 class PlaceholderView(Gtk.Box):
@@ -95,6 +99,16 @@ class LoadingDiscoverView(Gtk.Box):
         self._spinner.stop()
 
 
+def _release_art_play_layout(art_size: int) -> tuple[int, int]:
+    """Return circular play button diameter and corner inset for *art_size* px artwork."""
+    if art_size < 1:
+        art_size = _ALBUM_TILE_DEFAULT_EDGE
+    button = round(art_size * _RELEASE_ART_PLAY_SIZE_RATIO)
+    button = max(_RELEASE_ART_PLAY_MIN_SIZE, min(_RELEASE_ART_PLAY_MAX_SIZE, button))
+    inset = max(4, round(art_size * _RELEASE_ART_PLAY_INSET_RATIO))
+    return button, inset
+
+
 def _release_grid_playable(release: Release) -> bool:
     """Whether the grid overlay play button should be sensitive.
 
@@ -131,6 +145,7 @@ class ReleaseGridView(Gtk.ScrolledWindow):
         releases: list[Release],
         on_release_activated: Callable[[str], None],
         on_release_play: Callable[[str], None],
+        on_artist_search: Callable[[str], None] | None = None,
         empty_message: str | None = None,
         art_loader: ArtLoader | None = None,
         window_inner_width_fn: Callable[[], int] | None = None,
@@ -172,6 +187,7 @@ class ReleaseGridView(Gtk.ScrolledWindow):
             releases,
             on_release_activated,
             on_release_play,
+            on_artist_search,
             art_loader=art_loader,
         )
 
@@ -181,6 +197,7 @@ class ReleaseGridView(Gtk.ScrolledWindow):
         releases: list[Release],
         on_release_activated: Callable[[str], None],
         on_release_play: Callable[[str], None],
+        on_artist_search: Callable[[str], None] | None = None,
         art_loader: ArtLoader | None = None,
         start: int = 0,
         batch_size: int = 24,
@@ -192,6 +209,7 @@ class ReleaseGridView(Gtk.ScrolledWindow):
                 release,
                 on_activate=lambda release_id=release.id: on_release_activated(release_id),
                 on_play=lambda release_id=release.id: on_release_play(release_id),
+                on_artist_search=on_artist_search,
                 art_loader=art_loader,
                 small=small,
             )
@@ -204,6 +222,7 @@ class ReleaseGridView(Gtk.ScrolledWindow):
                 releases,
                 on_release_activated,
                 on_release_play,
+                on_artist_search,
                 art_loader,
                 end,
                 batch_size,
@@ -382,30 +401,18 @@ class ReleaseDetailView(Gtk.Box):
         title.set_halign(Gtk.Align.START)
         details_text.append(title)
 
-        if on_artist_search is not None:
-            artist = _artist_name_link(
-                release.artist_name,
-                on_activate=lambda name=release.artist_name: on_artist_search(name),
-            )
-        else:
-            artist = Gtk.Label(label=release.artist_name, xalign=0.0, ellipsize=3)
-            artist.add_css_class("title-4")
-            artist.add_css_class("dim-label")
-            artist.set_wrap(False)
-            artist.set_halign(Gtk.Align.START)
-        details_text.append(artist)
+        details_text.append(
+            _detail_artist_year_row(release, on_artist_search=on_artist_search)
+        )
 
-        year = str(release.year) if release.year else None
-        genre = release.genre
         duration = format_duration(release.duration_sec)
         track_count = _format_release_track_count(release)
         info = Gtk.Label(
             label=join_detail(
-                source_label(release.source),
-                year,
-                genre,
                 track_count,
                 duration,
+                release.genre,
+                source_label(release.source),
             ),
             xalign=0.0,
             ellipsize=3,
@@ -641,12 +648,14 @@ class ReleaseTileGrid(Gtk.Box):
         *,
         on_activate: Callable[[], None],
         on_play: Callable[[], None],
+        on_artist_search: Callable[[str], None] | None = None,
         art_loader: ArtLoader | None,
         small: bool = False,
     ) -> None:
         card = _release_card(
             release,
             on_play=on_play,
+            on_artist_search=on_artist_search,
             art_loader=art_loader,
             small=small,
             edge=self._tile_edge,
@@ -702,26 +711,56 @@ def _reset_album_tile_size(card: Gtk.Widget) -> None:
     card.set_size_request(-1, -1)
 
 
+def _find_release_art_play_button(root: Gtk.Widget) -> Gtk.Button | None:
+    if isinstance(root, Gtk.Button) and root.has_css_class("release-art-play"):
+        return root
+    child = root.get_first_child()
+    while child is not None:
+        found = _find_release_art_play_button(child)
+        if found is not None:
+            return found
+        child = child.get_next_sibling()
+    return None
+
+
+def _apply_release_art_play_button_metrics(btn: Gtk.Button, art_size: int) -> None:
+    button_px, inset = _release_art_play_layout(art_size)
+    btn.set_size_request(button_px, button_px)
+    btn.set_margin_start(inset)
+    btn.set_margin_top(inset)
+
+
 def _apply_album_tile_size(card: Gtk.Widget, edge: int) -> None:
     if edge < 1:
         return
     card.set_size_request(edge, edge)
+    play_btn = _find_release_art_play_button(card)
+    if play_btn is not None:
+        _apply_release_art_play_button_metrics(play_btn, edge)
 
 
-def _picked_is_release_art_play(widget: Gtk.Widget, x: float, y: float) -> bool:
+def _picked_has_css_class(widget: Gtk.Widget, x: float, y: float, css_class: str) -> bool:
     picked = widget.pick(x, y, Gtk.PickFlags.DEFAULT)
     while picked is not None:
-        if picked.has_css_class("release-art-play"):
+        if picked.has_css_class(css_class):
             return True
         picked = picked.get_parent()
     return False
+
+
+def _picked_is_release_art_play(widget: Gtk.Widget, x: float, y: float) -> bool:
+    return _picked_has_css_class(widget, x, y, "release-art-play")
+
+
+def _picked_is_artist_link(widget: Gtk.Widget, x: float, y: float) -> bool:
+    return _picked_has_css_class(widget, x, y, "artist-link")
 
 
 def _attach_album_card_activate(tile: Gtk.Widget, callback: Callable[[], None]) -> None:
     gesture = Gtk.GestureClick()
 
     def _on_released(_gesture: Gtk.GestureClick, _n_press: int, x: float, y: float) -> None:
-        if _picked_is_release_art_play(tile, x, y):
+        if _picked_is_release_art_play(tile, x, y) or _picked_is_artist_link(tile, x, y):
             return
         callback()
 
@@ -735,22 +774,19 @@ def _create_release_art_play_button(
     *,
     on_play: Callable[[], None],
     playable: bool,
-    compact: bool = False,
+    art_size: int,
 ) -> Gtk.Button:
     btn = Gtk.Button()
     btn.add_css_class("circular")
     btn.add_css_class("suggested-action")
     btn.add_css_class("release-art-play")
-    if compact:
-        btn.add_css_class("release-art-play-compact")
     btn.set_icon_name("media-playback-start-symbolic")
     btn.set_tooltip_text("Play release")
     btn.set_focusable(True)
     btn.set_sensitive(playable)
     btn.set_halign(Gtk.Align.START)
     btn.set_valign(Gtk.Align.START)
-    btn.set_margin_start(8)
-    btn.set_margin_top(8)
+    _apply_release_art_play_button_metrics(btn, art_size)
     btn.connect("clicked", lambda *_args: on_play())
     return btn
 
@@ -760,9 +796,9 @@ def _attach_release_art_play(
     *,
     on_play: Callable[[], None],
     playable: bool,
-    compact: bool = False,
+    art_size: int,
 ) -> Gtk.Button:
-    btn = _create_release_art_play_button(on_play=on_play, playable=playable, compact=compact)
+    btn = _create_release_art_play_button(on_play=on_play, playable=playable, art_size=art_size)
     overlay.add_overlay(btn)
     return btn
 
@@ -809,9 +845,44 @@ def _square_art_with_play(
     overlay.set_child(art)
 
     if on_play is not None:
-        _attach_release_art_play(overlay, on_play=on_play, playable=playable, compact=False)
+        _attach_release_art_play(overlay, on_play=on_play, playable=playable, art_size=size)
 
     return frame
+
+
+def _detail_artist_year_row(
+    release: Release,
+    *,
+    on_artist_search: Callable[[str], None] | None,
+) -> Gtk.Box:
+    """Detail header row: artist (optionally linked) and release year."""
+    row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+    row.set_halign(Gtk.Align.START)
+
+    if on_artist_search is not None:
+        row.append(
+            _artist_name_link(
+                release.artist_name,
+                on_activate=lambda name=release.artist_name: on_artist_search(name),
+            )
+        )
+    else:
+        artist = Gtk.Label(label=release.artist_name, xalign=0.0, ellipsize=3)
+        artist.add_css_class("title-4")
+        artist.add_css_class("dim-label")
+        artist.set_wrap(False)
+        artist.set_halign(Gtk.Align.START)
+        row.append(artist)
+
+    year = str(release.year) if release.year else None
+    if year:
+        year_label = Gtk.Label(label=f" · {year}", xalign=0.0, ellipsize=3)
+        year_label.add_css_class("title-4")
+        year_label.add_css_class("dim-label")
+        year_label.set_wrap(False)
+        year_label.set_halign(Gtk.Align.START)
+        row.append(year_label)
+    return row
 
 
 def _artist_name_link(name: str, *, on_activate: Callable[[], None]) -> Gtk.Button:
@@ -841,10 +912,28 @@ def _overlay_label(text: str, *, extra_classes: tuple[str, ...] = ()) -> Gtk.Lab
     return label
 
 
+def _overlay_artist_link(name: str, *, on_activate: Callable[[], None]) -> Gtk.Button:
+    label = Gtk.Label(label=name, xalign=0.0, ellipsize=3)
+    label.add_css_class("album-card-meta")
+    label.set_halign(Gtk.Align.START)
+    label.set_wrap(False)
+
+    button = Gtk.Button()
+    button.add_css_class("flat")
+    button.add_css_class("artist-link")
+    button.set_child(label)
+    button.set_halign(Gtk.Align.START)
+    button.set_tooltip_text("Search for releases by this artist")
+    button.set_cursor_from_name("pointer")
+    button.connect("clicked", lambda *_args: on_activate())
+    return button
+
+
 def _release_card(
     release: Release,
     *,
     on_play: Callable[[], None],
+    on_artist_search: Callable[[str], None] | None = None,
     small: bool = False,
     art_loader: ArtLoader | None = None,
     edge: int = _ALBUM_TILE_DEFAULT_EDGE,
@@ -894,7 +983,7 @@ def _release_card(
         overlay,
         on_play=on_play,
         playable=_release_grid_playable(release),
-        compact=True,
+        art_size=edge,
     )
 
     labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -906,7 +995,15 @@ def _release_card(
     overlay.add_overlay(labels)
 
     labels.append(_overlay_label(release.title, extra_classes=("album-card-title",)))
-    labels.append(_overlay_label(release.artist_name, extra_classes=("album-card-meta",)))
+    if on_artist_search is not None:
+        labels.append(
+            _overlay_artist_link(
+                release.artist_name,
+                on_activate=lambda name=release.artist_name: on_artist_search(name),
+            )
+        )
+    else:
+        labels.append(_overlay_label(release.artist_name, extra_classes=("album-card-meta",)))
     track_hint = _format_release_track_count(release)
     meta = join_detail(source_label(release.source), track_hint)
     labels.append(_overlay_label(meta, extra_classes=("album-card-meta",)))

@@ -7,12 +7,37 @@ import unittest
 from tunes_player.core.library.store import FileMetadata
 from tunes_player.core.playback.output_profile import (
     HwAudioCaps,
+    bit_depth_to_mpv_format,
     compute_output_profile,
 )
 from tunes_player.core.volume import pipewire_endpoint_id
 
 
 class OutputProfileTests(unittest.TestCase):
+    def test_bit_depth_to_mpv_format_uses_mpv_names(self) -> None:
+        self.assertEqual(bit_depth_to_mpv_format(16), "s16")
+        self.assertEqual(bit_depth_to_mpv_format(24), "s24")
+        self.assertEqual(bit_depth_to_mpv_format(32), "s32")
+
+    def test_direct_alsa_profile_audio_format(self) -> None:
+        caps = HwAudioCaps(sample_rates=(48000,), bit_depths=(16, 24))
+        profile, _path = compute_output_profile(
+            file_meta=FileMetadata(
+                path="/a.flac",
+                codec="flac",
+                duration_sec=1.0,
+                sample_rate=48000,
+                bit_depth=16,
+                channels=2,
+            ),
+            hw_caps=caps,
+            endpoint_id="alsa:hw:0:0",
+            exclusive_enabled=False,
+            device_volume=True,
+            mpv_soft_volume=False,
+        )
+        self.assertEqual(profile.audio_format, "s16")
+
     def test_pipewire_sink_not_bit_perfect(self) -> None:
         _profile, path = compute_output_profile(
             file_meta=FileMetadata(

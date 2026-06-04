@@ -164,6 +164,7 @@ class MpvEngine:
     def _apply_track_format(self, profile: PlaybackOutputProfile) -> None:
         if not profile.direct_alsa:
             return
+        log = logging.getLogger(__name__)
         self._player.replaygain = "no"
         self._player.volume = 100
         if profile.allow_resample:
@@ -171,11 +172,24 @@ class MpvEngine:
         else:
             self._player.audio_resample = "no"
         if profile.target_rate is not None:
-            self._player.audio_samplerate = profile.target_rate
+            try:
+                self._player.audio_samplerate = profile.target_rate
+            except TypeError as exc:
+                log.warning("mpv rejected audio-samplerate %s: %s", profile.target_rate, exc)
         if profile.audio_format is not None:
-            self._player.audio_format = profile.audio_format
+            try:
+                self._player.audio_format = profile.audio_format
+            except TypeError as exc:
+                log.warning("mpv rejected audio-format %s: %s", profile.audio_format, exc)
         if profile.target_channels is not None:
-            self._player.audio_channels = profile.target_channels
+            try:
+                self._player.audio_channels = profile.target_channels
+            except TypeError as exc:
+                log.warning(
+                    "mpv rejected audio-channels %s: %s",
+                    profile.target_channels,
+                    exc,
+                )
 
     def play(self) -> None:
         if self._loaded_uri is None:

@@ -27,7 +27,7 @@ class PlaybackOutputProfile:
     target_rate: int | None = None
     target_bit_depth: int | None = None
     target_channels: int | None = None
-    audio_format: str | None = None  # mpv audio-format, e.g. s24le
+    audio_format: str | None = None  # mpv audio-format, e.g. s24
 
     @property
     def unity_gain(self) -> bool:
@@ -44,11 +44,12 @@ class PlaybackPathInfo:
 
 
 def bit_depth_to_mpv_format(bit_depth: int) -> str:
+    """Map file bit depth to mpv ``audio-format`` (s16/s24/s32, not s16le)."""
     if bit_depth <= 16:
-        return "s16le"
+        return "s16"
     if bit_depth <= 24:
-        return "s24le"
-    return "s32le"
+        return "s24"
+    return "s32"
 
 
 def choose_output_format(

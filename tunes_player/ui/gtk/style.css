@@ -48,6 +48,16 @@
   font-size: 0.75em;
 }
 
+.album-card-overlay button.artist-link {
+  padding: 0;
+  min-height: 0;
+  min-width: 0;
+}
+
+.album-card-overlay button.artist-link:hover label {
+  text-decoration: underline;
+}
+
 /* Release detail: artist name opens search */
 button.artist-link {
   padding: 0;
@@ -71,12 +81,6 @@ button.artist-link:hover label {
 .release-art-shell:hover .release-art-play,
 .release-art-shell:focus-within .release-art-play {
   opacity: 1;
-}
-
-.release-art-play-compact {
-  padding: 6px;
-  min-width: 32px;
-  min-height: 32px;
 }
 
 /* Shell controls: search primary, filters secondary */
