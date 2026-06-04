@@ -11,7 +11,7 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
-from tunes_player.core.models import Release, ReleaseCompleteness, Track
+from tunes_player.core.models import Release, ReleaseCompleteness, Source, Track
 from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.album_grid import (
     ALBUM_GRID_SPACING,
@@ -93,6 +93,18 @@ class LoadingDiscoverView(Gtk.Box):
 
     def _on_unmap(self, *_args: object) -> None:
         self._spinner.stop()
+
+
+def _release_grid_playable(release: Release) -> bool:
+    """Whether the grid overlay play button should be sensitive.
+
+    Detail view loads tracks and uses ``bool(tracks)``. Grid tiles only have
+    catalog metadata; streaming providers often leave ``track_count`` at 0 on
+    sparse album objects even when ``get_release_tracks`` succeeds later.
+    """
+    if release.track_count > 0:
+        return True
+    return release.source != Source.LOCAL
 
 
 def _format_release_track_count(release: Release) -> str | None:
@@ -881,7 +893,7 @@ def _release_card(
     _attach_release_art_play(
         overlay,
         on_play=on_play,
-        playable=release.track_count > 0,
+        playable=_release_grid_playable(release),
         compact=True,
     )
 
