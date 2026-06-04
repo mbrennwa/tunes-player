@@ -20,7 +20,7 @@ catalogs. It is free and open source, built for Linux (GNOME/GTK).
 
 ### Not yet implemented
 
-macOS/Windows ports, Deezer (deferred, [#3](https://github.com/mbrennwa/tunes-player/issues/3)), Spotify (deferred, [#4](https://github.com/mbrennwa/tunes-player/issues/4)), playlists UI, cross-source deduplication, minimized compact controller, UPnP/AES67 output, inbound volume sync from hardware. Full roadmap and contributor handoff: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (rename notes: [docs/NAMING.md](docs/NAMING.md)).
+macOS/Windows ports, playlists UI, cross-source deduplication, minimized compact controller, UPnP/AES67 output, inbound volume sync from hardware. Full roadmap and contributor handoff: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (rename notes: [docs/NAMING.md](docs/NAMING.md)).
 
 ## Design
 
@@ -113,9 +113,7 @@ sudo make install
 ## Streaming disclaimer
 
 Tunes is **not affiliated with Tidal, Qobuz, or any other streaming provider**.
-Streaming requires your own paid subscriptions where applicable. Integrations may use official developer APIs (e.g. Tidal, Deezer) or user-supplied credentials (Qobuz App ID and App Secret — Tunes does not ship or distribute Qobuz keys). For Qobuz, open
-**Settings → Sources**, enter and save your App ID and App Secret, then sign in with your Qobuz account email and password. Features can break when providers change authentication
-or terms. Use at your own responsibility and in compliance with each service's terms of use.
+Streaming requires your own paid subscriptions where applicable. Integrations may use official developer APIs or user-supplied credentials (Qobuz App ID and App Secret — Tunes does not ship or distribute Qobuz keys). Features can break when providers change authentication or terms. Use at your own responsibility and in compliance with each service's terms of use.
 
 ## License
 
