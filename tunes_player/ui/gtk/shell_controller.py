@@ -6,7 +6,7 @@ from tunes_player.core.models import Release, Source
 from tunes_player.core.services import PlayerService
 from tunes_player.core.shell_state import (
     ShellBase,
-    apply_source_filter,
+    apply_shell_view_filters,
     releases_from_recently_added,
 )
 
@@ -48,6 +48,11 @@ def fetch_filtered_releases(
     *,
     search_query: str = "",
     enabled_sources: frozenset[Source] | None = None,
+    enabled_genres: frozenset[str] | None = None,
 ) -> list[Release]:
     releases = fetch_base_releases(service, base, search_query=search_query)
-    return apply_source_filter(releases, enabled_sources or frozenset())
+    return apply_shell_view_filters(
+        releases,
+        enabled_sources=enabled_sources or frozenset(),
+        enabled_genres=enabled_genres or frozenset(),
+    )

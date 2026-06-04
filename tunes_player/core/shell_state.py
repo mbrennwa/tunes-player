@@ -27,6 +27,8 @@ _VALID_SOURCES = frozenset(item.value for item in Source)
 _VALID_COMPLETENESS = frozenset(item.value for item in ReleaseCompleteness)
 _VALID_RELEASE_TYPES = frozenset(item.value for item in ReleaseType)
 
+NO_GENRE_LABEL = "(No genre)"
+
 
 @dataclass(frozen=True, slots=True)
 class ShellState:
@@ -34,6 +36,8 @@ class ShellState:
     search_query: str = ""
     # Empty set = all configured sources enabled. Non-empty = only those sources.
     enabled_sources: frozenset[Source] = field(default_factory=frozenset)
+    # Empty set = no genre filter. Non-empty = OR match on release genre buckets.
+    enabled_genres: frozenset[str] = field(default_factory=frozenset)
     # Serialized grid rows for instant restore on relaunch (no API refetch).
     cached_releases: tuple[dict[str, Any], ...] = ()
 
@@ -46,6 +50,8 @@ class ShellState:
             payload["enabled_sources"] = sorted(
                 source.value for source in self.enabled_sources
             )
+        if self.enabled_genres:
+            payload["enabled_genres"] = sorted(self.enabled_genres)
         if self.cached_releases:
             payload["cached_releases"] = list(self.cached_releases)
         return payload
@@ -63,11 +69,13 @@ class ShellState:
         if base != ShellBase.SEARCH:
             search_query = ""
         enabled_sources = _parse_enabled_sources(raw)
+        enabled_genres = _parse_enabled_genres(raw)
         cached_releases = _parse_cached_releases(raw)
         return cls(
             base=base,
             search_query=search_query,
             enabled_sources=enabled_sources,
+            enabled_genres=enabled_genres,
             cached_releases=cached_releases,
         )
 
@@ -164,6 +172,18 @@ def _parse_cached_releases(raw: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     return ()
 
 
+def _parse_enabled_genres(raw: dict[str, Any]) -> frozenset[str]:
+    enabled_raw = raw.get("enabled_genres")
+    if not isinstance(enabled_raw, list):
+        return frozenset()
+    parsed = frozenset(
+        str(item).strip()
+        for item in enabled_raw
+        if isinstance(item, str) and str(item).strip()
+    )
+    return parsed
+
+
 def _parse_enabled_sources(raw: dict[str, Any]) -> frozenset[Source]:
     enabled_raw = raw.get("enabled_sources")
     if isinstance(enabled_raw, list):
@@ -191,6 +211,62 @@ def apply_source_filter(
     if not enabled_sources:
         return list(releases)
     return [release for release in releases if release.source in enabled_sources]
+
+
+def release_genre_bucket(
+    release: Release,
+    *,
+    no_genre_label: str = NO_GENRE_LABEL,
+) -> str:
+    genre = (release.genre or "").strip()
+    return genre if genre else no_genre_label
+
+
+def genres_in_selection(
+    releases: list[Release] | tuple[Release, ...],
+    *,
+    no_genre_label: str = NO_GENRE_LABEL,
+) -> tuple[str, ...]:
+    """Distinct genre buckets in *releases*, sorted case-insensitively."""
+    by_key: dict[str, str] = {}
+    for release in releases:
+        label = release_genre_bucket(release, no_genre_label=no_genre_label)
+        key = label.casefold()
+        by_key.setdefault(key, label)
+    return tuple(sorted(by_key.values(), key=lambda item: item.casefold()))
+
+
+def prune_enabled_genres(
+    enabled_genres: frozenset[str],
+    available_genres: tuple[str, ...] | frozenset[str],
+) -> frozenset[str]:
+    available = frozenset(available_genres)
+    return frozenset(genre for genre in enabled_genres if genre in available)
+
+
+def apply_genre_filter(
+    releases: list[Release],
+    enabled_genres: frozenset[str],
+    *,
+    no_genre_label: str = NO_GENRE_LABEL,
+) -> list[Release]:
+    if not enabled_genres:
+        return list(releases)
+    return [
+        release
+        for release in releases
+        if release_genre_bucket(release, no_genre_label=no_genre_label) in enabled_genres
+    ]
+
+
+def apply_shell_view_filters(
+    releases: list[Release],
+    *,
+    enabled_sources: frozenset[Source],
+    enabled_genres: frozenset[str],
+) -> list[Release]:
+    filtered = apply_source_filter(releases, enabled_sources)
+    return apply_genre_filter(filtered, enabled_genres)
 
 
 def releases_from_recently_added(items: list[RecentlyAddedItem]) -> list[Release]:
