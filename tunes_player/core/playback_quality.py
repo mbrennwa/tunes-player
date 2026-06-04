@@ -51,8 +51,6 @@ def format_playback_status(
     """Combine file format line with honest playback path note."""
     if not playback_note:
         return format_label
-    if playback_note == "bit-perfect playback":
-        return f"{format_label} · {playback_note}"
     return f"{format_label} · {playback_note}"
 
 

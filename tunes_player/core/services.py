@@ -863,6 +863,31 @@ class PlayerService:
     def _apply_path_info(self, path_info: PlaybackPathInfo) -> None:
         self._bit_perfect_playback = path_info.bit_perfect_playback
         self._playback_note = path_info.playback_note
+        self._refresh_quality_hint()
+
+    def _refresh_quality_hint(self) -> None:
+        """Rebuild now-playing format line including the active audio layer."""
+        track = self._current_track
+        if track is None:
+            return
+        if track.id.startswith("tidal:"):
+            base_hint = (
+                self._tidal.stream_format_label(track.id)
+                if self._tidal is not None
+                else "Unknown format"
+            )
+        elif track.id.startswith("qobuz:"):
+            from tunes_player.core.playback_quality import qobuz_stream_format_label
+
+            base_hint = qobuz_stream_format_label(
+                self._config_manager.config.qobuz_stream_format_id
+            )
+        else:
+            metadata = self._store.get_file_metadata(track.id)
+            base_hint = LibraryStore.quality_hint(metadata)
+        self._quality_hint = format_playback_status(
+            base_hint, playback_note=self._playback_note
+        )
 
     def _acquire_exclusive_session_if_needed(self, profile: PlaybackOutputProfile) -> None:
         if not profile.direct_alsa or not profile.use_exclusive:
@@ -1168,8 +1193,11 @@ class PlayerService:
         else:
             metadata = self._store.get_file_metadata(track.id)
             base_hint = LibraryStore.quality_hint(metadata)
-        note = playback_note if playback_note is not None else self._playback_note
-        self._quality_hint = format_playback_status(base_hint, playback_note=note)
+        if playback_note is not None:
+            self._playback_note = playback_note
+        self._quality_hint = format_playback_status(
+            base_hint, playback_note=self._playback_note
+        )
         self._duration_sec = track.duration_sec
         self._reset_playback_position(0.0)
 

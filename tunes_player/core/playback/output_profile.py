@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from tunes_player.core.library.store import FileMetadata
-from tunes_player.core.volume import is_alsa_endpoint_id
+from tunes_player.core.volume import is_alsa_endpoint_id, is_pipewire_endpoint_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,7 +103,7 @@ def compute_output_profile(
             use_exclusive=False,
             allow_resample=True,
         )
-        note = "via PipeWire" if endpoint_id and not endpoint_id.startswith("alsa:") else None
+        note = "via PipeWire" if is_pipewire_endpoint_id(endpoint_id) else None
         return profile, PlaybackPathInfo(
             bit_perfect_playback=False,
             playback_note=note,
@@ -133,11 +133,13 @@ def compute_output_profile(
         audio_format=audio_format,
     )
 
+    from tunes_player.core.playback_quality import format_rate_label
+
     playback_note: str | None = None
     if resampled and file_rate and rate and file_rate != rate:
-        from tunes_player.core.playback_quality import format_rate_label
-
-        playback_note = f"resampling {format_rate_label(file_rate)} → {format_rate_label(rate)}"
+        playback_note = (
+            f"ALSA {format_rate_label(file_rate)} → {format_rate_label(rate)} resampling"
+        )
 
     unity_path = not mpv_soft_volume and device_volume
     bit_perfect = (
@@ -149,9 +151,13 @@ def compute_output_profile(
     )
 
     if bit_perfect:
-        playback_note = "bit-perfect playback"
-    elif playback_note is None and not exclusive_enabled:
-        playback_note = "shared device"
+        playback_note = "ALSA bit-perfect"
+    elif playback_note is None:
+        # Streaming and other paths without file rate metadata still show the layer.
+        if unity_path and not resampled:
+            playback_note = "ALSA bit-perfect"
+        else:
+            playback_note = "ALSA"
 
     return profile, PlaybackPathInfo(
         bit_perfect_playback=bit_perfect,

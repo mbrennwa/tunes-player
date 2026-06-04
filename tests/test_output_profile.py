@@ -9,6 +9,7 @@ from tunes_player.core.playback.output_profile import (
     HwAudioCaps,
     compute_output_profile,
 )
+from tunes_player.core.volume import pipewire_endpoint_id
 
 
 class OutputProfileTests(unittest.TestCase):
@@ -23,7 +24,7 @@ class OutputProfileTests(unittest.TestCase):
                 channels=2,
             ),
             hw_caps=None,
-            endpoint_id="52",
+            endpoint_id=pipewire_endpoint_id("alsa_output.pci.analog-stereo"),
             exclusive_enabled=False,
             device_volume=True,
             mpv_soft_volume=False,
@@ -49,7 +50,7 @@ class OutputProfileTests(unittest.TestCase):
             mpv_soft_volume=False,
         )
         self.assertTrue(path.bit_perfect_playback)
-        self.assertEqual(path.playback_note, "bit-perfect playback")
+        self.assertEqual(path.playback_note, "ALSA bit-perfect")
 
     def test_resample_note_when_rate_unsupported(self) -> None:
         caps = HwAudioCaps(sample_rates=(44100, 48000, 96000), bit_depths=(16, 24))
@@ -71,9 +72,33 @@ class OutputProfileTests(unittest.TestCase):
         self.assertFalse(path.bit_perfect_playback)
         self.assertIsNotNone(path.playback_note)
         assert path.playback_note is not None
-        self.assertIn("resampling", path.playback_note)
-        self.assertIn("192", path.playback_note)
-        self.assertIn("96", path.playback_note)
+        self.assertEqual(
+            path.playback_note,
+            "ALSA 192 kHz → 96 kHz resampling",
+        )
+
+
+    def test_alsa_note_when_streaming_without_file_metadata(self) -> None:
+        _profile, path = compute_output_profile(
+            file_meta=None,
+            hw_caps=None,
+            endpoint_id="alsa:hw:0:0",
+            exclusive_enabled=False,
+            device_volume=True,
+            mpv_soft_volume=False,
+        )
+        self.assertEqual(path.playback_note, "ALSA bit-perfect")
+
+    def test_pipewire_note_when_streaming(self) -> None:
+        _profile, path = compute_output_profile(
+            file_meta=None,
+            hw_caps=None,
+            endpoint_id=pipewire_endpoint_id("alsa_output.pci.analog-stereo"),
+            exclusive_enabled=False,
+            device_volume=True,
+            mpv_soft_volume=False,
+        )
+        self.assertEqual(path.playback_note, "via PipeWire")
 
 
 if __name__ == "__main__":
