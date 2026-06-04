@@ -61,7 +61,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         )
         diagnostics_group.add(self._log_row)
 
-        sources_page = Adw.PreferencesPage(title="Sources", icon_name="cloud-download-symbolic")
+        sources_page = Adw.PreferencesPage(title="Sources", icon_name="folder-music-symbolic")
         local_group = Adw.PreferencesGroup(
             title="Local files",
             description="Folders are scanned into the local library index.",
@@ -200,6 +200,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self.add(sources_page)
         self.add(audio_page)
         self.add(diagnostics_page)
+        self.set_visible_page(sources_page)
 
         self._tidal_oauth_poll_id = 0
         self._tidal_sign_in_dialog: Adw.AlertDialog | None = None
