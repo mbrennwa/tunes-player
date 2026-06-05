@@ -218,6 +218,10 @@ button.artist-link:hover label {
   padding: 4px;
 }
 
+.genre-filter-popover entry {
+  min-height: 28px;
+}
+
 .genre-filter-list row {
   padding: 0;
 }

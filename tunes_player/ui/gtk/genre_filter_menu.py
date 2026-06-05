@@ -8,13 +8,53 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Gtk  # noqa: E402
+from gi.repository import GLib, Gtk  # noqa: E402
 
 EnabledGenresChanged = Callable[[frozenset[str]], None]
 
-_SEARCH_MIN_GENRES = 10
-_POPOVER_MAX_HEIGHT = 320
+_SEARCH_MIN_GENRES = 5
+_POPOVER_LIST_HEIGHT_FALLBACK = 320
+_POPOVER_MIN_LIST_HEIGHT = 120
+_POPOVER_BOTTOM_MARGIN = 16
+_POPOVER_TOP_MARGIN = 8
+_NOW_PLAYING_HEIGHT_FALLBACK = 72
+_POPOVER_BOX_MARGIN_VERTICAL = 8
+_POPOVER_CSS_PADDING_VERTICAL = 8
+_SEARCH_ENTRY_HEIGHT = 38
+_CLEAR_BTN_HEIGHT = 38
+_GENRE_ROW_HEIGHT = 32
 _LIST_WIDTH = 240
+
+
+def genre_filter_list_max_height(
+    *,
+    natural_list_height: int,
+    available_height: int,
+    min_list_height: int = _POPOVER_MIN_LIST_HEIGHT,
+    fallback_max: int = _POPOVER_LIST_HEIGHT_FALLBACK,
+) -> int:
+    """Clamp genre list height to the space available for the scroll area."""
+    if available_height <= 0:
+        return fallback_max
+    target = min(natural_list_height, available_height)
+    if natural_list_height > target:
+        return max(min_list_height, target)
+    return target
+
+
+def _find_descendant_by_css_class(
+    widget: Gtk.Widget,
+    css_class: str,
+) -> Gtk.Widget | None:
+    if widget.has_css_class(css_class):
+        return widget
+    child = widget.get_first_child()
+    while child is not None:
+        found = _find_descendant_by_css_class(child, css_class)
+        if found is not None:
+            return found
+        child = child.get_next_sibling()
+    return None
 
 
 class GenreFilterMenu(Gtk.Box):
@@ -61,41 +101,43 @@ class GenreFilterMenu(Gtk.Box):
         self._menu_btn.connect("clicked", self._on_menu_btn_clicked)
         self.append(self._menu_btn)
 
-        popover_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        popover_box.set_margin_top(4)
-        popover_box.set_margin_bottom(4)
-        popover_box.set_margin_start(6)
-        popover_box.set_margin_end(6)
-        popover_box.set_size_request(_LIST_WIDTH, -1)
+        self._popover_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self._popover_box.set_margin_top(4)
+        self._popover_box.set_margin_bottom(4)
+        self._popover_box.set_margin_start(6)
+        self._popover_box.set_margin_end(6)
+        self._popover_box.set_size_request(_LIST_WIDTH, -1)
 
         self._search_entry = Gtk.SearchEntry()
         self._search_entry.set_placeholder_text("Filter genres…")
         self._search_entry.set_visible(False)
+        self._search_entry.set_hexpand(True)
+        self._search_entry.set_margin_bottom(4)
         self._search_entry.connect("search-changed", self._on_search_changed)
-        popover_box.append(self._search_entry)
+        self._popover_box.append(self._search_entry)
 
-        scrolled = Gtk.ScrolledWindow()
-        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scrolled.set_max_content_height(_POPOVER_MAX_HEIGHT)
-        scrolled.set_vexpand(True)
+        self._scrolled = Gtk.ScrolledWindow()
+        self._scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self._scrolled.set_max_content_height(_POPOVER_LIST_HEIGHT_FALLBACK)
+        self._scrolled.set_vexpand(False)
 
         self._list = Gtk.ListBox()
         self._list.set_selection_mode(Gtk.SelectionMode.NONE)
         self._list.add_css_class("genre-filter-list")
-        scrolled.set_child(self._list)
-        popover_box.append(scrolled)
+        self._scrolled.set_child(self._list)
+        self._popover_box.append(self._scrolled)
 
-        clear_btn = Gtk.Button(label="Clear selection")
-        clear_btn.add_css_class("flat")
-        clear_btn.add_css_class("genre-filter-clear")
-        clear_btn.set_halign(Gtk.Align.START)
-        clear_btn.set_margin_top(4)
-        clear_btn.connect("clicked", self._on_clear_clicked)
-        popover_box.append(clear_btn)
+        self._clear_btn = Gtk.Button(label="Clear selection")
+        self._clear_btn.add_css_class("flat")
+        self._clear_btn.add_css_class("genre-filter-clear")
+        self._clear_btn.set_halign(Gtk.Align.START)
+        self._clear_btn.set_margin_top(4)
+        self._clear_btn.connect("clicked", self._on_clear_clicked)
+        self._popover_box.append(self._clear_btn)
 
         self._popover = Gtk.Popover()
         self._popover.add_css_class("genre-filter-popover")
-        self._popover.set_child(popover_box)
+        self._popover.set_child(self._popover_box)
         self._popover.set_parent(self._menu_btn)
 
     def set_genres(
@@ -106,8 +148,12 @@ class GenreFilterMenu(Gtk.Box):
         self._genres = genres
         self._rebuild_list()
         self.set_enabled_genres(enabled_genres)
-        self._search_entry.set_visible(len(genres) >= _SEARCH_MIN_GENRES)
-        if not self._search_entry.get_visible():
+        self._update_search_visibility()
+
+    def _update_search_visibility(self) -> None:
+        show_search = len(self._genres) >= _SEARCH_MIN_GENRES
+        self._search_entry.set_visible(show_search)
+        if not show_search:
             self._search_entry.set_text("")
             self._apply_search_filter("")
 
@@ -158,6 +204,74 @@ class GenreFilterMenu(Gtk.Box):
             return
         self._menu_label.set_label(f"{len(ordered)} selected")
 
+    def _list_natural_height(self) -> int:
+        if not self._genres:
+            return 0
+        return len(self._genres) * _GENRE_ROW_HEIGHT
+
+    def _popover_chrome_height(self) -> int:
+        chrome = _POPOVER_BOX_MARGIN_VERTICAL + _POPOVER_CSS_PADDING_VERTICAL
+        if self._search_entry.get_visible():
+            chrome += self._search_entry.get_margin_bottom() + _SEARCH_ENTRY_HEIGHT
+        chrome += self._clear_btn.get_margin_top() + _CLEAR_BTN_HEIGHT
+        return chrome
+
+    def _anchor_bounds_in_root(self, root: Gtk.Widget) -> tuple[int, int] | None:
+        top_coords = self._menu_btn.translate_coordinates(root, 0, 0)
+        bottom_coords = self._menu_btn.translate_coordinates(
+            root,
+            0,
+            self._menu_btn.get_allocated_height(),
+        )
+        if top_coords is None or bottom_coords is None:
+            return None
+        _left, anchor_top_y = top_coords
+        _left, anchor_bottom_y = bottom_coords
+        return int(anchor_top_y), int(anchor_bottom_y)
+
+    def _available_list_height(self, root: Gtk.Widget, anchor_top_y: int, anchor_bottom_y: int) -> int:
+        window_height = root.get_height()
+        bottom_inset = self._bottom_inset(root)
+        space_below = window_height - anchor_bottom_y - bottom_inset
+        space_above = anchor_top_y - _POPOVER_TOP_MARGIN
+        # Popover may open in either direction; size for the side with more room.
+        return max(space_below, space_above) - self._popover_chrome_height()
+
+    def _bottom_inset(self, root: Gtk.Widget) -> int:
+        now_playing = _find_descendant_by_css_class(root, "now-playing-bar")
+        if now_playing is not None:
+            return now_playing.get_allocated_height() + _POPOVER_BOTTOM_MARGIN
+        return _NOW_PLAYING_HEIGHT_FALLBACK + _POPOVER_BOTTOM_MARGIN
+
+    def _sync_list_max_height(self) -> None:
+        root = self.get_root()
+        if root is None or not self._menu_btn.get_mapped():
+            self._scrolled.set_max_content_height(_POPOVER_LIST_HEIGHT_FALLBACK)
+            return
+
+        bounds = self._anchor_bounds_in_root(root)
+        if bounds is None:
+            self._scrolled.set_max_content_height(_POPOVER_LIST_HEIGHT_FALLBACK)
+            return
+        anchor_top_y, anchor_bottom_y = bounds
+
+        window_height = root.get_height()
+        if window_height <= 0:
+            self._scrolled.set_max_content_height(_POPOVER_LIST_HEIGHT_FALLBACK)
+            return
+
+        list_max = genre_filter_list_max_height(
+            natural_list_height=self._list_natural_height(),
+            available_height=self._available_list_height(
+                root,
+                anchor_top_y,
+                anchor_bottom_y,
+            ),
+        )
+        if list_max <= 0:
+            list_max = _POPOVER_LIST_HEIGHT_FALLBACK
+        self._scrolled.set_max_content_height(list_max)
+
     def _on_check_toggled(self, *_args: object) -> None:
         if self._updating:
             return
@@ -167,7 +281,15 @@ class GenreFilterMenu(Gtk.Box):
             self._on_changed(enabled)
 
     def _on_menu_btn_clicked(self, *_args: object) -> None:
+        self._update_search_visibility()
+        self._sync_list_max_height()
         self._popover.popup()
+        GLib.idle_add(self._resync_list_max_height_after_popup)
+
+    def _resync_list_max_height_after_popup(self) -> bool:
+        if self._popover.get_visible():
+            self._sync_list_max_height()
+        return False
 
     def _on_clear_clicked(self, *_args: object) -> None:
         if not self.get_enabled_genres():
