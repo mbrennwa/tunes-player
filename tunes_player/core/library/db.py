@@ -7,6 +7,13 @@ from pathlib import Path
 
 SCHEMA_VERSION = 7
 
+LOCK_RETRY_ATTEMPTS = 6
+LOCK_RETRY_BASE_DELAY_SEC = 0.15
+
+
+def is_locked_error(exc: BaseException) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
+
 _SCHEMA = """
 PRAGMA foreign_keys = ON;
 

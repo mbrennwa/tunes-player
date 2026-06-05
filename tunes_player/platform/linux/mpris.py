@@ -300,7 +300,8 @@ class MprisService:
             self._emit_seeked(int(offset_us))
         elif method_name == "SetVolume":
             (volume,) = parameters.unpack()
-            self._service.set_volume(max(0.0, min(1.0, volume)))
+            if self._service.volume_adjustable():
+                self._service.set_volume(max(0.0, min(1.0, volume)))
         else:
             invocation.return_dbus_error(
                 "org.freedesktop.DBus.Error.UnknownMethod",
@@ -372,7 +373,10 @@ class MprisService:
                 "Rate": GLib.Variant("d", 1.0),
                 "Shuffle": GLib.Variant("b", self._shuffle),
                 "Metadata": GLib.Variant("a{sv}", self._metadata(state)),
-                "Volume": GLib.Variant("d", state.volume),
+                "Volume": GLib.Variant(
+                    "d",
+                    state.volume if self._service.volume_adjustable() else 1.0,
+                ),
                 "Position": GLib.Variant("x", self._position_us(state)),
                 "MinimumRate": GLib.Variant("d", 1.0),
                 "MaximumRate": GLib.Variant("d", 1.0),
@@ -401,7 +405,8 @@ class MprisService:
                 f"Property {interface_name}.{property_name} is not writable",
             )
         if property_name == "Volume":
-            self._service.set_volume(max(0.0, min(1.0, value.unpack())))
+            if self._service.volume_adjustable():
+                self._service.set_volume(max(0.0, min(1.0, value.unpack())))
         elif property_name == "LoopStatus":
             loop_status = value.unpack()
             if loop_status not in {"None", "Track", "Playlist"}:

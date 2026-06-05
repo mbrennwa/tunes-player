@@ -45,8 +45,8 @@ class FolderMonitorManager:
 
     def start(self) -> None:
         self._sync_monitors()
-        self._service.enqueue_startup_art_maintenance()
         self._service.enqueue_startup_scans()
+        self._service.enqueue_startup_art_maintenance()
 
     def stop(self) -> None:
         for folder in list(self._monitors):

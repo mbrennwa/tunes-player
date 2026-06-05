@@ -38,9 +38,18 @@ class FolderMonitorManagerTests(unittest.TestCase):
         ):
             self._manager.start()
 
-        art.assert_called_once_with()
         startup.assert_called_once_with()
+        art.assert_called_once_with()
         periodic.assert_not_called()
+
+    def test_startup_art_maintenance_defers_while_scans_pending(self) -> None:
+        self._config.add_music_folder(self._folder, auto_monitor=True)
+        with patch("threading.Thread") as thread:
+            self._service.enqueue_scan(folder=self._folder)
+            self._service.enqueue_startup_art_maintenance()
+
+        thread.assert_not_called()
+        self.assertTrue(self._service._pending_startup_art_maintenance)
 
     def test_filesystem_change_schedules_debounced_incremental_scan(self) -> None:
         self._config.add_music_folder(self._folder, auto_monitor=True)

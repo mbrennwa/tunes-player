@@ -51,6 +51,7 @@ def upsert_album_art(
         """,
         (album_id, local_art_uri(album_id), mime_type),
     )
+    connection.commit()
 
 
 def index_album_art_for_file(
@@ -100,6 +101,7 @@ def repair_stale_album_art(connection: sqlite3.Connection, *, data_dir: Path) ->
             repaired += 1
             continue
         connection.execute("DELETE FROM album_art WHERE album_id = ?", (album_id,))
+        connection.commit()
     return repaired
 
 
@@ -159,6 +161,7 @@ def prune_orphan_album_art(connection: sqlite3.Connection, *, data_dir: Path) ->
         if cached is not None:
             cached.unlink(missing_ok=True)
         connection.execute("DELETE FROM album_art WHERE album_id = ?", (album_id,))
+        connection.commit()
 
 
 def _extract_flac_art(path: Path) -> tuple[bytes, str] | None:

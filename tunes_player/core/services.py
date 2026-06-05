@@ -5,6 +5,7 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import multiprocessing
+import sqlite3
 import threading
 import time
 from dataclasses import dataclass
@@ -43,7 +44,13 @@ from tunes_player.core.playback.output_profile import (
     compute_output_profile,
 )
 from tunes_player.core.playback_quality import format_playback_status
-from tunes_player.core.volume import VolumeController, VolumeEndpoint, is_alsa_endpoint_id
+from tunes_player.core.volume import (
+    VolumeController,
+    VolumeEndpoint,
+    VolumeMode,
+    derive_volume_mode,
+    is_alsa_endpoint_id,
+)
 
 EventCallback = Callable[[str], None]
 Unsubscribe = Callable[[], None]
@@ -100,6 +107,7 @@ class PlaybackState:
     device_volume: bool
     mpv_soft_volume: bool
     no_volume_control: bool
+    volume_mode: VolumeMode
     output_using_fallback: bool
     position_sec: float
     duration_sec: float | None
@@ -166,6 +174,8 @@ class PlayerService:
         self._scan_last_error: str | None = None
         self._current_scan_job: _ScanJob | None = None
         self._pending_scan_jobs: list[_ScanJob] = []
+        self._pending_startup_art_maintenance = False
+        self._art_maintenance_running = False
         self._incremental_coalesce: dict[str, tuple[set[str], set[str]]] = {}
         self._last_recorded_track_id: str | None = None
         self._last_recorded_at_ns = 0
@@ -528,37 +538,67 @@ class PlayerService:
         """Repair/backfill album art without walking the library tree."""
         if not self._config_manager.config.music_folders:
             return
+        self._pending_startup_art_maintenance = True
+        self._try_start_art_maintenance()
+
+    def _try_start_art_maintenance(self) -> None:
+        if not self._pending_startup_art_maintenance:
+            return
+        if (
+            self._art_maintenance_running
+            or self.is_scanning()
+            or self._pending_scan_jobs
+        ):
+            return
+        self._pending_startup_art_maintenance = False
+        self._art_maintenance_running = True
         threading.Thread(target=self._run_art_maintenance_worker, daemon=True).start()
 
     def _run_art_maintenance_worker(self) -> None:
         try:
-            added, repaired = self._maintain_library_art_blocking()
-        except Exception:
-            log.exception("Album art maintenance failed")
-            return
-        if added or repaired:
-            log.info("Album art maintenance indexed %d and repaired %d covers", added, repaired)
-            self.notify_art_updated()
+            try:
+                added, repaired = self._maintain_library_art_blocking()
+            except Exception:
+                log.exception("Album art maintenance failed")
+                return
+            if added or repaired:
+                log.info(
+                    "Album art maintenance indexed %d and repaired %d covers",
+                    added,
+                    repaired,
+                )
+                self.notify_art_updated()
+        finally:
+            self._art_maintenance_running = False
 
     def _maintain_library_art_blocking(self) -> tuple[int, int]:
         from tunes_player.core.library.art_cache import maintain_album_art
-        from tunes_player.core.library.db import connect
+        from tunes_player.core.library.db import (
+            LOCK_RETRY_ATTEMPTS,
+            LOCK_RETRY_BASE_DELAY_SEC,
+            connect,
+            is_locked_error,
+        )
 
         db_path = self._config_manager.database_path
         data_dir = self._config_manager.data_dir
         self._store.close()
         try:
-            connection = connect(db_path)
-            try:
-                connection.execute("BEGIN")
-                result = maintain_album_art(connection, data_dir=data_dir)
-                connection.commit()
-                return result
-            except Exception:
-                connection.rollback()
-                raise
-            finally:
-                connection.close()
+            last_error: sqlite3.OperationalError | None = None
+            for attempt in range(LOCK_RETRY_ATTEMPTS):
+                connection = connect(db_path)
+                try:
+                    return maintain_album_art(connection, data_dir=data_dir)
+                except sqlite3.OperationalError as exc:
+                    if not is_locked_error(exc) or attempt == LOCK_RETRY_ATTEMPTS - 1:
+                        raise
+                    last_error = exc
+                    time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
+                finally:
+                    connection.close()
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError("album art maintenance retry loop exited without result")
         finally:
             self._store.reconnect()
 
@@ -915,6 +955,7 @@ class PlayerService:
             if coalesced is not None:
                 self._pending_scan_jobs.insert(0, coalesced)
         self._try_start_scan()
+        self._try_start_art_maintenance()
 
     def _flush_deferred_plays(self) -> None:
         pending = self._deferred_plays
@@ -946,6 +987,8 @@ class PlayerService:
         self._emit("art_updated")
 
     def get_playback_state(self) -> PlaybackState:
+        volume_mode = self._volume_mode()
+        mpv_soft_volume = volume_mode == "software"
         return PlaybackState(
             current_track=self._current_track,
             is_playing=self._is_playing,
@@ -957,12 +1000,37 @@ class PlayerService:
             bit_perfect_playback=self._bit_perfect_playback,
             playback_note=self._playback_note,
             device_volume=self._device_volume,
-            mpv_soft_volume=self._mpv_soft_volume(),
-            no_volume_control=self._no_volume_control(),
+            mpv_soft_volume=mpv_soft_volume,
+            no_volume_control=volume_mode == "fixed",
+            volume_mode=volume_mode,
             output_using_fallback=self._output_using_fallback(),
             position_sec=self._playback_position(),
             duration_sec=self._duration_sec,
         )
+
+    def volume_mode(self) -> VolumeMode:
+        return self._volume_mode()
+
+    def volume_adjustable(self) -> bool:
+        return self._volume_mode() != "fixed"
+
+    def refresh_output_volume_detection(self) -> None:
+        """Re-probe whether the active output supports hardware volume."""
+        try:
+            from tunes_player.platform.linux.alsa_mixer import clear_alsa_mixer_cache
+
+            clear_alsa_mixer_cache()
+        except ImportError:
+            pass
+        was_device_volume = self._device_volume
+        detected = self._has_device_volume()
+        self._device_volume = detected
+        if (
+            was_device_volume
+            and not detected
+            and self._config_manager.config.volume_control_mode is None
+        ):
+            self.set_volume_mode("fixed")
 
     def play_track(self, track_id: str) -> None:
         if track_id.startswith("tidal:"):
@@ -1144,12 +1212,16 @@ class PlayerService:
         self._emit("position_changed")
 
     def set_volume(self, level: float, *, notify: bool = True) -> None:
+        if not self.volume_adjustable():
+            return
         self._volume = max(0.0, min(1.0, level))
         if self._muted and self._volume > 0:
             self._muted = False
         self._push_volume_to_output(notify=notify)
 
     def toggle_mute(self) -> None:
+        if not self.volume_adjustable():
+            return
         self._muted = not self._muted
         self._push_volume_to_output(notify=True)
 
@@ -1157,10 +1229,13 @@ class PlayerService:
         return 0.0 if self._muted else self._volume
 
     def _push_volume_to_output(self, *, notify: bool = True) -> None:
+        if not self.volume_adjustable():
+            return
         level = self._output_volume_level()
-        if self._device_volume and self._volume_controller is not None:
+        mode = self._volume_mode()
+        if mode == "hardware" and self._device_volume and self._volume_controller is not None:
             self._volume_controller.set_level(level)
-        else:
+        elif mode == "software":
             engine = self._engine
             if engine is not None:
                 engine.set_volume(level)
@@ -1168,7 +1243,10 @@ class PlayerService:
             self._emit("volume_changed")
 
     def adjust_volume(self, delta: float) -> None:
-        if self._device_volume and self._volume_controller is not None:
+        if not self.volume_adjustable():
+            return
+        mode = self._volume_mode()
+        if mode == "hardware" and self._device_volume and self._volume_controller is not None:
             if self._muted:
                 self._volume = max(0.0, min(1.0, self._volume + delta))
                 if self._volume > 0:
@@ -1192,7 +1270,13 @@ class PlayerService:
         self._volume_controller.set_active_endpoint(endpoint_id)
         self._config_manager.config.output_sink_id = endpoint_id
         self._config_manager.save()
+        self._config_manager.config.volume_control_mode = None
+        self._config_manager.save()
         self._rebuild_engine_for_output_change()
+        if not self._device_volume:
+            self.set_volume_mode("fixed")
+        else:
+            self._apply_engine_volume_policy()
         self._emit("playback_changed")
 
     def list_output_sinks(self) -> list[VolumeEndpoint]:
@@ -1221,6 +1305,17 @@ class PlayerService:
             return
         self._allow_software_volume_fallback = enabled
         self._config_manager.config.allow_software_volume_fallback = enabled
+        self._config_manager.save()
+        self._apply_engine_volume_policy()
+        self._emit("playback_changed")
+
+    def set_volume_mode(self, mode: VolumeMode) -> None:
+        if mode == "hardware" and not self._device_volume:
+            return
+        cfg = self._config_manager.config
+        cfg.volume_control_mode = None if mode == "hardware" else mode
+        cfg.allow_software_volume_fallback = mode == "software"
+        self._allow_software_volume_fallback = cfg.allow_software_volume_fallback
         self._config_manager.save()
         self._apply_engine_volume_policy()
         self._emit("playback_changed")
@@ -1523,15 +1618,33 @@ class PlayerService:
         self._sync_from_engine()
         return True
 
+    def _auto_volume_mode(self) -> VolumeMode:
+        return derive_volume_mode(
+            device_volume=self._device_volume,
+            mpv_soft_volume=(
+                not self._device_volume and self._allow_software_volume_fallback
+            ),
+        )
+
+    def _volume_mode(self) -> VolumeMode:
+        override = self._config_manager.config.volume_control_mode
+        if override == "software":
+            return "software"
+        if override == "fixed":
+            return "fixed"
+        if override == "hardware" and self._device_volume:
+            return "hardware"
+        return self._auto_volume_mode()
+
     def _mpv_soft_volume(self) -> bool:
-        return not self._device_volume and self._allow_software_volume_fallback
+        return self._volume_mode() == "software"
 
     def _unity_gain_profile(self) -> bool:
         """mpv unity gain — no in-player attenuation (derived bit-perfect active)."""
-        return not self._mpv_soft_volume()
+        return self._volume_mode() != "software"
 
     def _no_volume_control(self) -> bool:
-        return not self._device_volume and not self._allow_software_volume_fallback
+        return self._volume_mode() == "fixed"
 
     def _output_using_fallback(self) -> bool:
         configured = self._config_manager.config.output_sink_id

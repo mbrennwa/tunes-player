@@ -116,6 +116,8 @@ class AppConfig:
     music_folder_last_scan_kind: dict[str, str] = field(default_factory=dict)
     output_sink_id: str | None = None
     allow_software_volume_fallback: bool = True
+    # None = auto (hardware when available); software/fixed override user choice.
+    volume_control_mode: str | None = None
     exclusive_device_access: bool = False
     qobuz_app_id: str | None = None
     qobuz_app_secret: str | None = None
@@ -236,6 +238,7 @@ class ConfigManager:
             "music_folder_last_scan_kind": dict(self._config.music_folder_last_scan_kind),
             "output_sink_id": self._config.output_sink_id,
             "allow_software_volume_fallback": self._config.allow_software_volume_fallback,
+            "volume_control_mode": self._config.volume_control_mode,
             "exclusive_device_access": self._config.exclusive_device_access,
             "qobuz_app_id": self._config.qobuz_app_id,
             "qobuz_app_secret": self._config.qobuz_app_secret,

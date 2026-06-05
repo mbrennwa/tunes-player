@@ -13,7 +13,7 @@ from tunes_player.core.audio_labels import (
 from tunes_player.core.volume import SYSTEM_DEFAULT_SINK_ID
 from tunes_player.core.config import ConfigManager
 from tunes_player.core.services import PlayerService
-from tunes_player.core.volume import VolumeEndpoint
+from tunes_player.core.volume import VolumeEndpoint, derive_volume_mode
 
 
 class _SinkVolumeController:
@@ -90,6 +90,20 @@ class AudioPolicyTests(unittest.TestCase):
         )
         self.assertEqual(endpoint_display_label(endpoint), "My DAC · capable")
 
+    def test_derive_volume_mode(self) -> None:
+        self.assertEqual(
+            derive_volume_mode(device_volume=True, mpv_soft_volume=False),
+            "hardware",
+        )
+        self.assertEqual(
+            derive_volume_mode(device_volume=False, mpv_soft_volume=True),
+            "software",
+        )
+        self.assertEqual(
+            derive_volume_mode(device_volume=False, mpv_soft_volume=False),
+            "fixed",
+        )
+
     def test_unity_gain_when_device_volume_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = ConfigManager(Path(tmp) / "config.json")
@@ -99,6 +113,8 @@ class AudioPolicyTests(unittest.TestCase):
             self.assertTrue(state.device_volume)
             self.assertFalse(state.bit_perfect_playback)
             self.assertFalse(state.mpv_soft_volume)
+            self.assertEqual(state.volume_mode, "hardware")
+            self.assertTrue(service.volume_adjustable())
 
     def test_software_volume_when_no_sink_and_fallback_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -109,6 +125,8 @@ class AudioPolicyTests(unittest.TestCase):
             self.assertFalse(state.device_volume)
             self.assertFalse(state.bit_perfect_playback)
             self.assertTrue(state.mpv_soft_volume)
+            self.assertEqual(state.volume_mode, "software")
+            self.assertTrue(service.volume_adjustable())
 
     def test_no_volume_control_when_fallback_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -120,6 +138,29 @@ class AudioPolicyTests(unittest.TestCase):
             state = service.get_playback_state()
             self.assertTrue(state.no_volume_control)
             self.assertFalse(state.bit_perfect_playback)
+            self.assertEqual(state.volume_mode, "fixed")
+            self.assertFalse(service.volume_adjustable())
+
+    def test_volume_mode_override_fixed_despite_device_volume(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ConfigManager(Path(tmp) / "config.json")
+            config.load()
+            service = PlayerService(config=config, volume_controller=_SinkVolumeController(config.config))
+            service.set_volume_mode("fixed")
+            state = service.get_playback_state()
+            self.assertTrue(state.device_volume)
+            self.assertEqual(state.volume_mode, "fixed")
+            self.assertFalse(service.volume_adjustable())
+
+    def test_set_volume_noop_when_fixed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ConfigManager(Path(tmp) / "config.json")
+            config.load()
+            config.config.allow_software_volume_fallback = False
+            config.save()
+            service = PlayerService(config=config, volume_controller=None)
+            service.set_volume(0.25)
+            self.assertEqual(service.get_playback_state().volume, 0.72)
 
     def test_output_using_fallback_when_saved_sink_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -98,6 +98,16 @@ def probe_linux_audio_stack() -> LinuxAudioStackInfo:
     )
 
 
+def alsa_card_description(card: int) -> str:
+    """Return the long or short name for an ALSA card number."""
+    for entry in _parse_aplay_playback_devices():
+        if entry[0] == card:
+            card_long = entry[2]
+            card_name = entry[1]
+            return (card_long or card_name).strip()
+    return ""
+
+
 def list_alsa_playback_endpoints() -> list[tuple[str, str, str]]:
     """Return (endpoint_id, mpv_device, description) for each ALSA playback device."""
     devices = _parse_aplay_playback_devices()

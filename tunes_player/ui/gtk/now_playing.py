@@ -144,16 +144,16 @@ class NowPlayingBar(Gtk.Box):
         next_btn.connect("clicked", lambda *_: service.skip_next())
         controls.append(next_btn)
 
-        volume_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        volume_box.set_size_request(_VOLUME_BOX_WIDTH, -1)
-        volume_box.set_valign(Gtk.Align.CENTER)
-        controls.append(volume_box)
+        self._volume_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self._volume_box.set_size_request(_VOLUME_BOX_WIDTH, -1)
+        self._volume_box.set_valign(Gtk.Align.CENTER)
+        controls.append(self._volume_box)
 
         self._mute_btn = Gtk.Button()
         self._mute_btn.set_icon_name("audio-volume-high-symbolic")
         self._mute_btn.set_tooltip_text("Mute")
         self._mute_btn.connect("clicked", self._on_mute_clicked)
-        volume_box.append(self._mute_btn)
+        self._volume_box.append(self._mute_btn)
 
         self._volume = Gtk.Scale.new_with_range(
             Gtk.Orientation.HORIZONTAL,
@@ -170,7 +170,7 @@ class NowPlayingBar(Gtk.Box):
             self._begin_volume_drag,
             self._end_volume_drag,
         )
-        volume_box.append(self._volume)
+        self._volume_box.append(self._volume)
 
         queue_btn = Gtk.Button()
         queue_btn.set_icon_name("view-list-symbolic")
@@ -383,6 +383,8 @@ class NowPlayingBar(Gtk.Box):
         self._mute_btn.set_tooltip_text("Unmute" if state.muted else "Mute")
 
     def _on_volume_changed(self, scale: Gtk.Scale) -> None:
+        if not self._service.volume_adjustable():
+            return
         value = scale.get_value()
         if self._volume_dragging:
             self._pending_volume = value
@@ -432,7 +434,9 @@ class NowPlayingBar(Gtk.Box):
             self._sync_art(track)
             self._sync_art_clickable(track)
 
-        if not self._volume_dragging and event in (
+        volume_visible = state.volume_mode != "fixed"
+        self._volume_box.set_visible(volume_visible)
+        if volume_visible and not self._volume_dragging and event in (
             None,
             "volume_changed",
             "playback_changed",
@@ -440,7 +444,7 @@ class NowPlayingBar(Gtk.Box):
             self._volume.handler_block_by_func(self._on_volume_changed)
             self._volume.set_value(state.volume)
             self._volume.handler_unblock_by_func(self._on_volume_changed)
-        self._sync_mute_button(state)
+            self._sync_mute_button(state)
 
         return False
 
@@ -511,9 +515,11 @@ def _handle_media_key(keyval: int, service: PlayerService) -> bool:
         service.pause()
         return True
     if keyval == _KEY_VOLUME_UP:
-        service.adjust_volume(0.05)
+        if service.volume_adjustable():
+            service.adjust_volume(0.05)
         return True
     if keyval == _KEY_VOLUME_DOWN:
-        service.adjust_volume(-0.05)
+        if service.volume_adjustable():
+            service.adjust_volume(-0.05)
         return True
     return False

@@ -432,9 +432,9 @@ class LinuxOutputController:
         card = self._active_alsa_card()
         if card is None:
             return False
-        from tunes_player.platform.linux.alsa_mixer import alsa_mixer_available
+        from tunes_player.platform.linux.alsa_mixer import alsa_mixer_adjustable
 
-        return alsa_mixer_available(card)
+        return alsa_mixer_adjustable(card)
 
     @property
     def uses_device_volume(self) -> bool:
@@ -536,6 +536,9 @@ class LinuxOutputController:
         return endpoints[0].id
 
     def set_active_endpoint(self, endpoint_id: str) -> None:
+        from tunes_player.platform.linux.alsa_mixer import clear_alsa_mixer_cache
+
+        clear_alsa_mixer_cache()
         self._config.output_sink_id = endpoint_id
         self._cached_endpoints = None
 

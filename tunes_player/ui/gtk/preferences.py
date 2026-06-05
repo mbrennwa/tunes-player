@@ -23,6 +23,16 @@ from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.util import escape_markup, open_external_uri, read_clipboard_text
 
 _FOLDER_WATCH_LABEL = "Watch folder"
+_VOLUME_MODE_LABELS = ("Hardware", "Software", "Fixed")
+_VOLUME_MODE_HARDWARE = 0
+_VOLUME_MODE_SOFTWARE = 1
+_VOLUME_MODE_FIXED = 2
+_VOLUME_MODE_SUBTITLES = {
+    "hardware": "Volume control on device",
+    "software": "In-app volume control (not bit-perfect)",
+    "fixed": "No volume control",
+}
+_VOLUME_MODE_LABELS_NO_HW = ("Software", "Fixed")
 
 
 class PreferencesWindow(Adw.PreferencesWindow):
@@ -107,15 +117,23 @@ class PreferencesWindow(Adw.PreferencesWindow):
         )
         audio.add(self._exclusive_row)
 
-        self._software_volume_row = Adw.SwitchRow(
-            title="Allow software volume",
-            subtitle="For devices with fixed volume",
-            active=service.config.config.allow_software_volume_fallback,
+        self._volume_mode_row = Adw.ActionRow(
+            title="Volume control",
+            subtitle=_VOLUME_MODE_SUBTITLES["hardware"],
         )
-        self._software_volume_row.connect(
-            "notify::active", self._on_software_volume_fallback_changed
+        self._volume_mode_dropdown = Gtk.DropDown(
+            model=Gtk.StringList.new(list(_VOLUME_MODE_LABELS)),
         )
-        audio.add(self._software_volume_row)
+        self._volume_mode_dropdown.set_halign(Gtk.Align.END)
+        self._volume_mode_dropdown.set_size_request(200, -1)
+        self._volume_mode_dropdown.set_valign(Gtk.Align.CENTER)
+        self._volume_mode_dropdown.connect(
+            "notify::selected", self._on_volume_mode_changed
+        )
+        self._volume_mode_row.add_suffix(self._volume_mode_dropdown)
+        self._volume_mode_row.set_activatable_widget(self._volume_mode_dropdown)
+        audio.add(self._volume_mode_row)
+        self._volume_mode_dropdown_hw: bool | None = None
         self._reload_output_sinks()
 
         audio_page = Adw.PreferencesPage(title="Audio", icon_name="audio-speakers-symbolic")
@@ -228,6 +246,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
 
         self._tidal_pkce_dialog: Adw.Dialog | None = None
         self._updating_output_dropdown = False
+        self._updating_volume_mode_dropdown = False
         self._reload_folders()
         self._reload_tidal_status()
         self._reload_qobuz_status()
@@ -237,7 +256,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
     def _on_preferences_map(self, *_args: object) -> None:
         self._apply_audio_group_description()
         self._reload_output_sinks()
-        self._sync_software_volume_row()
+        self._sync_volume_mode_row()
         self._sync_scan_ui()
 
     @staticmethod
@@ -404,8 +423,51 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._service.remove_music_folder(folder)
         self._reload_folders()
 
-    def _on_software_volume_fallback_changed(self, row: Adw.SwitchRow, *_args: object) -> None:
-        self._service.set_allow_software_volume_fallback(row.get_active())
+    @staticmethod
+    def _volume_mode_index(mode: str) -> int:
+        return {
+            "hardware": _VOLUME_MODE_HARDWARE,
+            "software": _VOLUME_MODE_SOFTWARE,
+            "fixed": _VOLUME_MODE_FIXED,
+        }[mode]
+
+    @staticmethod
+    def _volume_mode_dropdown_labels(device_volume: bool) -> tuple[str, ...]:
+        if device_volume:
+            return _VOLUME_MODE_LABELS
+        return _VOLUME_MODE_LABELS_NO_HW
+
+    @staticmethod
+    def _volume_mode_for_dropdown_index(index: int, *, device_volume: bool) -> str:
+        if device_volume:
+            return ("hardware", "software", "fixed")[index]
+        return ("software", "fixed")[index]
+
+    @staticmethod
+    def _dropdown_index_for_volume_mode(mode: str, *, device_volume: bool) -> int:
+        if device_volume:
+            return PreferencesWindow._volume_mode_index(mode)
+        if mode == "fixed":
+            return 1
+        return 0
+
+    def _on_volume_mode_changed(self, dropdown: Gtk.DropDown, *_args: object) -> None:
+        if self._updating_volume_mode_dropdown:
+            return
+        index = dropdown.get_selected()
+        if index < 0:
+            return
+        self._service.refresh_output_volume_detection()
+        device_volume = self._service.get_playback_state().device_volume
+        max_index = len(self._volume_mode_dropdown_labels(device_volume)) - 1
+        if index > max_index:
+            self._sync_volume_mode_row()
+            return
+        mode = self._volume_mode_for_dropdown_index(
+            index,
+            device_volume=device_volume,
+        )
+        self._service.set_volume_mode(mode)
 
     def _on_new_music_within_days_changed(self, adjustment: Gtk.Adjustment) -> None:
         days = int(adjustment.get_value())
@@ -433,20 +495,29 @@ class PreferencesWindow(Adw.PreferencesWindow):
             return "Saved device unavailable — using fallback"
         return ""
 
-    def _sync_software_volume_row(self) -> None:
-        """Disable soft-volume option when the selected output has hardware/sink volume."""
-        row = getattr(self, "_software_volume_row", None)
-        if row is None:
+    def _sync_volume_mode_row(self) -> None:
+        row = getattr(self, "_volume_mode_row", None)
+        dropdown = getattr(self, "_volume_mode_dropdown", None)
+        if row is None or dropdown is None:
             return
+        self._service.refresh_output_volume_detection()
         state = self._service.get_playback_state()
-        has_device_volume = state.device_volume
-        row.set_sensitive(not has_device_volume)
-        row.handler_block_by_func(self._on_software_volume_fallback_changed)
-        if has_device_volume:
-            row.set_active(False)
-        else:
-            row.set_active(self._service.config.config.allow_software_volume_fallback)
-        row.handler_unblock_by_func(self._on_software_volume_fallback_changed)
+        row.set_subtitle(_VOLUME_MODE_SUBTITLES[state.volume_mode])
+        labels = self._volume_mode_dropdown_labels(state.device_volume)
+        self._updating_volume_mode_dropdown = True
+        try:
+            dropdown.handler_block_by_func(self._on_volume_mode_changed)
+            if self._volume_mode_dropdown_hw != state.device_volume:
+                dropdown.set_model(Gtk.StringList.new(list(labels)))
+                self._volume_mode_dropdown_hw = state.device_volume
+            selected = self._dropdown_index_for_volume_mode(
+                state.volume_mode,
+                device_volume=state.device_volume,
+            )
+            dropdown.set_selected(selected)
+        finally:
+            dropdown.handler_unblock_by_func(self._on_volume_mode_changed)
+            self._updating_volume_mode_dropdown = False
 
     def _sync_exclusive_row(self) -> None:
         row = getattr(self, "_exclusive_row", None)
@@ -484,7 +555,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
                 self._output_row.set_sensitive(False)
                 self._output_row.set_subtitle("No controllable sinks found")
                 self._output_dropdown.set_model(Gtk.StringList.new([]))
-                self._sync_software_volume_row()
+                self._sync_volume_mode_row()
                 self._sync_exclusive_row()
                 return
 
@@ -502,7 +573,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
                     break
             self._output_dropdown.set_selected(selected)
             self._output_row.set_subtitle(self._output_row_subtitle())
-            self._sync_software_volume_row()
+            self._sync_volume_mode_row()
             self._sync_exclusive_row()
         finally:
             self._output_dropdown.handler_unblock_by_func(self._on_output_changed)
@@ -520,7 +591,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
             return
         self._service.set_output_sink(endpoint.id)
         self._output_row.set_subtitle(self._output_row_subtitle())
-        self._sync_software_volume_row()
+        self._sync_volume_mode_row()
         self._sync_exclusive_row()
 
     def _sync_scan_ui(self) -> None:
@@ -569,7 +640,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
             self._reload_tidal_status()
             self._reload_qobuz_status()
         elif event in ("playback_changed", "volume_changed"):
-            self._sync_software_volume_row()
+            self._sync_volume_mode_row()
             self._sync_exclusive_row()
         elif event in ("scan_started", "scan_progress", "scan_finished", "scan_error"):
             self._sync_scan_ui()

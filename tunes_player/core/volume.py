@@ -9,6 +9,19 @@ VolumeListener = Callable[[float], None]
 Unsubscribe = Callable[[], None]
 
 BitPerfectPotential = Literal["direct", "capable", "none"]
+VolumeMode = Literal["hardware", "software", "fixed"]
+
+
+def derive_volume_mode(
+    *,
+    device_volume: bool,
+    mpv_soft_volume: bool,
+) -> VolumeMode:
+    if device_volume:
+        return "hardware"
+    if mpv_soft_volume:
+        return "software"
+    return "fixed"
 
 SYSTEM_DEFAULT_SINK_ID = "__system_default__"
 
