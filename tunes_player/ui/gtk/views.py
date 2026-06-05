@@ -129,6 +129,20 @@ def _format_release_track_count(release: Release) -> str | None:
     return None
 
 
+def _sync_release_art_play_button(
+    btn: Gtk.Button,
+    *,
+    service: PlayerService,
+    release_id: str,
+) -> None:
+    if service.is_release_playing(release_id):
+        btn.set_icon_name("media-playback-pause-symbolic")
+        btn.set_tooltip_text("Pause")
+    else:
+        btn.set_icon_name("media-playback-start-symbolic")
+        btn.set_tooltip_text("Play release")
+
+
 def _release_completeness_label(release: Release) -> str | None:
     if release.completeness == ReleaseCompleteness.PARTIAL:
         expected = release.expected_track_count or "?"
@@ -149,6 +163,7 @@ class ReleaseGridView(Gtk.ScrolledWindow):
         empty_message: str | None = None,
         art_loader: ArtLoader | None = None,
         window_inner_width_fn: Callable[[], int] | None = None,
+        service: PlayerService | None = None,
     ) -> None:
         super().__init__(vexpand=True, hscrollbar_policy=Gtk.PolicyType.AUTOMATIC)
         self.set_propagate_natural_width(False)
@@ -169,7 +184,10 @@ class ReleaseGridView(Gtk.ScrolledWindow):
             self.set_child(label)
             return
 
-        grid = ReleaseTileGrid(inner_width_fn=self._album_tile_inner_width)
+        grid = ReleaseTileGrid(
+            inner_width_fn=self._album_tile_inner_width,
+            service=service,
+        )
         grid.set_margin_top(ALBUM_GRID_VIEW_MARGIN)
         grid.set_margin_bottom(ALBUM_GRID_VIEW_MARGIN)
         grid.set_margin_start(ALBUM_GRID_VIEW_MARGIN)
@@ -371,12 +389,19 @@ class ReleaseDetailView(Gtk.Box):
             size=_ALBUM_DETAIL_ART_MIN,
             art_loader=art_loader,
             css_class="album-detail-art",
-            on_play=lambda: service.play_release(release.id, start_index=0),
+            on_play=lambda: service.play_or_toggle_release(release.id, start_index=0),
             playable=bool(tracks),
             fill_cell=True,
         )
+        setattr(art_frame, "_tunes_release_id", release.id)
         art_frame.set_valign(Gtk.Align.FILL)
         header_row.append(art_frame)
+        self._detail_service = service
+        self._detail_release_id = release.id
+        self._detail_art_frame = art_frame
+        self._playback_unsubscribe = service.subscribe(self._on_playback_event)
+        self.connect("destroy", self._on_destroy)
+        GLib.idle_add(self._sync_release_art_play, service, release.id, art_frame)
 
         details_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         details_column.set_hexpand(False)
@@ -453,6 +478,35 @@ class ReleaseDetailView(Gtk.Box):
 
         for index, track in enumerate(tracks):
             list_box.append(_compact_track_row(track, index=index))
+
+    def _on_playback_event(self, event: str) -> None:
+        if event == "position_changed":
+            return
+        GLib.idle_add(self._sync_release_art_play_idle)
+
+    def _sync_release_art_play_idle(self) -> bool:
+        self._sync_release_art_play(
+            self._detail_service,
+            self._detail_release_id,
+            self._detail_art_frame,
+        )
+        return False
+
+    @staticmethod
+    def _sync_release_art_play(
+        service: PlayerService,
+        release_id: str,
+        art_frame: Gtk.Widget,
+    ) -> bool:
+        btn = _find_release_art_play_button(art_frame)
+        if btn is not None:
+            _sync_release_art_play_button(btn, service=service, release_id=release_id)
+        return False
+
+    def _on_destroy(self, *_args: object) -> None:
+        unsubscribe = getattr(self, "_playback_unsubscribe", None)
+        if unsubscribe is not None:
+            unsubscribe()
 
 
 def _compact_track_row(track: Track, *, index: int) -> Gtk.ListBoxRow:
@@ -583,7 +637,12 @@ class _FixedMinWidthShell(Gtk.Box):
 class ReleaseTileGrid(Gtk.Box):
     """Square release tiles; column count follows this widget's allocated width."""
 
-    def __init__(self, *, inner_width_fn: Callable[[], int] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        inner_width_fn: Callable[[], int] | None = None,
+        service: PlayerService | None = None,
+    ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=ALBUM_GRID_SPACING)
         self.add_css_class("album-tile-grid")
         self.set_halign(Gtk.Align.FILL)
@@ -591,6 +650,12 @@ class ReleaseTileGrid(Gtk.Box):
         self.set_hexpand(True)
         self.set_vexpand(False)
         self._inner_width_fn = inner_width_fn
+        self._service = service
+        self._playback_unsubscribe: Callable[[], None] | None = None
+        self._last_art_playing_release_id: str | None = None
+        if service is not None:
+            self._playback_unsubscribe = service.subscribe(self._on_playback_event)
+            self.connect("destroy", self._on_destroy)
         self._cards: list[Gtk.Widget] = []
         self._tile_edge = _ALBUM_TILE_DEFAULT_EDGE
         self._layout_key: tuple[int, int, int, int] | None = None
@@ -669,6 +734,53 @@ class ReleaseTileGrid(Gtk.Box):
         )
         _attach_album_card_activate(card, on_activate)
         self._cards.append(card)
+        if self._service is not None:
+            release_id = getattr(card, "_tunes_release_id", None)
+            if isinstance(release_id, str):
+                btn = _find_release_art_play_button(card)
+                if btn is not None:
+                    _sync_release_art_play_button(
+                        btn,
+                        service=self._service,
+                        release_id=release_id,
+                    )
+
+    def _on_playback_event(self, event: str) -> None:
+        if event == "position_changed" or self._service is None:
+            return
+        GLib.idle_add(self._sync_art_play_buttons_idle)
+
+    def _sync_art_play_buttons_idle(self) -> bool:
+        service = self._service
+        if service is None:
+            return False
+        state = service.get_playback_state()
+        playing_id = service.current_release_id() if state.is_playing else None
+        to_update: set[str] = set()
+        if self._last_art_playing_release_id:
+            to_update.add(self._last_art_playing_release_id)
+        if playing_id:
+            to_update.add(playing_id)
+        self._last_art_playing_release_id = playing_id
+        if not to_update:
+            return False
+        for card in self._cards:
+            release_id = getattr(card, "_tunes_release_id", None)
+            if not isinstance(release_id, str) or release_id not in to_update:
+                continue
+            btn = _find_release_art_play_button(card)
+            if btn is not None:
+                _sync_release_art_play_button(
+                    btn,
+                    service=service,
+                    release_id=release_id,
+                )
+        return False
+
+    def _on_destroy(self, *_args: object) -> None:
+        if self._playback_unsubscribe is not None:
+            self._playback_unsubscribe()
+            self._playback_unsubscribe = None
 
     def relayout(self, inner_width: int) -> None:
         if not self._cards or inner_width < 1:
@@ -1049,6 +1161,7 @@ def _release_card(
     shell.set_vexpand(False)
     shell.set_halign(Gtk.Align.FILL)
     shell.set_valign(Gtk.Align.FILL)
+    setattr(shell, "_tunes_release_id", release.id)
 
     frame = Gtk.AspectFrame()
     frame.set_ratio(1.0)

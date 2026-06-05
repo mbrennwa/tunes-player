@@ -105,6 +105,7 @@ class PlayerService:
         self._queue: list[Track] = []
         self._queue_index = -1
         self._current_track: Track | None = None
+        self._current_release_id: str | None = None
         self._quality_hint = ""
         self._tidal_playback_format_label: str | None = None
         self._tidal_playback_format_track_id: str | None = None
@@ -677,6 +678,19 @@ class PlayerService:
 
     def play_album(self, album_id: str, *, start_index: int = 0) -> None:
         self.play_release(album_id, start_index=start_index)
+
+    def current_release_id(self) -> str | None:
+        """Release id for the current track, resolved once when playback changes."""
+        return self._current_release_id
+
+    def is_release_playing(self, release_id: str) -> bool:
+        return self._is_playing and self._current_release_id == release_id
+
+    def play_or_toggle_release(self, release_id: str, *, start_index: int = 0) -> None:
+        if self._current_track is not None and self._current_release_id == release_id:
+            self.toggle_play_pause()
+            return
+        self.play_release(release_id, start_index=start_index)
 
     def toggle_play_pause(self) -> None:
         if self._current_track is None and self._queue:
@@ -1275,6 +1289,7 @@ class PlayerService:
         playback_note: str | None = None,
     ) -> None:
         self._current_track = track
+        self._current_release_id = self._release_id_for_playback(track)
         if track.source.value != "tidal":
             self._tidal_playback_format_track_id = None
             self._tidal_playback_format_label = None
