@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 
 log = logging.getLogger(__name__)
 
+_pw_cli_available: bool | None = None
+
 _NODE_HEADER = re.compile(r"^\s*id\s+(\d+),\s+type\s+PipeWire:Interface:Node")
 _ALSA_CARD = re.compile(r'^\s*alsa\.card\s*=\s*"(\d+)"')
 _MEDIA_CLASS = re.compile(r'^\s*media\.class\s*=\s*"([^"]+)"')
@@ -25,8 +27,7 @@ class ExclusiveSession:
     _released: bool = False
 
     def acquire(self) -> bool:
-        if shutil.which("pw-cli") is None:
-            log.warning("pw-cli not found; cannot suspend PipeWire streams")
+        if not _pipewire_cli_available():
             return False
         try:
             result = subprocess.run(
@@ -34,9 +35,10 @@ class ExclusiveSession:
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=5,
             )
-        except (OSError, subprocess.CalledProcessError) as exc:
-            log.warning("pw-cli ls Node failed: %s", exc)
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            _mark_pipewire_cli_unavailable(exc)
             return False
 
         for node_id, node_card, media_class in _iter_nodes(result.stdout):
@@ -84,6 +86,51 @@ class ExclusiveSession:
         except (OSError, subprocess.CalledProcessError) as exc:
             log.debug("pw-cli set-param Suspended on %s: %s", node_id, exc)
             return False
+
+
+def _pw_cli_error_detail(exc: BaseException) -> str:
+    if isinstance(exc, subprocess.CalledProcessError):
+        stderr = (exc.stderr or "").strip()
+        if stderr:
+            return stderr
+        return f"exit status {exc.returncode}"
+    return str(exc)
+
+
+def _mark_pipewire_cli_unavailable(exc: BaseException | None = None) -> None:
+    global _pw_cli_available
+    if _pw_cli_available is False:
+        return
+    _pw_cli_available = False
+    if exc is None:
+        return
+    log.debug(
+        "PipeWire unavailable (%s); other clients will not be suspended for exclusive ALSA",
+        _pw_cli_error_detail(exc),
+    )
+
+
+def _pipewire_cli_available() -> bool:
+    """Probe pw-cli once; cache when PipeWire is down or pw-cli is missing."""
+    global _pw_cli_available
+    if _pw_cli_available is not None:
+        return _pw_cli_available
+    if shutil.which("pw-cli") is None:
+        _pw_cli_available = False
+        log.debug("pw-cli not found; skipping PipeWire client suspend")
+        return False
+    try:
+        subprocess.run(
+            ["pw-cli", "ls", "Node"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        _pw_cli_available = True
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        _mark_pipewire_cli_unavailable(exc)
+    return _pw_cli_available
 
 
 def _iter_nodes(stdout: str):

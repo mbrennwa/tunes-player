@@ -1244,6 +1244,10 @@ class PlayerService:
         self._last_recorded_track_id = track.id
         self._last_recorded_at_ns = now_ns
 
+    def release_id_for_track(self, track: Track) -> str | None:
+        """Resolve the catalog release id for a track (local, TIDAL, or Qobuz)."""
+        return self._release_id_for_playback(track)
+
     def _release_id_for_playback(self, track: Track) -> str | None:
         if track.id.startswith("local:"):
             return self._store.release_id_for_track(track.id)

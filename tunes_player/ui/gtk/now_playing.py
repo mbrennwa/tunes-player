@@ -75,6 +75,8 @@ class NowPlayingBar(Gtk.Box):
         self._art = Gtk.Image.new_from_icon_name("audio-x-generic-symbolic")
         self._art.set_pixel_size(_ART_PIXEL_SIZE)
         self._art.add_css_class("card")
+        self._art.add_css_class("now-playing-art")
+        self._attach_art_click(self._art)
         row.append(self._art)
 
         meta = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -201,6 +203,7 @@ class NowPlayingBar(Gtk.Box):
         self._progress_row.append(self._remaining)
 
         self._queue_handler: Callable[[], None] | None = None
+        self._art_click_handler: Callable[[], None] | None = None
         self._volume_dragging = False
         self._pending_volume: float | None = None
         self._volume_apply_id: int | None = None
@@ -216,8 +219,29 @@ class NowPlayingBar(Gtk.Box):
     def set_queue_handler(self, handler: Callable[[], None]) -> None:
         self._queue_handler = handler
 
+    def set_art_click_handler(self, handler: Callable[[], None] | None) -> None:
+        self._art_click_handler = handler
+
     def set_play_handler(self, handler: Callable[[], None]) -> None:
         self._play_handler = handler
+
+    def _attach_art_click(self, widget: Gtk.Widget) -> None:
+        gesture = Gtk.GestureClick()
+        gesture.connect("released", self._on_art_released)
+        widget.add_controller(gesture)
+        widget.set_focusable(True)
+        widget.set_cursor_from_name("default")
+
+    def _on_art_released(self, _gesture: Gtk.GestureClick, _n_press: int, _x: float, _y: float) -> None:
+        handler = self._art_click_handler
+        if handler is not None:
+            handler()
+
+    def _sync_art_clickable(self, track: object | None) -> None:
+        clickable = track is not None and self._art_click_handler is not None
+        self._art.set_sensitive(clickable)
+        self._art.set_cursor_from_name("pointer" if clickable else "default")
+        self._art.set_tooltip_text("View album" if clickable else None)
 
     def _on_play_clicked(self, *_args: object) -> None:
         handler = self._play_handler
@@ -368,6 +392,7 @@ class NowPlayingBar(Gtk.Box):
             self._play_btn.set_icon_name("media-playback-start-symbolic")
             self._play_btn.set_tooltip_text("Play")
             self._sync_art(None)
+            self._sync_art_clickable(None)
         else:
             self._title.set_label(track.title)
             artist = track.artist_name
@@ -387,6 +412,7 @@ class NowPlayingBar(Gtk.Box):
             self._play_btn.set_icon_name(icon)
             self._play_btn.set_tooltip_text("Pause" if state.is_playing else "Play")
             self._sync_art(track)
+            self._sync_art_clickable(track)
 
         if not self._volume_dragging and event in (
             None,

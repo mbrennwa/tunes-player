@@ -106,6 +106,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._now_playing = NowPlayingBar(service=service, art_loader=self._art_loader)
         self._now_playing.set_queue_handler(self._open_queue_sheet)
         self._now_playing.set_play_handler(self._on_play_clicked)
+        self._now_playing.set_art_click_handler(self._open_current_release)
 
         self._toolbar = Adw.ToolbarView()
         self._toolbar.set_size_request(-1, -1)
@@ -894,6 +895,16 @@ class TunesWindow(Adw.ApplicationWindow):
                 self._service.play_release(release_id, start_index=0)
                 return
         self._service.toggle_play_pause()
+
+    def _open_current_release(self) -> None:
+        state = self._service.get_playback_state()
+        track = state.current_track
+        if track is None:
+            return
+        release_id = self._service.release_id_for_track(track)
+        if release_id is None:
+            return
+        self._open_release(release_id)
 
     def _open_release(self, release_id: str) -> None:
         release = self._service.get_release(release_id)

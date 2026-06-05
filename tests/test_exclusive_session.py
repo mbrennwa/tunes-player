@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import subprocess
 import unittest
 from unittest.mock import patch
 
+from tunes_player.platform.linux import exclusive_session
 from tunes_player.platform.linux.exclusive_session import ExclusiveSession, _iter_nodes
 
 
@@ -39,6 +41,23 @@ class ExclusiveSessionTests(unittest.TestCase):
                     session.acquire()
         self.assertIn(52, session._suspended_ids)
         suspend.assert_called()
+
+    def test_acquire_caches_pipewire_unavailable(self) -> None:
+        exclusive_session._pw_cli_available = None
+        session = ExclusiveSession(card=0)
+        with patch("shutil.which", return_value="/usr/bin/pw-cli"):
+            with patch(
+                "subprocess.run",
+                side_effect=subprocess.CalledProcessError(
+                    255,
+                    ["pw-cli", "ls", "Node"],
+                    stderr='Error: "failed to connect: Host is down"',
+                ),
+            ) as run:
+                self.assertFalse(session.acquire())
+                self.assertFalse(session.acquire())
+        self.assertEqual(run.call_count, 1)
+        exclusive_session._pw_cli_available = None
 
 
 if __name__ == "__main__":
