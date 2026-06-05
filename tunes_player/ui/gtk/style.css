@@ -11,6 +11,13 @@
 
 .now-playing-bar .now-playing-art {
   border-radius: 4px;
+  padding: 0;
+  min-width: 0;
+  min-height: 0;
+}
+
+.now-playing-bar .now-playing-art picture {
+  border-radius: 4px;
 }
 
 /* Album grid tiles: square, cover fills tile, text overlaid at bottom */

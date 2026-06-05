@@ -72,10 +72,25 @@ class NowPlayingBar(Gtk.Box):
         row.set_margin_bottom(8)
         self.append(row)
 
-        self._art = Gtk.Image.new_from_icon_name("audio-x-generic-symbolic")
-        self._art.set_pixel_size(_ART_PIXEL_SIZE)
-        self._art.add_css_class("card")
+        self._art = Gtk.Box()
         self._art.add_css_class("now-playing-art")
+        self._art.set_size_request(_ART_PIXEL_SIZE, _ART_PIXEL_SIZE)
+        self._art.set_overflow(Gtk.Overflow.HIDDEN)
+        self._art.set_hexpand(False)
+        self._art.set_vexpand(False)
+        self._art.set_halign(Gtk.Align.CENTER)
+        self._art.set_valign(Gtk.Align.CENTER)
+
+        self._art_picture = Gtk.Picture()
+        self._art_picture.set_content_fit(Gtk.ContentFit.COVER)
+        self._art_picture.set_can_shrink(True)
+        self._art_picture.set_size_request(_ART_PIXEL_SIZE, _ART_PIXEL_SIZE)
+        self._art_picture.set_hexpand(False)
+        self._art_picture.set_vexpand(False)
+        self._art_picture.set_halign(Gtk.Align.FILL)
+        self._art_picture.set_valign(Gtk.Align.FILL)
+        self._art.append(self._art_picture)
+
         self._attach_art_click(self._art)
         row.append(self._art)
 
@@ -431,14 +446,14 @@ class NowPlayingBar(Gtk.Box):
             return
         if track is None:
             self._art_track_id = None
-            self._art_loader.set_image(self._art, None, pixel_size=_ART_PIXEL_SIZE)
+            self._art_loader.set_picture(self._art_picture, None, pixel_size=_ART_PIXEL_SIZE)
             return
         track_id = track.id if hasattr(track, "id") else None
         art_uri = track.art_uri if hasattr(track, "art_uri") else None
         if track_id == self._art_track_id:
             return
         self._art_track_id = track_id
-        self._art_loader.set_image(self._art, art_uri, pixel_size=_ART_PIXEL_SIZE)
+        self._art_loader.set_picture(self._art_picture, art_uri, pixel_size=_ART_PIXEL_SIZE)
 
     def _tick_progress(self) -> bool:
         if self._seeking:
