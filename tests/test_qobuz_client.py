@@ -222,6 +222,19 @@ class TestReleaseFromQobuz(unittest.TestCase):
         release = release_from_qobuz(album)
         self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_HI_RES)
 
+    def test_peak_quality_24_44_is_cd(self) -> None:
+        album = {
+            "id": "cd24",
+            "title": "24-bit CD-rate Album",
+            "artist": {"name": "Band"},
+            "tracks_count": 8,
+            "maximum_bit_depth": 24,
+            "maximum_sampling_rate": 44.1,
+            "hires": True,
+        }
+        release = release_from_qobuz(album)
+        self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_CD)
+
     def test_peak_quality_hi_res_khz_sample_rate(self) -> None:
         album = {
             "id": "hr2",

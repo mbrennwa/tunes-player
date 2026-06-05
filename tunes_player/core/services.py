@@ -12,6 +12,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import Callable
 
+from tunes_player.core.backends.playable import PlayableSource
 from tunes_player.core.backends.qobuz import QobuzClient, QobuzUnavailableError
 from tunes_player.core.backends.resolve import resolve_track
 from tunes_player.core.backends.tidal import TidalClient, TidalUnavailableError
@@ -31,6 +32,7 @@ from tunes_player.core.home import (
     suggestion_added_ns,
 )
 from tunes_player.core.library import LibraryScanner, LibraryStore, ScanResult
+from tunes_player.core.library.store import FileMetadata
 from tunes_player.core.library.scanner import ScanFileError
 from tunes_player.core.library.scan_worker import create_scan_process
 from tunes_player.core.models import Album, Release, Source, Track
@@ -125,6 +127,7 @@ class PlayerService:
         self._tidal_playback_format_track_id: str | None = None
         self._qobuz_playback_format_label: str | None = None
         self._qobuz_playback_format_track_id: str | None = None
+        self._current_stream_metadata = None
         self._playback_note: str | None = None
         self._bit_perfect_playback = False
         self._output_profile: PlaybackOutputProfile | None = None
@@ -1072,12 +1075,24 @@ class PlayerService:
         except ImportError:
             return None
 
-    def _compute_playback_profile_for_track(
-        self, track: Track
-    ) -> tuple[PlaybackOutputProfile, PlaybackPathInfo]:
-        file_meta = None
+    def _file_meta_for_playback_profile(
+        self, track: Track, *, source: PlayableSource | None = None
+    ) -> FileMetadata | None:
         if track.id.startswith("local:"):
-            file_meta = self._store.get_file_metadata(track.id)
+            return self._store.get_file_metadata(track.id)
+        if source is not None and source.stream_metadata is not None:
+            return source.stream_metadata
+        return self._current_stream_metadata
+
+    def _remember_stream_metadata(self, source: PlayableSource | None) -> None:
+        self._current_stream_metadata = (
+            None if source is None else source.stream_metadata
+        )
+
+    def _compute_playback_profile_for_track(
+        self, track: Track, *, source: PlayableSource | None = None
+    ) -> tuple[PlaybackOutputProfile, PlaybackPathInfo]:
+        file_meta = self._file_meta_for_playback_profile(track, source=source)
         return compute_output_profile(
             file_meta=file_meta,
             hw_caps=self._hw_caps_for_endpoint(self._active_endpoint_id()),
@@ -1207,7 +1222,10 @@ class PlayerService:
         engine = self._ensure_engine()
         if engine is None:
             return
-        profile, path_info = self._compute_playback_profile_for_track(track)
+        self._remember_stream_metadata(source)
+        profile, path_info = self._compute_playback_profile_for_track(
+            track, source=source
+        )
         self._output_profile = profile
         self._apply_path_info(path_info)
         self._acquire_exclusive_session_if_needed(profile)
@@ -1273,7 +1291,10 @@ class PlayerService:
         if engine is None:
             self._notify_playback_unavailable()
             return False
-        profile, path_info = self._compute_playback_profile_for_track(track)
+        self._remember_stream_metadata(source)
+        profile, path_info = self._compute_playback_profile_for_track(
+            track, source=source
+        )
         self._output_profile = profile
         self._apply_path_info(path_info)
         self._set_current_track(
@@ -1367,7 +1388,10 @@ class PlayerService:
             self._notify_playback_unavailable()
             return
         self._engine_error = None
-        profile, path_info = self._compute_playback_profile_for_track(track)
+        self._remember_stream_metadata(source)
+        profile, path_info = self._compute_playback_profile_for_track(
+            track, source=source
+        )
         self._output_profile = profile
         self._apply_path_info(path_info)
         self._set_current_track(
@@ -1440,6 +1464,8 @@ class PlayerService:
         playback_note: str | None = None,
     ) -> None:
         self._current_track = track
+        if track.id.startswith("local:"):
+            self._current_stream_metadata = None
         self._current_release_id = self._release_id_for_playback(track)
         if track.source.value != "tidal":
             self._tidal_playback_format_track_id = None

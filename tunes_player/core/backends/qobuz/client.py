@@ -358,12 +358,16 @@ class QobuzClient:
             return None
         metadata = convert.track_from_qobuz(data)
         stream = self._get_file_url(numeric)
-        from tunes_player.core.playback_quality import qobuz_format_label_from_stream
+        from tunes_player.core.playback_quality import (
+            qobuz_format_label_from_stream,
+            qobuz_stream_file_metadata,
+        )
 
         format_label = qobuz_format_label_from_stream(
             stream,
             fallback_format_id=self._format_id,
         )
+        stream_metadata = qobuz_stream_file_metadata(stream)
         url = stream.get("url")
         if not url:
             restrictions = stream.get("restrictions")
@@ -378,6 +382,7 @@ class QobuzClient:
             uri=str(url),
             metadata=metadata,
             format_label=format_label,
+            stream_metadata=stream_metadata,
         )
 
     def _require_login(self) -> None:

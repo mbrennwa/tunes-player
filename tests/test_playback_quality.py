@@ -8,9 +8,12 @@ from tunes_player.core.library.store import FileMetadata
 from tunes_player.core.playback_quality import (
     local_file_format_label,
     qobuz_format_label_from_stream,
+    qobuz_stream_file_metadata,
     qobuz_stream_format_label,
+    stream_file_metadata,
     tidal_format_label,
     tidal_format_label_from_stream_payload,
+    tidal_stream_file_metadata,
     tidal_stream_format_label,
 )
 
@@ -85,6 +88,23 @@ class PlaybackQualityTests(unittest.TestCase):
             tidal_format_label(audio_quality="HI_RES_LOSSLESS"),
             "24-bit / 96 kHz lossless",
         )
+
+    def test_stream_file_metadata_normalizes_qobuz_khz(self) -> None:
+        meta = qobuz_stream_file_metadata({"bit_depth": 24, "sampling_rate": 44.1})
+        assert meta is not None
+        self.assertEqual(meta.sample_rate, 44100)
+        self.assertEqual(meta.bit_depth, 24)
+
+    def test_tidal_stream_file_metadata_uses_hz(self) -> None:
+        meta = tidal_stream_file_metadata(
+            {"bitDepth": 16, "sampleRate": 44100, "audioQuality": "LOSSLESS"}
+        )
+        assert meta is not None
+        self.assertEqual(meta.sample_rate, 44100)
+        self.assertEqual(meta.bit_depth, 16)
+
+    def test_stream_file_metadata_returns_none_without_fields(self) -> None:
+        self.assertIsNone(stream_file_metadata())
 
 
 if __name__ == "__main__":

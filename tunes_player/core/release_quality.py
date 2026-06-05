@@ -25,8 +25,8 @@ _TIER_RANK = {
     QUALITY_FILTER_HI_RES: 2,
 }
 
-_CD_MAX_BIT_DEPTH = 16
-_CD_MAX_SAMPLE_RATE_HZ = 48_000
+_CD_MIN_BIT_DEPTH = 16
+_CD_SAMPLE_RATE_HZ = 44_100
 
 _TIDAL_RANK_COMPRESSED_MAX = 1
 _TIDAL_RANK_CD = 2
@@ -48,6 +48,22 @@ def _normalize_sample_rate_hz(value: int | float | None) -> int:
     return int(round(rate))
 
 
+def _tier_from_lossless_bit_depth_sample_rate(
+    *,
+    bit_depth: int,
+    sample_rate_hz: int,
+) -> str:
+    """CD is 44.1 kHz lossless (16- or 24-bit); anything above is hi-res."""
+    if sample_rate_hz > _CD_SAMPLE_RATE_HZ:
+        return QUALITY_FILTER_HI_RES
+    if (
+        bit_depth >= _CD_MIN_BIT_DEPTH
+        and sample_rate_hz == _CD_SAMPLE_RATE_HZ
+    ):
+        return QUALITY_FILTER_CD
+    return QUALITY_FILTER_COMPRESSED
+
+
 def tier_from_local(
     *,
     max_bit_depth: int | None,
@@ -57,17 +73,17 @@ def tier_from_local(
 ) -> str:
     """Peak catalog tier from per-release file aggregates."""
     if has_lossless:
-        bit_depth = max_bit_depth or 0
-        sample_rate = max_sample_rate or 0
-        if bit_depth > _CD_MAX_BIT_DEPTH or sample_rate > _CD_MAX_SAMPLE_RATE_HZ:
-            return QUALITY_FILTER_HI_RES
-        return QUALITY_FILTER_CD
+        return _tier_from_lossless_bit_depth_sample_rate(
+            bit_depth=max_bit_depth or 0,
+            sample_rate_hz=max_sample_rate or 0,
+        )
     if has_lossy:
         return QUALITY_FILTER_COMPRESSED
     if max_bit_depth is not None and max_sample_rate is not None:
-        if max_bit_depth > _CD_MAX_BIT_DEPTH or max_sample_rate > _CD_MAX_SAMPLE_RATE_HZ:
-            return QUALITY_FILTER_HI_RES
-        return QUALITY_FILTER_CD
+        return _tier_from_lossless_bit_depth_sample_rate(
+            bit_depth=max_bit_depth,
+            sample_rate_hz=max_sample_rate,
+        )
     return QUALITY_FILTER_COMPRESSED
 
 
@@ -126,11 +142,10 @@ def _tier_from_qobuz_bit_depth_sample_rate(
     except (TypeError, ValueError):
         depth = 0
     rate_hz = _normalize_sample_rate_hz(sample_rate)
-    if depth > _CD_MAX_BIT_DEPTH or rate_hz > _CD_MAX_SAMPLE_RATE_HZ:
-        return QUALITY_FILTER_HI_RES
-    if depth >= _CD_MAX_BIT_DEPTH and rate_hz >= 44_100:
-        return QUALITY_FILTER_CD
-    return QUALITY_FILTER_COMPRESSED
+    return _tier_from_lossless_bit_depth_sample_rate(
+        bit_depth=depth,
+        sample_rate_hz=rate_hz,
+    )
 
 
 def _tier_from_qobuz_technical_specifications(spec: object) -> str | None:
@@ -153,9 +168,15 @@ def _tier_from_qobuz_technical_specifications(spec: object) -> str | None:
 
 def tier_from_qobuz_album(album: dict[str, Any]) -> str:
     """Peak catalog tier from Qobuz album JSON."""
-    if album.get("hires") or album.get("hires_streamable"):
-        return QUALITY_FILTER_HI_RES
-    tiers = [
+    tiers: list[str] = []
+    rate_hz = _normalize_sample_rate_hz(album.get("maximum_sampling_rate"))
+    if (
+        (album.get("hires") or album.get("hires_streamable"))
+        and rate_hz > _CD_SAMPLE_RATE_HZ
+    ):
+        tiers.append(QUALITY_FILTER_HI_RES)
+    tiers.extend(
+        [
         _tier_from_qobuz_technical_specifications(
             album.get("maximum_technical_specifications"),
         ),
@@ -163,7 +184,8 @@ def tier_from_qobuz_album(album: dict[str, Any]) -> str:
             bit_depth=album.get("maximum_bit_depth"),
             sample_rate=album.get("maximum_sampling_rate"),
         ),
-    ]
+        ]
+    )
     tracks = album.get("tracks")
     if isinstance(tracks, dict):
         for item in tracks.get("items") or []:

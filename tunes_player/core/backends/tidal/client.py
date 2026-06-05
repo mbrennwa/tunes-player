@@ -660,13 +660,17 @@ class TidalClient:
         except Exception:
             log.exception("Failed to resolve TIDAL stream for track %s", numeric)
             return None
-        from tunes_player.core.playback_quality import tidal_format_label_from_stream_payload
+        from tunes_player.core.playback_quality import (
+            tidal_format_label_from_stream_payload,
+            tidal_stream_file_metadata,
+        )
 
         format_label = tidal_format_label_from_stream_payload(payload)
         return PlayableSource(
             uri=playback_uri,
             metadata=metadata,
             format_label=format_label,
+            stream_metadata=tidal_stream_file_metadata(payload),
         )
 
     def _fetch_stream_payload(

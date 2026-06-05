@@ -114,6 +114,49 @@ class OutputProfileTests(unittest.TestCase):
         )
         self.assertEqual(path.playback_note, "ALSA bit-perfect")
 
+    def test_stream_metadata_bit_perfect_when_rate_matches(self) -> None:
+        caps = HwAudioCaps(sample_rates=(44100, 48000, 96000), bit_depths=(16, 24))
+        profile, path = compute_output_profile(
+            file_meta=FileMetadata(
+                path="",
+                codec="flac",
+                duration_sec=None,
+                sample_rate=44100,
+                bit_depth=24,
+                channels=2,
+            ),
+            hw_caps=caps,
+            endpoint_id="alsa:hw:0:0",
+            exclusive_enabled=True,
+            device_volume=True,
+            mpv_soft_volume=False,
+        )
+        self.assertEqual(profile.target_rate, 44100)
+        self.assertEqual(profile.audio_format, "s32")
+        self.assertTrue(path.bit_perfect_playback)
+        self.assertEqual(path.playback_note, "ALSA bit-perfect")
+
+    def test_stream_metadata_resample_note_when_rate_unsupported(self) -> None:
+        caps = HwAudioCaps(sample_rates=(48000, 96000), bit_depths=(16, 24))
+        _profile, path = compute_output_profile(
+            file_meta=FileMetadata(
+                path="",
+                codec="flac",
+                duration_sec=None,
+                sample_rate=44100,
+                bit_depth=24,
+                channels=2,
+            ),
+            hw_caps=caps,
+            endpoint_id="alsa:hw:0:0",
+            exclusive_enabled=False,
+            device_volume=True,
+            mpv_soft_volume=False,
+        )
+        self.assertFalse(path.bit_perfect_playback)
+        assert path.playback_note is not None
+        self.assertIn("resampling", path.playback_note)
+
     def test_pipewire_note_when_streaming(self) -> None:
         _profile, path = compute_output_profile(
             file_meta=None,

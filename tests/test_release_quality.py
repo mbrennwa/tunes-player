@@ -42,6 +42,28 @@ class ReleaseQualityTests(unittest.TestCase):
             QUALITY_FILTER_CD,
         )
 
+    def test_local_flac_24_44_is_cd(self) -> None:
+        self.assertEqual(
+            tier_from_local(
+                max_bit_depth=24,
+                max_sample_rate=44100,
+                has_lossless=True,
+                has_lossy=False,
+            ),
+            QUALITY_FILTER_CD,
+        )
+
+    def test_local_flac_24_48_is_hi_res(self) -> None:
+        self.assertEqual(
+            tier_from_local(
+                max_bit_depth=24,
+                max_sample_rate=48000,
+                has_lossless=True,
+                has_lossy=False,
+            ),
+            QUALITY_FILTER_HI_RES,
+        )
+
     def test_local_flac_24_96_is_hi_res(self) -> None:
         self.assertEqual(
             tier_from_local(
@@ -133,6 +155,22 @@ class ReleaseQualityTests(unittest.TestCase):
             "maximum_bit_depth": 16,
             "maximum_sampling_rate": 44.1,
             "hires": False,
+        }
+        self.assertEqual(tier_from_qobuz_album(album), QUALITY_FILTER_CD)
+
+    def test_qobuz_24_44_is_cd(self) -> None:
+        album = {
+            "maximum_bit_depth": 24,
+            "maximum_sampling_rate": 44.1,
+            "hires": False,
+        }
+        self.assertEqual(tier_from_qobuz_album(album), QUALITY_FILTER_CD)
+
+    def test_qobuz_hires_flag_at_cd_rate_is_cd(self) -> None:
+        album = {
+            "maximum_bit_depth": 24,
+            "maximum_sampling_rate": 44.1,
+            "hires": True,
         }
         self.assertEqual(tier_from_qobuz_album(album), QUALITY_FILTER_CD)
 

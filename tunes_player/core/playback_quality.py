@@ -105,6 +105,44 @@ def qobuz_format_label_from_bit_depth_sample_rate(
     return f"{depth}-bit / {_format_sample_rate_hz(rate_hz)}"
 
 
+def stream_file_metadata(
+    *,
+    bit_depth: int | float | str | None = None,
+    sample_rate_hz: int | float | str | None = None,
+    channels: int | None = 2,
+) -> FileMetadata | None:
+    """Build output-profile metadata from a streaming API payload."""
+    try:
+        depth = int(bit_depth) if bit_depth is not None else None
+    except (TypeError, ValueError):
+        depth = None
+    rate_hz = _normalize_qobuz_sample_rate_hz(sample_rate_hz)
+    if depth is None and rate_hz is None:
+        return None
+    return FileMetadata(
+        path="",
+        codec="flac",
+        duration_sec=None,
+        sample_rate=rate_hz,
+        bit_depth=depth,
+        channels=channels or 2,
+    )
+
+
+def qobuz_stream_file_metadata(stream: dict) -> FileMetadata | None:
+    return stream_file_metadata(
+        bit_depth=stream.get("bit_depth"),
+        sample_rate_hz=stream.get("sampling_rate"),
+    )
+
+
+def tidal_stream_file_metadata(payload: dict) -> FileMetadata | None:
+    return stream_file_metadata(
+        bit_depth=payload.get("bitDepth"),
+        sample_rate_hz=payload.get("sampleRate"),
+    )
+
+
 def qobuz_format_label_from_stream(
     stream: dict,
     *,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from tunes_player.core.library.store import FileMetadata
 from tunes_player.core.models import Track
 
 
@@ -15,6 +16,7 @@ class PlayableSource:
     metadata: Track
     start_sec: float = 0
     format_label: str | None = None
+    stream_metadata: FileMetadata | None = None
 
     @property
     def playback_target(self) -> str:
