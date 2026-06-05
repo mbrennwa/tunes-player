@@ -32,6 +32,7 @@ from tunes_player.core.home import (
     RecentlyAddedItem,
 )
 from tunes_player.core.models import Release, Track
+from tunes_player.core.release_quality import max_quality_tier, tier_from_tidal_album
 
 if TYPE_CHECKING:
     import tidalapi
@@ -574,7 +575,10 @@ class TidalClient:
             genre=release.genre,
             art_uri=release.art_uri,
             duration_sec=duration or None,
-            peak_quality_tier=convert.peak_quality_tier_from_tidal_tracks(tracks),
+            peak_quality_tier=max_quality_tier(
+                tier_from_tidal_album(album),
+                convert.peak_quality_tier_from_tidal_tracks(tracks),
+            ),
         )
 
     def get_album(self, album_id: str) -> Release | None:

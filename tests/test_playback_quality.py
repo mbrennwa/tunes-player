@@ -7,6 +7,7 @@ import unittest
 from tunes_player.core.library.store import FileMetadata
 from tunes_player.core.playback_quality import (
     local_file_format_label,
+    qobuz_format_label_from_stream,
     qobuz_stream_format_label,
     tidal_format_label,
     tidal_format_label_from_stream_payload,
@@ -40,6 +41,24 @@ class PlaybackQualityTests(unittest.TestCase):
     def test_qobuz_labels(self) -> None:
         self.assertEqual(qobuz_stream_format_label(5), "MP3 320")
         self.assertEqual(qobuz_stream_format_label(27), "24-bit / 192 kHz")
+
+    def test_qobuz_stream_label_uses_actual_stream_not_format_ceiling(self) -> None:
+        self.assertEqual(
+            qobuz_format_label_from_stream(
+                {"bit_depth": 16, "sampling_rate": 44.1},
+                fallback_format_id=27,
+            ),
+            "16-bit / 44.1 kHz",
+        )
+
+    def test_qobuz_stream_label_hi_res(self) -> None:
+        self.assertEqual(
+            qobuz_format_label_from_stream(
+                {"bit_depth": 24, "sampling_rate": 192},
+                fallback_format_id=27,
+            ),
+            "24-bit / 192 kHz",
+        )
 
     def test_tidal_lossless(self) -> None:
         self.assertEqual(

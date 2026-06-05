@@ -358,6 +358,12 @@ class QobuzClient:
             return None
         metadata = convert.track_from_qobuz(data)
         stream = self._get_file_url(numeric)
+        from tunes_player.core.playback_quality import qobuz_format_label_from_stream
+
+        format_label = qobuz_format_label_from_stream(
+            stream,
+            fallback_format_id=self._format_id,
+        )
         url = stream.get("url")
         if not url:
             restrictions = stream.get("restrictions")
@@ -368,7 +374,11 @@ class QobuzClient:
                     "Check your subscription and account region."
                 )
             raise QobuzUnavailableError("Qobuz did not return a stream URL for this track.")
-        return PlayableSource(uri=str(url), metadata=metadata)
+        return PlayableSource(
+            uri=str(url),
+            metadata=metadata,
+            format_label=format_label,
+        )
 
     def _require_login(self) -> None:
         if not self.is_logged_in():

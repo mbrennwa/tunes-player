@@ -108,6 +108,8 @@ class PlayerService:
         self._quality_hint = ""
         self._tidal_playback_format_label: str | None = None
         self._tidal_playback_format_track_id: str | None = None
+        self._qobuz_playback_format_label: str | None = None
+        self._qobuz_playback_format_track_id: str | None = None
         self._playback_note: str | None = None
         self._bit_perfect_playback = False
         self._output_profile: PlaybackOutputProfile | None = None
@@ -958,16 +960,24 @@ class PlayerService:
         if track.id.startswith("tidal:"):
             base_hint = self._tidal_quality_hint_for_track(track.id)
         elif track.id.startswith("qobuz:"):
-            from tunes_player.core.playback_quality import qobuz_stream_format_label
-
-            base_hint = qobuz_stream_format_label(
-                self._config_manager.config.qobuz_stream_format_id
-            )
+            base_hint = self._qobuz_quality_hint_for_track(track.id)
         else:
             metadata = self._store.get_file_metadata(track.id)
             base_hint = LibraryStore.quality_hint(metadata)
         self._quality_hint = format_playback_status(
             base_hint, playback_note=self._playback_note
+        )
+
+    def _qobuz_quality_hint_for_track(self, track_id: str) -> str:
+        if (
+            self._qobuz_playback_format_track_id == track_id
+            and self._qobuz_playback_format_label
+        ):
+            return self._qobuz_playback_format_label
+        from tunes_player.core.playback_quality import qobuz_stream_format_label
+
+        return qobuz_stream_format_label(
+            self._config_manager.config.qobuz_stream_format_id,
         )
 
     def _acquire_exclusive_session_if_needed(self, profile: PlaybackOutputProfile) -> None:
@@ -1264,21 +1274,25 @@ class PlayerService:
         if track.source.value != "tidal":
             self._tidal_playback_format_track_id = None
             self._tidal_playback_format_label = None
+        if track.source.value != "qobuz":
+            self._qobuz_playback_format_track_id = None
+            self._qobuz_playback_format_label = None
         if format_label is not None:
             base_hint = format_label
             if track.source.value == "tidal":
                 self._tidal_playback_format_track_id = track.id
                 self._tidal_playback_format_label = format_label
+            elif track.source.value == "qobuz":
+                self._qobuz_playback_format_track_id = track.id
+                self._qobuz_playback_format_label = format_label
         elif track.source.value == "tidal":
             self._tidal_playback_format_track_id = None
             self._tidal_playback_format_label = None
             base_hint = self._tidal_quality_hint_for_track(track.id)
         elif track.source.value == "qobuz":
-            from tunes_player.core.playback_quality import qobuz_stream_format_label
-
-            base_hint = qobuz_stream_format_label(
-                self._config_manager.config.qobuz_stream_format_id
-            )
+            self._qobuz_playback_format_track_id = None
+            self._qobuz_playback_format_label = None
+            base_hint = self._qobuz_quality_hint_for_track(track.id)
         else:
             metadata = self._store.get_file_metadata(track.id)
             base_hint = LibraryStore.quality_hint(metadata)

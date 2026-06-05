@@ -75,6 +75,53 @@ def qobuz_stream_format_label(format_id: int) -> str:
     return _QOBUZ_FORMAT_LABELS.get(format_id, f"Qobuz format {format_id}")
 
 
+def _normalize_qobuz_sample_rate_hz(value: int | float | str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        rate = float(value)
+    except (TypeError, ValueError):
+        return None
+    if rate <= 0:
+        return None
+    if rate < 1000:
+        return int(round(rate * 1000))
+    return int(round(rate))
+
+
+def qobuz_format_label_from_bit_depth_sample_rate(
+    *,
+    bit_depth: int | float | str | None,
+    sample_rate_hz: int | float | str | None,
+) -> str | None:
+    """Human-readable label from Qobuz bit depth and sample rate (Hz or kHz)."""
+    try:
+        depth = int(bit_depth) if bit_depth is not None else None
+    except (TypeError, ValueError):
+        depth = None
+    rate_hz = _normalize_qobuz_sample_rate_hz(sample_rate_hz)
+    if depth is None or rate_hz is None:
+        return None
+    return f"{depth}-bit / {_format_sample_rate_hz(rate_hz)}"
+
+
+def qobuz_format_label_from_stream(
+    stream: dict,
+    *,
+    fallback_format_id: int | None = None,
+) -> str:
+    """Label from track/getFileUrl response (actual stream), not the format ceiling."""
+    label = qobuz_format_label_from_bit_depth_sample_rate(
+        bit_depth=stream.get("bit_depth"),
+        sample_rate_hz=stream.get("sampling_rate"),
+    )
+    if label is not None:
+        return label
+    if fallback_format_id is not None:
+        return qobuz_stream_format_label(fallback_format_id)
+    return "Unknown format"
+
+
 def _normalize_tidal_quality_key(quality: str | None) -> str:
     if not quality:
         return ""

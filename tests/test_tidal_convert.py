@@ -112,13 +112,16 @@ class TidalConvertTests(unittest.TestCase):
             num_tracks=2,
             artists=[SimpleNamespace(name="Artist")],
             release_date=None,
+            audio_quality="LOSSLESS",
+            media_metadata_tags=None,
+            audio_modes=[],
             tracks=lambda: (_ for _ in ()).throw(
                 AssertionError("tracks() must not run for grid conversion"),
             ),
         )
         session = _FakeSession()
         release = release_from_tidal(session, sparse)
-        self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_COMPRESSED)
+        self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_CD)
 
     def test_release_peak_quality_fetches_sparse_album_tracks(self) -> None:
         sparse = SimpleNamespace(

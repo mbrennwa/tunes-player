@@ -12,6 +12,7 @@ from tunes_player.core.library.release_logic import (
 )
 from tunes_player.core.release_quality import (
     QUALITY_FILTER_COMPRESSED,
+    tier_from_tidal_album,
     tier_from_tidal_peak,
 )
 from tunes_player.core.models import (
@@ -142,7 +143,7 @@ def release_from_tidal(
         peak_quality_tier=(
             _resolve_tidal_peak_quality_tier(session, album)
             if resolve_peak_quality
-            else QUALITY_FILTER_COMPRESSED
+            else tier_from_tidal_album(album)
         ),
     )
 
