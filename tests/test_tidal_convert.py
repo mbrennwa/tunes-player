@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from tunes_player.core.backends.tidal.convert import (
     _resolve_tidal_release_type,
     release_from_tidal,
+    resolve_tidal_grid_peak_quality_tier,
 )
 from tunes_player.core.models import ReleaseType
 from tunes_player.core.release_quality import (
@@ -122,6 +123,22 @@ class TidalConvertTests(unittest.TestCase):
         session = _FakeSession()
         release = release_from_tidal(session, sparse)
         self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_CD)
+
+    def test_resolve_tidal_grid_peak_quality_refetches_sparse_album(self) -> None:
+        sparse = SimpleNamespace(id=99, audio_quality="", media_metadata_tags=None, audio_modes=[])
+        session = _FakeSession(full_type="ALBUM")
+
+        class _RefetchSession(_FakeSession):
+            def album(self, album_id: object) -> SimpleNamespace:
+                return SimpleNamespace(
+                    id=album_id,
+                    audio_quality="HI_RES_LOSSLESS",
+                    media_metadata_tags=["HIRES_LOSSLESS"],
+                    audio_modes=[],
+                )
+
+        tier = resolve_tidal_grid_peak_quality_tier(_RefetchSession(), sparse)
+        self.assertEqual(tier, QUALITY_FILTER_HI_RES)
 
     def test_release_peak_quality_fetches_sparse_album_tracks(self) -> None:
         sparse = SimpleNamespace(

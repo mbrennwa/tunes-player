@@ -32,7 +32,11 @@ from tunes_player.core.home import (
     RecentlyAddedItem,
 )
 from tunes_player.core.models import Release, Track
-from tunes_player.core.release_quality import max_quality_tier, tier_from_tidal_album
+from tunes_player.core.release_quality import (
+    max_quality_tier,
+    tier_from_tidal_album,
+    tier_from_tidal_track,
+)
 
 if TYPE_CHECKING:
     import tidalapi
@@ -513,6 +517,7 @@ class TidalClient:
                 session,
                 raw.album,
                 resolve_peak_quality=False,
+                quality_hint_tier=tier_from_tidal_track(raw),
             )
             if release.id in seen:
                 continue
@@ -1165,6 +1170,7 @@ def _recently_added_from_tidal_object(
                 session,
                 raw.album,
                 resolve_peak_quality=False,
+                quality_hint_tier=tier_from_tidal_track(raw),
             ),
         )
     page_item_type = getattr(raw, "type", None)

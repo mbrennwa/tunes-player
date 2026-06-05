@@ -15,6 +15,7 @@ from tunes_player.core.release_quality import (
     tier_from_qobuz_album,
     tier_from_tidal_album,
     tier_from_tidal_peak,
+    tier_from_tidal_track,
 )
 
 
@@ -70,6 +71,17 @@ class ReleaseQualityTests(unittest.TestCase):
             audio_modes=[],
         )
         self.assertEqual(tier_from_tidal_album(album), QUALITY_FILTER_HI_RES)
+
+    def test_tidal_album_without_metadata_is_unknown(self) -> None:
+        album = SimpleNamespace(audio_quality="", media_metadata_tags=None, audio_modes=[])
+        self.assertEqual(tier_from_tidal_album(album), "")
+
+    def test_tidal_track_metadata_hi_res(self) -> None:
+        track = SimpleNamespace(
+            audio_quality="HI_RES_LOSSLESS",
+            media_metadata_tags=["HIRES_LOSSLESS"],
+        )
+        self.assertEqual(tier_from_tidal_track(track), QUALITY_FILTER_HI_RES)
 
     def test_tidal_album_metadata_cd(self) -> None:
         album = SimpleNamespace(

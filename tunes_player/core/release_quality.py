@@ -80,16 +80,33 @@ def tier_from_tidal_peak(rank: int) -> str:
     return QUALITY_FILTER_COMPRESSED
 
 
+def tidal_album_has_quality_metadata(album: object) -> bool:
+    audio_quality = getattr(album, "audio_quality", None)
+    if audio_quality is not None and str(audio_quality).strip():
+        return True
+    tags = getattr(album, "media_metadata_tags", None)
+    if tags:
+        return True
+    modes = getattr(album, "audio_modes", None) or []
+    return bool(modes)
+
+
+def tier_from_tidal_track(track: object) -> str:
+    """Peak catalog tier from a TIDAL track object (no album fetch)."""
+    from tunes_player.core.backends.tidal.stream_quality import track_peak_quality
+
+    audio_quality = getattr(track, "audio_quality", None)
+    if audio_quality is None or not str(audio_quality).strip():
+        return ""
+    return tier_from_tidal_peak(track_peak_quality(track))
+
+
 def tier_from_tidal_album(album: object) -> str:
     """Peak catalog tier from TIDAL album metadata (no track list fetch)."""
     from tunes_player.core.backends.tidal.stream_quality import track_peak_quality
 
-    if getattr(album, "audio_quality", None) is None and getattr(
-        album,
-        "media_metadata_tags",
-        None,
-    ) is None:
-        return QUALITY_FILTER_COMPRESSED
+    if not tidal_album_has_quality_metadata(album):
+        return ""
     rank = track_peak_quality(album)
     audio_modes = getattr(album, "audio_modes", None) or []
     for mode in audio_modes:
@@ -186,4 +203,4 @@ def release_quality_filter_bucket(release: Release) -> str:
     tier = release.peak_quality_tier
     if tier in _VALID_QUALITY_FILTERS:
         return tier
-    return QUALITY_FILTER_COMPRESSED
+    return ""

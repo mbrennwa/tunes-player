@@ -12,8 +12,10 @@ from tunes_player.core.library.release_logic import (
 )
 from tunes_player.core.release_quality import (
     QUALITY_FILTER_COMPRESSED,
+    max_quality_tier,
     tier_from_tidal_album,
     tier_from_tidal_peak,
+    tidal_album_has_quality_metadata,
 )
 from tunes_player.core.models import (
     Artist,
@@ -105,12 +107,41 @@ def _resolve_tidal_peak_quality_tier(session: Session, album: TidalAlbum) -> str
     return peak_quality_tier_from_tidal_tracks(_tidal_album_tracks(session, album))
 
 
+def resolve_tidal_grid_peak_quality_tier(
+    session: Session,
+    album: TidalAlbum,
+    *,
+    quality_hint_tier: str = "",
+) -> str:
+    """Best-effort catalog tier for grids without loading every track."""
+    tiers: list[str] = []
+    if quality_hint_tier:
+        tiers.append(quality_hint_tier)
+    album_tier = tier_from_tidal_album(album)
+    if album_tier:
+        tiers.append(album_tier)
+    elif not tidal_album_has_quality_metadata(album):
+        album_id = getattr(album, "id", None)
+        if album_id is not None and album_id != -1:
+            try:
+                resolved = session.album(album_id)
+                fetched = tier_from_tidal_album(resolved)
+                if fetched:
+                    tiers.append(fetched)
+            except Exception:
+                pass
+    if tiers:
+        return max_quality_tier(*tiers)
+    return ""
+
+
 def release_from_tidal(
     session: Session,
     album: TidalAlbum,
     *,
     owned_track_count: int | None = None,
     resolve_peak_quality: bool = False,
+    quality_hint_tier: str = "",
 ) -> Release:
     artists = album.artists or []
     artist_name = artists[0].name if artists else "Unknown Artist"
@@ -143,7 +174,11 @@ def release_from_tidal(
         peak_quality_tier=(
             _resolve_tidal_peak_quality_tier(session, album)
             if resolve_peak_quality
-            else tier_from_tidal_album(album)
+            else resolve_tidal_grid_peak_quality_tier(
+                session,
+                album,
+                quality_hint_tier=quality_hint_tier,
+            )
         ),
     )
 

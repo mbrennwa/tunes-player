@@ -385,6 +385,17 @@ class TestQualityFilter(unittest.TestCase):
         releases = [_release("a", Source.LOCAL)]
         self.assertEqual(len(apply_quality_filter(releases, frozenset())), 1)
 
+    def test_apply_quality_filter_excludes_unknown_tier(self) -> None:
+        releases = [
+            _release("a", Source.TIDAL, peak_quality_tier=QUALITY_FILTER_COMPRESSED),
+            _release("b", Source.TIDAL, peak_quality_tier=""),
+        ]
+        filtered = apply_quality_filter(
+            releases,
+            frozenset({QUALITY_FILTER_COMPRESSED}),
+        )
+        self.assertEqual([r.id for r in filtered], ["a"])
+
     def test_prune_enabled_quality_tiers(self) -> None:
         pruned = prune_enabled_quality_tiers(
             frozenset({QUALITY_FILTER_CD, QUALITY_FILTER_COMPRESSED}),
