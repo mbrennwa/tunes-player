@@ -19,6 +19,17 @@ def _release(release_id: str) -> Release:
     )
 
 
+def _selection_identity_changed(previous: ShellState, current: ShellState) -> bool:
+    if previous.base != current.base:
+        return True
+    if current.base == ShellBase.SEARCH:
+        if previous.search_query != current.search_query:
+            return True
+        if previous.search_scope != current.search_scope:
+            return True
+    return False
+
+
 class TestSelectionSnapshot(unittest.TestCase):
     def test_snapshot_round_trip_preserves_filters(self) -> None:
         state = ShellState(
@@ -46,20 +57,39 @@ class TestArtistSearchHistoryPush(unittest.TestCase):
             search_query="Portishead",
             cached_releases=(),
         )
-        identity_changed = (
-            current.base != next_state.base
-            or (
-                next_state.base == ShellBase.SEARCH
-                and current.search_query != next_state.search_query
-            )
-        )
-        self.assertTrue(identity_changed)
+        self.assertTrue(_selection_identity_changed(current, next_state))
 
     def test_repeated_search_query_should_not_push(self) -> None:
         current = ShellState(base=ShellBase.SEARCH, search_query="jazz")
         text = "jazz"
         same_query = current.base == ShellBase.SEARCH and current.search_query.strip() == text
         self.assertTrue(same_query)
+
+
+class TestPresetHistoryPush(unittest.TestCase):
+    def test_search_to_new_music_should_push(self) -> None:
+        current = ShellState(base=ShellBase.SEARCH, search_query="Radiohead")
+        next_state = replace(
+            current,
+            base=ShellBase.NEW_MUSIC,
+            search_query="",
+            cached_releases=(),
+        )
+        self.assertTrue(_selection_identity_changed(current, next_state))
+
+    def test_new_music_to_suggestion_should_push(self) -> None:
+        current = ShellState(base=ShellBase.NEW_MUSIC)
+        next_state = replace(
+            current,
+            base=ShellBase.SUGGESTION,
+            cached_releases=(),
+        )
+        self.assertTrue(_selection_identity_changed(current, next_state))
+
+    def test_same_preset_should_not_push(self) -> None:
+        current = ShellState(base=ShellBase.NEW_MUSIC)
+        next_state = replace(current, cached_releases=())
+        self.assertFalse(_selection_identity_changed(current, next_state))
 
 
 if __name__ == "__main__":

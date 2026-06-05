@@ -675,6 +675,21 @@ class TunesWindow(Adw.ApplicationWindow):
         elif self._shell_state.base == ShellBase.ALL_LOCAL:
             button.set_active(True)
 
+    def _commit_selection_change(
+        self,
+        next_state: ShellState,
+        *,
+        skip_history_push: bool = False,
+    ) -> None:
+        if (
+            not skip_history_push
+            and self._selection_identity_changed(self._shell_state, next_state)
+        ):
+            self._push_selection_history()
+        if not self._nav_at_root():
+            self._main_nav.pop()
+        self._set_shell_state(next_state, clear_selection_history=False)
+
     def _activate_preset(self, base: ShellBase) -> None:
         enabled_sources = self._shell_state.enabled_sources
         if base == ShellBase.ALL_LOCAL:
@@ -683,16 +698,15 @@ class TunesWindow(Adw.ApplicationWindow):
                 Source.LOCAL,
                 available=available_sources(self._service),
             )
-        self._set_shell_state(
-            replace(
-                self._shell_state,
-                base=base,
-                search_query="",
-                search_scope=SearchScope.ALL,
-                enabled_sources=enabled_sources,
-                cached_releases=(),
-            ),
+        next_state = replace(
+            self._shell_state,
+            base=base,
+            search_query="",
+            search_scope=SearchScope.ALL,
+            enabled_sources=enabled_sources,
+            cached_releases=(),
         )
+        self._commit_selection_change(next_state)
 
     def _on_search_activate(self, entry: Gtk.SearchEntry) -> None:
         self._navigate_to_search(entry.get_text())
@@ -719,12 +733,8 @@ class TunesWindow(Adw.ApplicationWindow):
             and self._shell_state.search_query.strip() == text
             and self._shell_state.search_scope == search_scope
         )
-        if not same_query and self._selection_identity_changed(self._shell_state, next_state):
-            self._push_selection_history()
-        if not self._nav_at_root():
-            self._main_nav.pop()
         self._search_entry.set_text(text)
-        self._set_shell_state(next_state, clear_selection_history=False)
+        self._commit_selection_change(next_state, skip_history_push=same_query)
 
     def _schedule_persist(self) -> None:
         if self._persist_timeout_id:
