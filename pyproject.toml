@@ -69,6 +69,15 @@ pypi_wheelhouse = [
   "python-mpv",
 ]
 
+[tool.pytest.ini_options]
+pythonpath = [".", "tests"]
+filterwarnings = [
+    "ignore:GLib.unix_signal_add_full is deprecated; use GLibUnix.signal_add_full instead:gi.PyGIDeprecationWarning",
+]
+markers = [
+    "integration: requires ALSA loopback, mpv, and arecord",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

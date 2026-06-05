@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 
+import tunes_player.gi_bootstrap  # noqa: F401 — before gi.repository
 import gi
 
 gi.require_version("Gio", "2.0")

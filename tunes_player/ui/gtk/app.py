@@ -6,6 +6,7 @@ import logging
 import threading
 from dataclasses import dataclass, replace
 
+import tunes_player.gi_bootstrap  # noqa: F401 — before gi.repository
 import gi
 
 gi.require_version("Adw", "1")

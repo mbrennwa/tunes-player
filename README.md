@@ -109,6 +109,44 @@ make icons
 sudo make install
 ```
 
+## Bit-perfect validation (optional)
+
+End-to-end checks play deterministic noise fixtures through **PlayerService** on the
+**ALSA loopback** device, capture PCM from the loopback capture port, and compare against
+the source file. This validates the full local path (library scan → mpv → direct ALSA).
+
+Prerequisites:
+
+```bash
+sudo modprobe snd-aloop pcm_substreams=1   # virtual playback/capture card
+# mpv, arecord, and aplay must be installed
+```
+
+Run integration tests (skipped automatically when loopback or mpv is unavailable).
+**Quit Tunes Player first** — an exclusive ALSA session or a second mpv instance can
+leave the loopback capture silent or block `hw_params` checks.
+
+```bash
+source .venv/bin/activate
+python -m pytest -m integration tests/test_bitperfect_e2e.py -v
+```
+
+Regenerate committed fixtures after changing the generator:
+
+```bash
+python3 scripts/generate_bitperfect_fixtures.py
+```
+
+The matrix covers **16-, 24-, and 32-bit** PCM at audiophile hi-res rates (88.2, 96,
+176.4, 192, and 352.8 kHz) plus 44.1/48 kHz.
+Fixtures contain **0.2 s of noise** bookended by short silent padding (0.15/0.1 s
+standard, 0.25/0.15 s hi-res) for mpv/ALSA startup.
+The test **finds that noise in the capture** and compares it sample-for-sample to the
+source pattern. Hi-res cases may also try ALSA `plug` PCMs to pin rate/format on both
+loopback sides during mpv playback.
+
+Related: [issue #23](https://github.com/mbrennwa/tunes-player/issues/23).
+
 ## Streaming disclaimer
 
 Tunes is **not affiliated with Tidal, Qobuz, or any other streaming provider**.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,7 +11,7 @@ from unittest.mock import patch
 from tunes_player.core.config import AppConfig
 from tunes_player.core.library import ids
 from tunes_player.core.library.db import connect
-from tunes_player.core.library.scanner import LibraryScanner, _ParsedTrack
+from tunes_player.core.library.scanner import LibraryScanner, ScanResult, _ParsedTrack
 
 
 class LibraryScannerScopedTests(unittest.TestCase):
@@ -353,6 +354,120 @@ class LibraryScannerScopedTests(unittest.TestCase):
         self.assertEqual(len(result.file_errors), 1)
         self.assertIn("bad.flac", result.file_errors[0].path)
         self.assertEqual(result.file_errors[0].reason, "database write failed")
+
+    def test_scan_commits_after_every_batch_of_processed_files(self) -> None:
+        candidates = [Path(f"/tmp/fake_{index}.flac") for index in range(120)]
+        commits: list[None] = []
+        real_connect = connect
+
+        class _TrackingConnection:
+            def __init__(self, connection: sqlite3.Connection) -> None:
+                self._connection = connection
+
+            def commit(self) -> None:
+                commits.append(None)
+                self._connection.commit()
+
+            def __getattr__(self, name: str):
+                return getattr(self._connection, name)
+
+        def tracking_connect(db_path: Path):
+            return _TrackingConnection(real_connect(db_path))
+
+        with (
+            patch("tunes_player.core.library.scanner.connect", side_effect=tracking_connect),
+            patch.object(LibraryScanner, "_collect_candidates", return_value=candidates),
+            patch.object(
+                LibraryScanner,
+                "_process_candidate",
+                return_value=("skipped", None),
+            ),
+            patch(
+                "tunes_player.core.library.scanner.backfill_missing_album_art",
+                return_value=0,
+            ),
+            patch("tunes_player.core.library.scanner.prune_orphan_album_art"),
+        ):
+            self._scanner.scan(scan_folders=[str(self._folder_a.resolve())])
+
+        self.assertGreaterEqual(len(commits), 3)
+
+    def test_scan_changes_indexes_added_file_and_removes_deleted_file(self) -> None:
+        added = self._folder_a / "new_track.flac"
+        added.write_bytes(b"")
+        stale = str((self._folder_a / "stale.flac").resolve())
+        connection = connect(self._db_path)
+        try:
+            connection.execute(
+                "INSERT INTO files(path, mtime_ns, size_bytes, indexed_at_ns) VALUES (?, ?, ?, ?)",
+                (stale, 1, 1, 1),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with (
+            patch("tunes_player.core.library.scanner._parse_file") as parse_file,
+            patch("tunes_player.core.library.scanner.index_album_art_for_file"),
+            patch("tunes_player.core.library.scanner.prune_orphan_album_art"),
+        ):
+            parse_file.return_value = _ParsedTrack(
+                path=str(added.resolve()),
+                mtime_ns=1,
+                size_bytes=1,
+                codec="flac",
+                duration_sec=None,
+                sample_rate=None,
+                bit_depth=None,
+                channels=None,
+                title="New",
+                artist="Artist",
+                album_artist="Artist",
+                album="Album",
+                release_id=ids.release_id("Artist", "Album"),
+                is_synthetic=False,
+                disc_number=None,
+                track_number=None,
+                year=None,
+                genre=None,
+                total_tracks=None,
+                release_type_tag=None,
+            )
+            result = self._scanner.scan_changes(
+                folder=str(self._folder_a.resolve()),
+                add_paths=[str(added.resolve())],
+                remove_paths=[stale],
+            )
+
+        self.assertEqual(result.indexed, 1)
+        self.assertEqual(result.removed, 1)
+
+        connection = connect(self._db_path)
+        try:
+            paths = {
+                row["path"]
+                for row in connection.execute("SELECT path FROM files").fetchall()
+            }
+        finally:
+            connection.close()
+
+        self.assertIn(str(added.resolve()), paths)
+        self.assertNotIn(stale, paths)
+
+    def test_scan_retries_on_database_locked(self) -> None:
+        attempts = {"count": 0}
+
+        def flaky_scan_once(**_kwargs: object) -> ScanResult:
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return ScanResult(indexed=0, removed=0, skipped=0, errors=0)
+
+        with patch.object(LibraryScanner, "_scan_once", side_effect=flaky_scan_once):
+            result = self._scanner.scan(scan_folders=[str(self._folder_a.resolve())])
+
+        self.assertEqual(attempts["count"], 2)
+        self.assertEqual(result.indexed, 0)
 
 
 if __name__ == "__main__":

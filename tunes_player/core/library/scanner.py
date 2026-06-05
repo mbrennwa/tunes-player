@@ -25,6 +25,12 @@ _CandidateOutcome = Literal["indexed", "skipped", "error"]
 
 
 _MAX_RECORDED_FILE_ERRORS = 20
+_LOCK_RETRY_ATTEMPTS = 6
+_LOCK_RETRY_BASE_DELAY_SEC = 0.15
+
+
+def _is_locked_error(exc: BaseException) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +89,55 @@ class LibraryScanner:
         scan_folders: list[str] | None = None,
         progress: ProgressCallback | None = None,
     ) -> ScanResult:
+        last_error: sqlite3.OperationalError | None = None
+        for attempt in range(_LOCK_RETRY_ATTEMPTS):
+            try:
+                return self._scan_once(
+                    scan_folders=scan_folders,
+                    progress=progress,
+                )
+            except sqlite3.OperationalError as exc:
+                if not _is_locked_error(exc) or attempt == _LOCK_RETRY_ATTEMPTS - 1:
+                    raise
+                last_error = exc
+                time.sleep(_LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("library scan retry loop exited without result")
+
+    def scan_changes(
+        self,
+        *,
+        folder: str,
+        add_paths: list[str] | None = None,
+        remove_paths: list[str] | None = None,
+        progress: ProgressCallback | None = None,
+    ) -> ScanResult:
+        """Index or drop specific paths without walking the whole library folder."""
+        last_error: sqlite3.OperationalError | None = None
+        for attempt in range(_LOCK_RETRY_ATTEMPTS):
+            try:
+                return self._scan_changes_once(
+                    folder=folder,
+                    add_paths=add_paths,
+                    remove_paths=remove_paths,
+                    progress=progress,
+                )
+            except sqlite3.OperationalError as exc:
+                if not _is_locked_error(exc) or attempt == _LOCK_RETRY_ATTEMPTS - 1:
+                    raise
+                last_error = exc
+                time.sleep(_LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("library incremental scan retry loop exited without result")
+
+    def _scan_once(
+        self,
+        *,
+        scan_folders: list[str] | None = None,
+        progress: ProgressCallback | None = None,
+    ) -> ScanResult:
         if progress is not None:
             progress(0, 0, "Discovering files…")
 
@@ -102,6 +157,8 @@ class LibraryScanner:
         file_errors: list[ScanFileError] = []
         total = len(candidates)
         last_progress_at = 0.0
+        removed = 0
+        art_indexed = 0
 
         connection = connect(self._db_path)
         try:
@@ -127,20 +184,100 @@ class LibraryScanner:
                 )
                 if outcome == "skipped":
                     skipped += 1
-                    continue
-                if path_str is not None:
-                    seen_paths.add(path_str)
-                if outcome == "error":
-                    errors += 1
-                    continue
+                else:
+                    if path_str is not None:
+                        seen_paths.add(path_str)
+                    if outcome == "error":
+                        errors += 1
+                    else:
+                        indexed += 1
 
-                indexed += 1
-                if indexed % self._BATCH_SIZE == 0:
+                if index % self._BATCH_SIZE == 0:
                     connection.commit()
                     connection.execute("BEGIN")
 
+            connection.commit()
+            connection.execute("BEGIN")
             removed = self._remove_missing_files(connection, seen_paths, roots)
             art_indexed = backfill_missing_album_art(connection, data_dir=self._data_dir)
+            prune_orphan_album_art(connection, data_dir=self._data_dir)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+        return ScanResult(
+            indexed=indexed,
+            removed=removed,
+            skipped=skipped,
+            errors=errors,
+            art_indexed=art_indexed,
+            file_errors=tuple(file_errors),
+        )
+
+    def _scan_changes_once(
+        self,
+        *,
+        folder: str,
+        add_paths: list[str] | None = None,
+        remove_paths: list[str] | None = None,
+        progress: ProgressCallback | None = None,
+    ) -> ScanResult:
+        root = str(Path(folder).resolve())
+        to_add = self._expand_change_paths(add_paths or [])
+        to_remove = [str(Path(path).resolve()) for path in (remove_paths or [])]
+        indexed = 0
+        skipped = 0
+        errors = 0
+        file_errors: list[ScanFileError] = []
+        removed = 0
+        art_indexed = 0
+        steps: list[tuple[str, Path | str]] = [
+            ("remove", path_str) for path_str in to_remove
+        ] + [("add", path) for path in to_add]
+        total = len(steps)
+        last_progress_at = 0.0
+
+        connection = connect(self._db_path)
+        try:
+            connection.execute("BEGIN")
+            for index, (kind, target) in enumerate(steps, start=1):
+                if index % self._YIELD_EVERY == 0:
+                    time.sleep(0)
+
+                if progress is not None:
+                    now = time.monotonic()
+                    label = str(target)
+                    if (
+                        index == 1
+                        or index == total
+                        or now - last_progress_at >= self._PROGRESS_INTERVAL_SEC
+                    ):
+                        progress(index, total, label)
+                        last_progress_at = now
+
+                if kind == "remove":
+                    removed += self._remove_paths(connection, [str(target)])
+                    continue
+
+                outcome, _path_str = self._process_candidate(
+                    connection,
+                    target,
+                    file_errors=file_errors,
+                )
+                if outcome == "skipped":
+                    skipped += 1
+                elif outcome == "error":
+                    errors += 1
+                else:
+                    indexed += 1
+
+                if index % self._BATCH_SIZE == 0:
+                    connection.commit()
+                    connection.execute("BEGIN")
+
             prune_orphan_album_art(connection, data_dir=self._data_dir)
             connection.commit()
         except Exception:
@@ -255,7 +392,7 @@ class LibraryScanner:
                 return removed
             except sqlite3.OperationalError as exc:
                 connection.rollback()
-                if "locked" not in str(exc).lower() or attempt == 5:
+                if not _is_locked_error(exc) or attempt == 5:
                     raise
                 last_error = exc
                 time.sleep(0.15 * (attempt + 1))
@@ -373,6 +510,51 @@ class LibraryScanner:
                 parsed.release_type_tag,
             ),
         )
+
+    def _expand_change_paths(self, paths: list[str]) -> list[Path]:
+        candidates: list[Path] = []
+        seen: set[str] = set()
+        for raw in paths:
+            path = Path(raw)
+            if path.is_file():
+                if has_tier1_extension(path):
+                    path_str = str(path.resolve())
+                    if path_str not in seen:
+                        seen.add(path_str)
+                        candidates.append(path.resolve())
+                continue
+            if not path.is_dir():
+                continue
+            for dirpath, _dirnames, filenames in os.walk(path, followlinks=True):
+                for name in filenames:
+                    candidate = Path(dirpath) / name
+                    if not has_tier1_extension(candidate):
+                        continue
+                    path_str = str(candidate.resolve())
+                    if path_str in seen:
+                        continue
+                    seen.add(path_str)
+                    candidates.append(candidate.resolve())
+        candidates.sort()
+        return candidates
+
+    @staticmethod
+    def _remove_paths(connection: sqlite3.Connection, paths: list[str]) -> int:
+        removed = 0
+        for raw in paths:
+            path_str = str(Path(raw).resolve())
+            prefix = path_str + os.sep
+            rows = connection.execute(
+                """
+                SELECT id FROM files
+                WHERE path = ? OR path LIKE ?
+                """,
+                (path_str, prefix + "%"),
+            ).fetchall()
+            for row in rows:
+                connection.execute("DELETE FROM files WHERE id = ?", (int(row["id"]),))
+                removed += 1
+        return removed
 
     @staticmethod
     def _path_under_roots(path_str: str, scan_roots: list[str]) -> bool:

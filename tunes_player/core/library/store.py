@@ -64,26 +64,44 @@ class FileMetadata:
 class LibraryStore:
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
-        self._connection = connect(db_path)
+        self._write_connection: sqlite3.Connection | None = connect(db_path)
+        self._read_connection: sqlite3.Connection | None = None
 
     @property
     def connection(self) -> sqlite3.Connection:
-        return self._connection
+        return self._db_connection()
+
+    def _db_connection(self) -> sqlite3.Connection:
+        if self._write_connection is not None:
+            return self._write_connection
+        if self._read_connection is None:
+            self._read_connection = connect(self._db_path)
+        return self._read_connection
 
     def close(self) -> None:
-        self._connection.close()
+        """Release DB connections while a background scan runs."""
+        if self._write_connection is not None:
+            self._write_connection.close()
+            self._write_connection = None
+        if self._read_connection is not None:
+            self._read_connection.close()
+            self._read_connection = None
 
     def reconnect(self) -> None:
-        """Reopen the DB connection (call after a scan from another connection)."""
-        self._connection.close()
-        self._connection = connect(self._db_path)
+        """Reopen the write connection (call after a scan from another connection)."""
+        if self._read_connection is not None:
+            self._read_connection.close()
+            self._read_connection = None
+        if self._write_connection is not None:
+            self._write_connection.close()
+        self._write_connection = connect(self._db_path)
 
     def track_count(self) -> int:
-        row = self._connection.execute("SELECT COUNT(*) AS count FROM tracks").fetchone()
+        row = self._db_connection().execute("SELECT COUNT(*) AS count FROM tracks").fetchone()
         return int(row["count"])
 
     def list_releases(self) -> list[Release]:
-        rows = self._connection.execute(
+        rows = self._db_connection().execute(
             f"""
             {_RELEASE_GROUP_SELECT}
             GROUP BY t.album_id, t.album, t.album_artist
@@ -96,7 +114,7 @@ class LibraryStore:
         return self.list_releases()
 
     def get_release(self, release_id: str) -> Release | None:
-        row = self._connection.execute(
+        row = self._db_connection().execute(
             f"""
             {_RELEASE_GROUP_SELECT}
             WHERE t.album_id = ?
@@ -112,7 +130,7 @@ class LibraryStore:
         return self.get_release(album_id)
 
     def get_release_tracks(self, release_id: str) -> list[Track]:
-        rows = self._connection.execute(
+        rows = self._db_connection().execute(
             """
             SELECT
                 t.id,
@@ -138,7 +156,7 @@ class LibraryStore:
         return self.get_release_tracks(album_id)
 
     def get_track(self, track_id: str) -> Track | None:
-        row = self._connection.execute(
+        row = self._db_connection().execute(
             """
             SELECT
                 t.id,
@@ -162,7 +180,7 @@ class LibraryStore:
         return self._row_to_track(row)
 
     def release_id_for_track(self, track_id: str) -> str | None:
-        row = self._connection.execute(
+        row = self._db_connection().execute(
             "SELECT album_id FROM tracks WHERE id = ?",
             (track_id,),
         ).fetchone()
@@ -172,7 +190,7 @@ class LibraryStore:
         return self.release_id_for_track(track_id)
 
     def get_file_metadata(self, track_id: str) -> FileMetadata | None:
-        row = self._connection.execute(
+        row = self._db_connection().execute(
             """
             SELECT
                 f.path,
@@ -218,7 +236,7 @@ class LibraryStore:
 
         if artists_only:
             add_ids(
-                self._connection.execute(
+                self._db_connection().execute(
                     """
                     SELECT DISTINCT t.album_id AS release_id
                     FROM tracks t
@@ -230,7 +248,7 @@ class LibraryStore:
             )
         else:
             add_ids(
-                self._connection.execute(
+                self._db_connection().execute(
                     f"""
                     SELECT DISTINCT t.album_id AS release_id
                     FROM tracks t
@@ -242,7 +260,7 @@ class LibraryStore:
                 ).fetchall(),
             )
             add_ids(
-                self._connection.execute(
+                self._db_connection().execute(
                     """
                     SELECT DISTINCT t.album_id AS release_id
                     FROM tracks t
@@ -258,7 +276,7 @@ class LibraryStore:
             return []
 
         placeholders = ",".join("?" * len(release_ids))
-        rows = self._connection.execute(
+        rows = self._db_connection().execute(
             f"""
             {_RELEASE_GROUP_SELECT}
             WHERE t.album_id IN ({placeholders})
@@ -282,7 +300,7 @@ class LibraryStore:
         limit: int = 80,
     ) -> list[RecentlyAddedItem]:
         cutoff_ns = time.time_ns() - int(within_days * 86_400 * 1_000_000_000)
-        rows = self._connection.execute(
+        rows = self._db_connection().execute(
             f"""
             {_RELEASE_GROUP_SELECT}
             GROUP BY t.album_id, t.album, t.album_artist
@@ -298,7 +316,7 @@ class LibraryStore:
                 row,
                 art_uri=self._art_uri_for_release(str(row["release_id"])),
             )
-            added_row = self._connection.execute(
+            added_row = self._db_connection().execute(
                 """
                 SELECT MAX(f.indexed_at_ns) AS added_ns
                 FROM tracks t
@@ -319,18 +337,20 @@ class LibraryStore:
         source: str,
         played_at_ns: int | None = None,
     ) -> None:
+        if self._write_connection is None:
+            raise RuntimeError("library store write connection is closed")
         when = played_at_ns if played_at_ns is not None else time.time_ns()
-        self._connection.execute(
+        self._write_connection.execute(
             """
             INSERT INTO play_history(track_id, release_id, source, played_at_ns)
             VALUES (?, ?, ?, ?)
             """,
             (track_id, release_id, source, when),
         )
-        self._connection.commit()
+        self._write_connection.commit()
 
     def last_play_at_ns(self, track_id: str) -> int | None:
-        row = self._connection.execute(
+        row = self._db_connection().execute(
             """
             SELECT played_at_ns FROM play_history
             WHERE track_id = ?
@@ -347,7 +367,7 @@ class LibraryStore:
         limit: int = SUGGESTIONS_LOCAL_CONTINUE_LIMIT,
     ) -> list[tuple[str, int]]:
         """Recently played release ids (any source), newest first."""
-        rows = self._connection.execute(
+        rows = self._db_connection().execute(
             """
             SELECT release_id, MAX(played_at_ns) AS last_played_ns
             FROM play_history
@@ -368,7 +388,7 @@ class LibraryStore:
     ) -> list[RecentlyAddedItem]:
         genre_cutoff_ns = time.time_ns() - int(recent_genre_days * 86_400 * 1_000_000_000)
         idle_cutoff_ns = time.time_ns() - int(idle_months * 30 * 86_400 * 1_000_000_000)
-        genre_rows = self._connection.execute(
+        genre_rows = self._db_connection().execute(
             """
             SELECT DISTINCT t.genre AS genre
             FROM play_history ph
@@ -384,7 +404,7 @@ class LibraryStore:
         if not genres:
             return []
         placeholders = ",".join("?" * len(genres))
-        rows = self._connection.execute(
+        rows = self._db_connection().execute(
             f"""
             {_RELEASE_GROUP_SELECT}
             WHERE t.genre IN ({placeholders})
@@ -406,7 +426,7 @@ class LibraryStore:
                 row,
                 art_uri=self._art_uri_for_release(release_id),
             )
-            last_row = self._connection.execute(
+            last_row = self._db_connection().execute(
                 """
                 SELECT MAX(played_at_ns) AS last_played_ns
                 FROM play_history
@@ -434,7 +454,7 @@ class LibraryStore:
         ]
 
     def _art_uri_for_release(self, release_id: str) -> str | None:
-        row = self._connection.execute(
+        row = self._db_connection().execute(
             "SELECT art_uri FROM album_art WHERE album_id = ?",
             (release_id,),
         ).fetchone()
@@ -444,7 +464,7 @@ class LibraryStore:
         if not release_ids:
             return {}
         placeholders = ",".join("?" * len(release_ids))
-        rows = self._connection.execute(
+        rows = self._db_connection().execute(
             f"SELECT album_id, art_uri FROM album_art WHERE album_id IN ({placeholders})",
             release_ids,
         ).fetchall()

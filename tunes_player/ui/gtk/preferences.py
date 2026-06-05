@@ -74,8 +74,8 @@ class PreferencesWindow(Adw.PreferencesWindow):
         local_group = Adw.PreferencesGroup(
             title="Local files",
             description=(
-                "Turn on Watch folder to scan a library path and keep it updated "
-                "in the background when files change."
+                "Turn on Watch folder to index new or changed files and remove "
+                "deleted ones in the background. A full scan runs at startup."
             ),
         )
         local_group.add(self._folders_group)

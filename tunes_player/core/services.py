@@ -68,6 +68,25 @@ class SearchResults:
 
 
 @dataclass(frozen=True, slots=True)
+class _DeferredPlay:
+    track_id: str
+    release_id: str
+    source: str
+    played_at_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ScanJob:
+    folder: str
+    add_paths: tuple[str, ...] = ()
+    remove_paths: tuple[str, ...] = ()
+
+    @property
+    def is_incremental(self) -> bool:
+        return bool(self.add_paths or self.remove_paths)
+
+
+@dataclass(frozen=True, slots=True)
 class PlaybackState:
     current_track: Track | None
     is_playing: bool
@@ -145,9 +164,11 @@ class PlayerService:
         self._scan_finished_folder: str | None = None
         self._scan_last_result: ScanResult | None = None
         self._scan_last_error: str | None = None
-        self._pending_scan_folders: list[str] = []
+        self._pending_scan_jobs: list[_ScanJob] = []
+        self._incremental_coalesce: dict[str, tuple[set[str], set[str]]] = {}
         self._last_recorded_track_id: str | None = None
         self._last_recorded_at_ns = 0
+        self._deferred_plays: list[_DeferredPlay] = []
         self._discover_fetch_lock = threading.Lock()
         data_dir = self._config_manager.data_dir
         self._tidal = TidalClient(
@@ -505,11 +526,12 @@ class PlayerService:
     def remove_music_folder(self, folder: str) -> int:
         """Drop a configured folder and purge its indexed tracks from the catalog."""
         resolved = str(Path(folder).expanduser().resolve())
-        self._pending_scan_folders = [
-            item
-            for item in self._pending_scan_folders
-            if str(Path(item).expanduser().resolve()) != resolved
+        self._pending_scan_jobs = [
+            job
+            for job in self._pending_scan_jobs
+            if job.folder != resolved
         ]
+        self._incremental_coalesce.pop(resolved, None)
         if self.is_scanning():
             self._terminate_active_scan()
 
@@ -541,11 +563,12 @@ class PlayerService:
 
     def _cancel_scan_for_folder(self, folder: str) -> None:
         resolved = str(Path(folder).expanduser().resolve())
-        self._pending_scan_folders = [
-            item
-            for item in self._pending_scan_folders
-            if str(Path(item).expanduser().resolve()) != resolved
+        self._pending_scan_jobs = [
+            job
+            for job in self._pending_scan_jobs
+            if job.folder != resolved
         ]
+        self._incremental_coalesce.pop(resolved, None)
         if self._scanning_folder != resolved or not self.is_scanning():
             return
         self._terminate_active_scan()
@@ -586,38 +609,132 @@ class PlayerService:
         }
         if resolved not in configured:
             return
+        job = _ScanJob(folder=resolved)
         if self._scanning_folder == resolved:
             return
-        pending = self._pending_scan_folders
-        if resolved in pending:
-            if priority:
-                pending.remove(resolved)
-                pending.insert(0, resolved)
-            return
+        self._pending_scan_jobs = [
+            pending
+            for pending in self._pending_scan_jobs
+            if pending.folder != resolved
+        ]
+        self._incremental_coalesce.pop(resolved, None)
         if priority:
-            pending.insert(0, resolved)
+            self._pending_scan_jobs.insert(0, job)
         else:
-            pending.append(resolved)
+            self._pending_scan_jobs.append(job)
         self._try_start_scan()
 
-    def _try_start_scan(self) -> None:
-        if self._scan_queue is not None or not self._pending_scan_folders:
-            return
-        folder = self._pending_scan_folders.pop(0)
-        self._start_scan(folder)
-
-    def _start_scan(self, folder: str) -> None:
+    def enqueue_incremental_scan(
+        self,
+        *,
+        folder: str,
+        add_paths: list[str] | None = None,
+        remove_paths: list[str] | None = None,
+    ) -> None:
         resolved = str(Path(folder).expanduser().resolve())
-        self._scanning_folder = resolved
+        configured = {
+            str(Path(item).expanduser().resolve())
+            for item in self._config_manager.config.music_folders
+        }
+        if resolved not in configured:
+            return
+        adds = [str(Path(path).resolve()) for path in (add_paths or [])]
+        removes = [str(Path(path).resolve()) for path in (remove_paths or [])]
+        if not adds and not removes:
+            return
+        if self._scanning_folder == resolved:
+            self._accumulate_incremental(resolved, adds, removes)
+            return
+        if any(
+            pending.folder == resolved and not pending.is_incremental
+            for pending in self._pending_scan_jobs
+        ):
+            return
+        for index, pending in enumerate(self._pending_scan_jobs):
+            if pending.folder == resolved and pending.is_incremental:
+                merged_adds = set(pending.add_paths)
+                merged_removes = set(pending.remove_paths)
+                self._merge_incremental_paths(merged_adds, merged_removes, adds, removes)
+                self._pending_scan_jobs[index] = _ScanJob(
+                    folder=resolved,
+                    add_paths=tuple(sorted(merged_adds)),
+                    remove_paths=tuple(sorted(merged_removes)),
+                )
+                self._try_start_scan()
+                return
+        self._pending_scan_jobs.append(
+            _ScanJob(
+                folder=resolved,
+                add_paths=tuple(sorted(set(adds))),
+                remove_paths=tuple(sorted(set(removes))),
+            ),
+        )
+        self._try_start_scan()
+
+    def _merge_incremental_paths(
+        self,
+        adds: set[str],
+        removes: set[str],
+        new_adds: list[str],
+        new_removes: list[str],
+    ) -> None:
+        for path in new_adds:
+            removes.discard(path)
+            adds.add(path)
+        for path in new_removes:
+            if path in adds:
+                adds.discard(path)
+            else:
+                removes.add(path)
+
+    def _accumulate_incremental(
+        self,
+        folder: str,
+        add_paths: list[str],
+        remove_paths: list[str],
+    ) -> None:
+        adds, removes = self._incremental_coalesce.get(folder, (set(), set()))
+        merged_adds = set(adds)
+        merged_removes = set(removes)
+        self._merge_incremental_paths(merged_adds, merged_removes, add_paths, remove_paths)
+        if merged_adds or merged_removes:
+            self._incremental_coalesce[folder] = (merged_adds, merged_removes)
+        else:
+            self._incremental_coalesce.pop(folder, None)
+
+    def _drain_incremental_coalesce(self, folder: str) -> _ScanJob | None:
+        entry = self._incremental_coalesce.pop(folder, None)
+        if entry is None:
+            return None
+        adds, removes = entry
+        if not adds and not removes:
+            return None
+        return _ScanJob(
+            folder=folder,
+            add_paths=tuple(sorted(adds)),
+            remove_paths=tuple(sorted(removes)),
+        )
+
+    def _try_start_scan(self) -> None:
+        if self._scan_queue is not None or not self._pending_scan_jobs:
+            return
+        job = self._pending_scan_jobs.pop(0)
+        self._start_scan_job(job)
+
+    def _start_scan_job(self, job: _ScanJob) -> None:
+        self._scanning_folder = job.folder
         self._scan_progress = None
         self._scan_finished_folder = None
         self._scan_last_result = None
         self._scan_last_error = None
+        self._store.close()
         self._scan_process, self._scan_queue = create_scan_process(
             db_path=self._config_manager.database_path,
             music_folders=self._config_manager.config.music_folders,
             music_folder_added_at=self._config_manager.config.music_folder_added_at,
-            scan_folders=[resolved],
+            scan_folders=[job.folder],
+            add_paths=list(job.add_paths) if job.is_incremental else None,
+            remove_paths=list(job.remove_paths) if job.is_incremental else None,
         )
         self._scan_process.start()
         self._emit("scan_started")
@@ -715,13 +832,31 @@ class PlayerService:
         return False
 
     def _cleanup_scan(self) -> None:
+        finished_folder = self._scanning_folder
         if self._scan_process is not None:
             self._scan_process.join(timeout=2.0)
             self._scan_process = None
         self._scan_queue = None
         self._scanning_folder = None
         self._scan_progress = None
+        self._store.reconnect()
+        self._flush_deferred_plays()
+        if finished_folder is not None:
+            coalesced = self._drain_incremental_coalesce(finished_folder)
+            if coalesced is not None:
+                self._pending_scan_jobs.insert(0, coalesced)
         self._try_start_scan()
+
+    def _flush_deferred_plays(self) -> None:
+        pending = self._deferred_plays
+        self._deferred_plays = []
+        for item in pending:
+            self._store.record_play(
+                track_id=item.track_id,
+                release_id=item.release_id,
+                source=item.source,
+                played_at_ns=item.played_at_ns,
+            )
 
     def is_scanning(self) -> bool:
         return self._scan_queue is not None
@@ -1424,12 +1559,22 @@ class PlayerService:
         release_id = self._release_id_for_playback(track)
         if release_id is None:
             return
-        self._store.record_play(
-            track_id=track.id,
-            release_id=release_id,
-            source=track.source.value,
-            played_at_ns=now_ns,
-        )
+        if self.is_scanning():
+            self._deferred_plays.append(
+                _DeferredPlay(
+                    track_id=track.id,
+                    release_id=release_id,
+                    source=track.source.value,
+                    played_at_ns=now_ns,
+                ),
+            )
+        else:
+            self._store.record_play(
+                track_id=track.id,
+                release_id=release_id,
+                source=track.source.value,
+                played_at_ns=now_ns,
+            )
         self._last_recorded_track_id = track.id
         self._last_recorded_at_ns = now_ns
 

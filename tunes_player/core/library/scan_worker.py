@@ -19,6 +19,9 @@ def run_library_scan(
     music_folder_added_at: dict[str, float],
     scan_folders: list[str],
     queue: Queue[tuple],
+    *,
+    add_paths: list[str] | None = None,
+    remove_paths: list[str] | None = None,
 ) -> None:
     """Worker entry point — must remain a top-level function for spawn."""
 
@@ -31,7 +34,15 @@ def run_library_scan(
             music_folder_added_at=dict(music_folder_added_at),
         )
         scanner = LibraryScanner(db_path=Path(db_path), config=config)
-        result = scanner.scan(scan_folders=list(scan_folders), progress=progress)
+        if add_paths or remove_paths:
+            result = scanner.scan_changes(
+                folder=scan_folders[0],
+                add_paths=list(add_paths or []),
+                remove_paths=list(remove_paths or []),
+                progress=progress,
+            )
+        else:
+            result = scanner.scan(scan_folders=list(scan_folders), progress=progress)
     except Exception as exc:
         queue.put(("error", str(exc)))
         return
@@ -56,6 +67,8 @@ def create_scan_process(
     music_folders: list[str],
     music_folder_added_at: dict[str, float],
     scan_folders: list[str],
+    add_paths: list[str] | None = None,
+    remove_paths: list[str] | None = None,
 ) -> tuple[multiprocessing.Process, multiprocessing.Queue]:
     ctx = multiprocessing.get_context("spawn")
     queue: multiprocessing.Queue = ctx.Queue()
@@ -68,6 +81,10 @@ def create_scan_process(
             list(scan_folders),
             queue,
         ),
+        kwargs={
+            "add_paths": list(add_paths) if add_paths else None,
+            "remove_paths": list(remove_paths) if remove_paths else None,
+        },
         name="tunes-library-scan",
         daemon=True,
     )
