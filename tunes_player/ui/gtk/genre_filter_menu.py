@@ -190,10 +190,21 @@ class GenreFilterMenu(Gtk.Box):
             return
         self._menu_label.set_label(f"{len(ordered)} selected")
 
+    def _row_height(self) -> int:
+        first_row = self._list.get_first_child()
+        if first_row is not None:
+            _min_h, natural_h, _min_b, _nat_b = first_row.measure(
+                Gtk.Orientation.VERTICAL,
+                _LIST_WIDTH,
+            )
+            if natural_h > 0:
+                return natural_h
+        return _GENRE_ROW_HEIGHT
+
     def _list_natural_height(self) -> int:
         if not self._genres:
             return 0
-        return len(self._genres) * _GENRE_ROW_HEIGHT
+        return len(self._genres) * self._row_height()
 
     def _popover_chrome_height(self) -> int:
         chrome = _POPOVER_BOX_MARGIN_VERTICAL + _POPOVER_CSS_PADDING_VERTICAL
@@ -250,13 +261,8 @@ class GenreFilterMenu(Gtk.Box):
 
     def _apply_list_viewport_height(self, list_max: int) -> None:
         natural = self._list_natural_height()
-        if natural > list_max:
-            viewport = list_max
-        elif natural > 0:
-            viewport = natural
-        else:
-            viewport = list_max
         self._scrolled.set_max_content_height(list_max)
+        viewport = min(natural, list_max) if natural > 0 else list_max
         self._scrolled.set_size_request(_LIST_WIDTH, viewport)
 
     def _sync_list_max_height(self) -> None:
