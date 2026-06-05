@@ -7,6 +7,7 @@ import multiprocessing
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from queue import Empty, Queue
 from typing import Callable
 
@@ -118,9 +119,11 @@ class PlayerService:
         self._engine_events: Queue[EngineEvent] = Queue()
         self._scan_process: multiprocessing.Process | None = None
         self._scan_queue: multiprocessing.Queue | None = None
-        self._scan_on_progress: Callable[[int, int, str], None] | None = None
-        self._scan_on_finished: Callable[[ScanResult], None] | None = None
-        self._scan_on_error: Callable[[Exception], None] | None = None
+        self._scanning_folder: str | None = None
+        self._scan_progress: tuple[int, int, str] | None = None
+        self._scan_finished_folder: str | None = None
+        self._scan_last_result: ScanResult | None = None
+        self._scan_last_error: str | None = None
         self._last_recorded_track_id: str | None = None
         self._last_recorded_at_ns = 0
         self._discover_fetch_lock = threading.Lock()
@@ -418,25 +421,44 @@ class PlayerService:
     def notify_sources_changed(self) -> None:
         self._emit("sources_changed")
 
-    def scan_library(
-        self,
-        *,
-        on_progress: Callable[[int, int, str], None] | None = None,
-        on_finished: Callable[[ScanResult], None] | None = None,
-        on_error: Callable[[Exception], None] | None = None,
-    ) -> None:
-        if self.is_scanning():
+    @property
+    def scanning_folder(self) -> str | None:
+        return self._scanning_folder
+
+    @property
+    def scan_progress(self) -> tuple[int, int, str] | None:
+        return self._scan_progress
+
+    @property
+    def scan_finished_folder(self) -> str | None:
+        return self._scan_finished_folder
+
+    @property
+    def scan_last_result(self) -> ScanResult | None:
+        return self._scan_last_result
+
+    @property
+    def scan_last_error(self) -> str | None:
+        return self._scan_last_error
+
+    def scan_library(self, *, folder: str) -> None:
+        if self._scan_queue is not None:
             return
 
-        self._scan_on_progress = on_progress
-        self._scan_on_finished = on_finished
-        self._scan_on_error = on_error
+        resolved = str(Path(folder).expanduser().resolve())
+        self._scanning_folder = resolved
+        self._scan_progress = None
+        self._scan_finished_folder = None
+        self._scan_last_result = None
+        self._scan_last_error = None
         self._scan_process, self._scan_queue = create_scan_process(
             db_path=self._config_manager.database_path,
             music_folders=self._config_manager.config.music_folders,
             music_folder_added_at=self._config_manager.config.music_folder_added_at,
+            scan_folders=[resolved],
         )
         self._scan_process.start()
+        self._emit("scan_started")
 
     def poll_scan(self) -> bool:
         """Drain scan events on the GTK main thread. Returns True while scan runs."""
@@ -450,8 +472,9 @@ class PlayerService:
                 break
 
             kind = message[0]
-            if kind == "progress" and self._scan_on_progress is not None:
-                self._scan_on_progress(message[1], message[2], message[3])
+            if kind == "progress":
+                self._scan_progress = (message[1], message[2], message[3])
+                self._emit("scan_progress")
             elif kind == "done":
                 result = ScanResult(
                     indexed=message[1],
@@ -460,24 +483,31 @@ class PlayerService:
                     errors=message[4],
                     art_indexed=message[5] if len(message) > 5 else 0,
                 )
-                if self._scan_on_finished is not None:
-                    self._scan_on_finished(result)
+                self._scan_last_result = result
+                self._scan_finished_folder = self._scanning_folder
                 self._cleanup_scan()
+                self._emit("scan_finished")
+                self.notify_library_updated()
                 return False
             elif kind == "error":
-                if self._scan_on_error is not None:
-                    self._scan_on_error(RuntimeError(message[1]))
+                self._scan_last_error = message[1]
+                self._scan_finished_folder = self._scanning_folder
                 self._cleanup_scan()
+                self._emit("scan_error")
                 return False
 
         if self._scan_process is not None and self._scan_process.is_alive():
             return True
 
-        if self._scan_process is not None and self._scan_on_error is not None:
+        if self._scan_process is not None:
             code = self._scan_process.exitcode
             if code not in (0, None):
-                self._scan_on_error(RuntimeError(f"Scan process exited with code {code}"))
-        self._cleanup_scan()
+                self._scan_last_error = f"Scan process exited with code {code}"
+                self._scan_finished_folder = self._scanning_folder
+                self._cleanup_scan()
+                self._emit("scan_error")
+        else:
+            self._cleanup_scan()
         return False
 
     def _cleanup_scan(self) -> None:
@@ -485,12 +515,11 @@ class PlayerService:
             self._scan_process.join(timeout=2.0)
             self._scan_process = None
         self._scan_queue = None
-        self._scan_on_progress = None
-        self._scan_on_finished = None
-        self._scan_on_error = None
+        self._scanning_folder = None
+        self._scan_progress = None
 
     def is_scanning(self) -> bool:
-        return self._scan_process is not None and self._scan_process.is_alive()
+        return self._scan_queue is not None
 
     def notify_library_updated(self) -> None:
         """Call from the GTK main thread after a scan completes."""

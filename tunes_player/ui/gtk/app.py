@@ -932,5 +932,10 @@ def run() -> int:
         service.poll_playback()
         return True
 
+    def _poll_scan() -> bool:
+        service.poll_scan()
+        return True
+
     GLib.timeout_add(100, _poll_playback)
+    GLib.timeout_add(200, _poll_scan)
     return app.run(None)

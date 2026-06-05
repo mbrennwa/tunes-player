@@ -65,11 +65,24 @@ class LibraryScanner:
         self._data_dir = db_path.parent
         self._config = config
 
-    def scan(self, *, progress: ProgressCallback | None = None) -> ScanResult:
+    def scan(
+        self,
+        *,
+        scan_folders: list[str] | None = None,
+        progress: ProgressCallback | None = None,
+    ) -> ScanResult:
         if progress is not None:
             progress(0, 0, "Discovering files…")
 
-        candidates = self._collect_candidates(progress=progress)
+        if scan_folders is None:
+            roots = [
+                str(Path(folder).resolve())
+                for folder in self._config.music_folders
+            ]
+        else:
+            roots = [str(Path(folder).resolve()) for folder in scan_folders]
+
+        candidates = self._collect_candidates(roots=roots, progress=progress)
         seen_paths: set[str] = set()
         indexed = 0
         skipped = 0
@@ -153,7 +166,7 @@ class LibraryScanner:
                     connection.commit()
                     connection.execute("BEGIN")
 
-            removed = self._remove_missing_files(connection, seen_paths)
+            removed = self._remove_missing_files(connection, seen_paths, roots)
             art_indexed = backfill_missing_album_art(connection, data_dir=self._data_dir)
             prune_orphan_album_art(connection, data_dir=self._data_dir)
             connection.commit()
@@ -196,10 +209,15 @@ class LibraryScanner:
                 return folder_resolved
         return None
 
-    def _collect_candidates(self, *, progress: ProgressCallback | None = None) -> list[Path]:
+    def _collect_candidates(
+        self,
+        *,
+        roots: list[str],
+        progress: ProgressCallback | None = None,
+    ) -> list[Path]:
         paths: list[Path] = []
         seen = 0
-        for folder in self._config.music_folders:
+        for folder in roots:
             root = Path(folder)
             if not root.is_dir():
                 continue
@@ -273,11 +291,26 @@ class LibraryScanner:
         )
 
     @staticmethod
-    def _remove_missing_files(connection: sqlite3.Connection, seen_paths: set[str]) -> int:
+    def _path_under_roots(path_str: str, scan_roots: list[str]) -> bool:
+        for root in scan_roots:
+            if path_str == root or path_str.startswith(root + os.sep):
+                return True
+        return False
+
+    @staticmethod
+    def _remove_missing_files(
+        connection: sqlite3.Connection,
+        seen_paths: set[str],
+        scan_roots: list[str],
+    ) -> int:
         rows = connection.execute("SELECT id, path FROM files").fetchall()
         removed = 0
         for row in rows:
-            if row["path"] not in seen_paths:
+            path_str = row["path"]
+            if (
+                LibraryScanner._path_under_roots(path_str, scan_roots)
+                and path_str not in seen_paths
+            ):
                 connection.execute("DELETE FROM files WHERE id = ?", (row["id"],))
                 removed += 1
         return removed
