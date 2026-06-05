@@ -52,9 +52,19 @@ CREATE TABLE IF NOT EXISTS album_art (
     updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS play_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_id TEXT NOT NULL,
+    release_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    played_at_ns INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tracks_album_id ON tracks(album_id);
 CREATE INDEX IF NOT EXISTS idx_tracks_album_artist ON tracks(album_artist);
 CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
+CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at_ns DESC);
+CREATE INDEX IF NOT EXISTS idx_play_history_release ON play_history(release_id);
 """
 
 _MIGRATION_V2 = """
@@ -115,6 +125,12 @@ def _add_column_if_missing(
     connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
+def _ensure_repair(connection: sqlite3.Connection) -> None:
+    """Idempotent repair for objects missing on mis-initialized DBs."""
+    connection.executescript(_MIGRATION_V6_PLAY_HISTORY)
+    _add_column_if_missing(connection, "tracks", "release_type_tag", "TEXT")
+
+
 def _migrate_v5(connection: sqlite3.Connection) -> None:
     _add_column_if_missing(
         connection,
@@ -148,6 +164,7 @@ def _migrate(connection: sqlite3.Connection) -> None:
             "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
+        _ensure_repair(connection)
         connection.commit()
         return
 
@@ -170,3 +187,5 @@ def _migrate(connection: sqlite3.Connection) -> None:
             (str(SCHEMA_VERSION),),
         )
         connection.commit()
+    _ensure_repair(connection)
+    connection.commit()

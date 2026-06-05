@@ -192,12 +192,14 @@ class QobuzClient:
                     batch = albums.get("items") or []
                     if not batch:
                         break
+                    batch_has_recent = False
                     for raw in batch:
                         if not isinstance(raw, dict):
                             continue
                         added_ns = _album_added_ns(raw)
                         if added_ns < cutoff_ns:
                             continue
+                        batch_has_recent = True
                         release = convert.release_from_qobuz(raw)
                         if release.id in seen:
                             continue
@@ -205,6 +207,8 @@ class QobuzClient:
                         items.append(RecentlyAddedItem(added_ns=added_ns, release=release))
                         if len(items) >= limit:
                             break
+                    if not batch_has_recent:
+                        break
                     if len(batch) < page_size:
                         break
                     offset += page_size
@@ -283,6 +287,17 @@ class QobuzClient:
         except Exception:
             log.debug("Could not resolve Qobuz release for track %s", track_id, exc_info=True)
         return None
+
+    def get_release_summary(self, release_id: str) -> Release | None:
+        """Release metadata for grids without loading every track page."""
+        album_id = qobuz_ids.parse_prefixed_id(release_id, "album")
+        if album_id is None:
+            return None
+        self._require_login()
+        album = self._fetch_album_summary(album_id)
+        if album is None:
+            return None
+        return convert.release_from_qobuz(album)
 
     def get_release(self, release_id: str) -> Release | None:
         album_id = qobuz_ids.parse_prefixed_id(release_id, "album")
@@ -401,6 +416,13 @@ class QobuzClient:
             "request_sig": request_sig,
         }
         return self._api_get("track/getFileUrl", params)
+
+    def _fetch_album_summary(self, album_id: str) -> dict[str, Any] | None:
+        data = self._api_get(
+            "album/get",
+            {"album_id": album_id, "limit": 1, "offset": 0},
+        )
+        return data if isinstance(data, dict) else None
 
     def _fetch_album(self, album_id: str) -> dict[str, Any] | None:
         data = self._api_get(

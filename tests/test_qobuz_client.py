@@ -121,6 +121,39 @@ class TestQobuzListSuggestionItems(unittest.TestCase):
             self.assertEqual(items[0].release.id, "qobuz:album:99")
 
 
+class TestQobuzGetReleaseSummary(unittest.TestCase):
+    def test_uses_single_album_get_without_track_pagination(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "qobuz.json"
+            client = QobuzClient(session, app_id="1", app_secret="secret")
+            client._user_auth_token = "token"  # noqa: SLF001
+            calls: list[tuple[str, dict | None]] = []
+
+            def fake_api_get(endpoint: str, params: dict | None = None, **kwargs: object):
+                calls.append((endpoint, params))
+                return {
+                    "id": "42",
+                    "title": "Summary Album",
+                    "artist": {"name": "Artist"},
+                    "tracks_count": 12,
+                    "tracks": {"total": 12, "items": [{"id": 1}]},
+                }
+
+            with patch.object(client, "_api_get", side_effect=fake_api_get):
+                release = client.get_release_summary("qobuz:album:42")
+
+            self.assertIsNotNone(release)
+            assert release is not None
+            self.assertEqual(release.title, "Summary Album")
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], "album/get")
+            self.assertEqual(calls[0][1], {"album_id": "42", "limit": 1, "offset": 0})
+
+
 class TestReleaseFromQobuz(unittest.TestCase):
     def test_minimal_album(self) -> None:
         album = {

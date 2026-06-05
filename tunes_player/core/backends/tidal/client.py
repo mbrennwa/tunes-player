@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+TidalRailFilter = Literal["all", "new_releases", "recommendations"]
+
 from tunes_player.core.backends.playable import PlayableSource
 from tunes_player.core.backends.tidal import convert, ids as tidal_ids
 from tunes_player.core.backends.tidal.stream_quality import (
@@ -25,6 +27,7 @@ from tunes_player.core.backends.tidal.stream_quality import (
 from tunes_player.core.home import (
     NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
     SUGGESTIONS_SIMILAR_LIMIT,
+    SUGGESTIONS_SIMILAR_TIMEOUT_SEC,
     SUGGESTIONS_STREAMING_PER_SOURCE_LIMIT,
     RecentlyAddedItem,
 )
@@ -365,11 +368,15 @@ class TidalClient:
             import tidalapi.album as tidal_album_mod
             import tidalapi.media as tidal_media_mod
 
-            collected = _collect_tidal_home_pages(session)
+            collected = _collect_tidal_home_pages(
+                session,
+                include_explore=False,
+                include_legacy_home=False,
+                max_depth=2,
+                rail_filter="new_releases",
+            )
 
             for entry in collected:
-                if not entry.from_new_release_rail:
-                    continue
                 try:
                     for raw in _expand_tidal_mix_contents(entry.raw):
                         item = _recently_added_from_tidal_object(
@@ -384,6 +391,10 @@ class TidalClient:
                             continue
                         seen_album_ids.add(item.release.id)
                         items.append(item)
+                        if len(items) >= limit:
+                            break
+                    if len(items) >= limit:
+                        break
                 except Exception:
                     log.debug(
                         "Skipping TIDAL new-release item %s",
@@ -412,11 +423,15 @@ class TidalClient:
             import tidalapi.album as tidal_album_mod
             import tidalapi.media as tidal_media_mod
 
-            collected = _collect_tidal_home_pages(session)
+            collected = _collect_tidal_home_pages(
+                session,
+                include_explore=False,
+                include_legacy_home=False,
+                max_depth=2,
+                rail_filter="recommendations",
+            )
             rank = 0
             for entry in collected:
-                if entry.from_new_release_rail:
-                    continue
                 try:
                     for raw in _expand_tidal_mix_contents(entry.raw):
                         item = _recently_added_from_tidal_object(
@@ -461,8 +476,24 @@ class TidalClient:
             return []
         session = self._require_login()
         try:
-            tidal_track = session.track(numeric)
-            radio_tracks = tidal_track.get_track_radio(limit=limit * 3)
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="tunes-tidal-radio",
+            ) as executor:
+                future = executor.submit(
+                    _fetch_tidal_track_radio,
+                    session,
+                    numeric,
+                    limit * 3,
+                )
+                radio_tracks = future.result(timeout=SUGGESTIONS_SIMILAR_TIMEOUT_SEC)
+        except concurrent.futures.TimeoutError:
+            log.warning(
+                "TIDAL track radio timed out for %s after %.0fs",
+                seed_track_id,
+                SUGGESTIONS_SIMILAR_TIMEOUT_SEC,
+            )
+            return []
         except Exception as exc:
             # Track radio is optional for Suggestion; TIDAL often returns 5xx here.
             log.warning(
@@ -477,7 +508,11 @@ class TidalClient:
         for index, raw in enumerate(radio_tracks):
             if raw.album is None:
                 continue
-            release = convert.release_from_tidal(session, raw.album)
+            release = convert.release_from_tidal(
+                session,
+                raw.album,
+                resolve_peak_quality=False,
+            )
             if release.id in seen:
                 continue
             seen.add(release.id)
@@ -499,6 +534,19 @@ class TidalClient:
         except Exception:
             log.debug("Could not resolve TIDAL release for track %s", track_id, exc_info=True)
             return None
+
+    def get_release_summary(self, release_id: str) -> Release | None:
+        """Release metadata for grids without loading every track."""
+        numeric = tidal_ids.parse_prefixed_id(release_id, "album")
+        if numeric is None:
+            return None
+        session = self._require_login()
+        album = session.album(numeric)
+        return convert.release_from_tidal(
+            session,
+            album,
+            resolve_peak_quality=False,
+        )
 
     def get_release(self, release_id: str) -> Release | None:
         numeric = tidal_ids.parse_prefixed_id(release_id, "album")
@@ -526,7 +574,7 @@ class TidalClient:
             genre=release.genre,
             art_uri=release.art_uri,
             duration_sec=duration or None,
-            peak_quality_tier=release.peak_quality_tier,
+            peak_quality_tier=convert.peak_quality_tier_from_tidal_tracks(tracks),
         )
 
     def get_album(self, album_id: str) -> Release | None:
@@ -878,16 +926,30 @@ def _category_is_recommendation_rail(category: object) -> bool:
     return False
 
 
-def _collect_tidal_home_pages(session: Any) -> list[_CollectedTidalObject]:
+def _fetch_tidal_track_radio(session: Any, track_id: int, limit: int) -> list[object]:
+    tidal_track = session.track(track_id)
+    return list(tidal_track.get_track_radio(limit=limit))
+
+
+def _collect_tidal_home_pages(
+    session: Any,
+    *,
+    include_explore: bool = True,
+    include_legacy_home: bool = True,
+    max_depth: int = 4,
+    rail_filter: TidalRailFilter = "all",
+) -> list[_CollectedTidalObject]:
     visited_pages: set[int] = set()
     collected: list[_CollectedTidalObject] = []
     with _quiet_tidalapi_page_warnings():
         pages: list[object] = [session.home()]
-        for loader in (
-            lambda: session.home(use_legacy_endpoint=True),
-            session.explore,
-            session.for_you,
-        ):
+        optional_loaders: list[object] = []
+        if include_legacy_home:
+            optional_loaders.append(lambda: session.home(use_legacy_endpoint=True))
+        if include_explore:
+            optional_loaders.append(session.explore)
+        optional_loaders.append(session.for_you)
+        for loader in optional_loaders:
             try:
                 pages.append(loader())
             except Exception:
@@ -898,6 +960,8 @@ def _collect_tidal_home_pages(session: Any) -> list[_CollectedTidalObject]:
                     session,
                     page,
                     visited=visited_pages,
+                    max_depth=max_depth,
+                    rail_filter=rail_filter,
                 ),
             )
     return collected
@@ -985,6 +1049,7 @@ def _collect_tidal_page_objects(
     max_depth: int = 4,
     new_release_rail: bool = False,
     recommendation_rail: bool = False,
+    rail_filter: TidalRailFilter = "all",
 ) -> list[_CollectedTidalObject]:
     page_key = id(page)
     if page_key in visited:
@@ -999,6 +1064,10 @@ def _collect_tidal_page_objects(
             is_rec = (
                 recommendation_rail or _category_is_recommendation_rail(category)
             ) and not is_new
+            if rail_filter == "new_releases" and not is_new:
+                continue
+            if rail_filter == "recommendations" and not is_rec:
+                continue
             for item in getattr(category, "items", None) or []:
                 if item is not None:
                     collected.append(_CollectedTidalObject(item, is_new, is_rec))
@@ -1018,6 +1087,7 @@ def _collect_tidal_page_objects(
                             max_depth=max_depth,
                             new_release_rail=is_new,
                             recommendation_rail=is_rec,
+                            rail_filter=rail_filter,
                         )
                     )
         return collected
@@ -1025,6 +1095,10 @@ def _collect_tidal_page_objects(
     try:
         for item in page:
             if item is not None:
+                if rail_filter == "new_releases" and not new_release_rail:
+                    continue
+                if rail_filter == "recommendations" and not recommendation_rail:
+                    continue
                 collected.append(
                     _CollectedTidalObject(item, new_release_rail, recommendation_rail),
                 )
@@ -1064,7 +1138,11 @@ def _recently_added_from_tidal_object(
         added_ns = _tidal_album_added_ns(raw)
         return RecentlyAddedItem(
             added_ns=added_ns,
-            release=convert.release_from_tidal(session, raw),
+            release=convert.release_from_tidal(
+                session,
+                raw,
+                resolve_peak_quality=False,
+            ),
         )
     if isinstance(raw, tidal_media_mod.Track):
         release_date = _tidal_track_release_date(raw)
@@ -1079,7 +1157,11 @@ def _recently_added_from_tidal_object(
             return None
         return RecentlyAddedItem(
             added_ns=added_ns,
-            release=convert.release_from_tidal(session, raw.album),
+            release=convert.release_from_tidal(
+                session,
+                raw.album,
+                resolve_peak_quality=False,
+            ),
         )
     page_item_type = getattr(raw, "type", None)
     if page_item_type == "ALBUM" and callable(getattr(raw, "get", None)):

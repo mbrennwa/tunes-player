@@ -92,16 +92,25 @@ def _tidal_album_tracks(session: Session, album: TidalAlbum) -> list[object]:
         return []
 
 
-def _resolve_tidal_peak_quality_tier(session: Session, album: TidalAlbum) -> str:
-    """Peak catalog tier from album tracks."""
-    tracks = _tidal_album_tracks(session, album)
+def peak_quality_tier_from_tidal_tracks(tracks: list[object]) -> str:
     if not tracks:
         return QUALITY_FILTER_COMPRESSED
     peak_rank = max(track_peak_quality(track) for track in tracks)
     return tier_from_tidal_peak(peak_rank)
 
 
-def release_from_tidal(session: Session, album: TidalAlbum, *, owned_track_count: int | None = None) -> Release:
+def _resolve_tidal_peak_quality_tier(session: Session, album: TidalAlbum) -> str:
+    """Peak catalog tier from album tracks (issues network calls)."""
+    return peak_quality_tier_from_tidal_tracks(_tidal_album_tracks(session, album))
+
+
+def release_from_tidal(
+    session: Session,
+    album: TidalAlbum,
+    *,
+    owned_track_count: int | None = None,
+    resolve_peak_quality: bool = False,
+) -> Release:
     artists = album.artists or []
     artist_name = artists[0].name if artists else "Unknown Artist"
     year = None
@@ -130,7 +139,11 @@ def release_from_tidal(session: Session, album: TidalAlbum, *, owned_track_count
         completeness=completeness,
         release_type=release_type,
         art_uri=_album_art(session, album),
-        peak_quality_tier=_resolve_tidal_peak_quality_tier(session, album),
+        peak_quality_tier=(
+            _resolve_tidal_peak_quality_tier(session, album)
+            if resolve_peak_quality
+            else QUALITY_FILTER_COMPRESSED
+        ),
     )
 
 

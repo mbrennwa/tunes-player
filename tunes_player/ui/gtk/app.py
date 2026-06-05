@@ -21,7 +21,6 @@ from tunes_player.core.shell_state import (
     ShellState,
     apply_shell_view_filters,
     cached_releases_compatible_with_available,
-    cached_releases_have_quality_tiers,
     ensure_source_enabled,
     filter_releases_to_available_sources,
     prune_enabled_sources,
@@ -692,8 +691,6 @@ class TunesWindow(Adw.ApplicationWindow):
         if state.base == ShellBase.ALL_LOCAL and Source.LOCAL not in available:
             return False
         if not cached_releases_compatible_with_available(state.cached_releases, available):
-            return False
-        if not cached_releases_have_quality_tiers(state.cached_releases):
             return False
         releases = releases_from_cache_payloads(state.cached_releases)
         if not releases:

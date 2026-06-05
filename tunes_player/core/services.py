@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import multiprocessing
 import threading
@@ -179,30 +180,46 @@ class PlayerService:
         with self._discover_fetch_lock:
             return self._list_recently_added_items_locked()
 
+    def _tidal_new_release_items(self, within_days: int) -> list[RecentlyAddedItem]:
+        return self._tidal.list_new_release_items(
+            limit=NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
+            within_days=within_days,
+        )
+
+    def _qobuz_new_release_items(self, within_days: int) -> list[RecentlyAddedItem]:
+        return self._qobuz.list_new_release_items(
+            limit=NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
+            within_days=within_days,
+        )
+
     def _list_recently_added_items_locked(self) -> list[RecentlyAddedItem]:
         within_days = self._config_manager.config.new_music_within_days
         items = self._store.list_recently_added_items(
             within_days=within_days,
             limit=NEW_MUSIC_LOCAL_LIMIT,
         )
-        if self._tidal.is_logged_in():
-            try:
-                tidal_items = self._tidal.list_new_release_items(
-                    limit=NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
-                    within_days=within_days,
+        streaming_futures: dict[str, concurrent.futures.Future[list[RecentlyAddedItem]]] = {}
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=2,
+            thread_name_prefix="tunes-new-music",
+        ) as executor:
+            if self._tidal.is_logged_in():
+                streaming_futures["tidal"] = executor.submit(
+                    self._tidal_new_release_items,
+                    within_days,
                 )
-                items = [*items, *tidal_items]
-            except TidalUnavailableError:
-                pass
-        if self._qobuz.is_logged_in():
-            try:
-                qobuz_items = self._qobuz.list_new_release_items(
-                    limit=NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
-                    within_days=within_days,
+            if self._qobuz.is_logged_in():
+                streaming_futures["qobuz"] = executor.submit(
+                    self._qobuz_new_release_items,
+                    within_days,
                 )
-                items = [*items, *qobuz_items]
-            except QobuzUnavailableError:
-                pass
+            for name, future in streaming_futures.items():
+                try:
+                    items.extend(future.result())
+                except (TidalUnavailableError, QobuzUnavailableError):
+                    pass
+                except Exception:
+                    log.exception("Failed to load %s new releases", name)
         by_release_id: dict[str, RecentlyAddedItem] = {}
         for item in items:
             existing = by_release_id.get(item.release.id)
@@ -220,6 +237,56 @@ class PlayerService:
 
     def _list_suggestion_items_locked(self) -> list[RecentlyAddedItem]:
         items: list[RecentlyAddedItem] = []
+        for release_id, played_ns in self._store.list_continue_listening_entries():
+            release = self.get_release_summary(release_id)
+            if release is None:
+                continue
+            items.append(
+                RecentlyAddedItem(
+                    added_ns=suggestion_added_ns(
+                        release.source,
+                        played_at_ns=played_ns,
+                    ),
+                    release=release,
+                ),
+            )
+        streaming_futures: dict[str, concurrent.futures.Future[list[RecentlyAddedItem]]] = {}
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=2,
+            thread_name_prefix="tunes-suggestions",
+        ) as executor:
+            if self._tidal.is_logged_in():
+                streaming_futures["tidal"] = executor.submit(
+                    self._tidal.list_suggestion_items,
+                )
+            if self._qobuz.is_logged_in():
+                streaming_futures["qobuz"] = executor.submit(
+                    self._qobuz.list_suggestion_items,
+                )
+            for name, future in streaming_futures.items():
+                try:
+                    source = Source.TIDAL if name == "tidal" else Source.QOBUZ
+                    for index, item in enumerate(future.result()):
+                        items.append(
+                            RecentlyAddedItem(
+                                added_ns=suggestion_added_ns(source, index=index),
+                                release=item.release,
+                            ),
+                        )
+                except (TidalUnavailableError, QobuzUnavailableError):
+                    pass
+                except Exception:
+                    log.exception("Failed to load %s suggestions", name)
+        for index, item in enumerate(self._store.list_rediscover_items()):
+            items.append(
+                RecentlyAddedItem(
+                    added_ns=suggestion_added_ns(
+                        Source.LOCAL,
+                        index=index,
+                    ),
+                    release=item.release,
+                ),
+            )
         track = self._current_track
         if track is not None and track.id.startswith("tidal:") and self._tidal.is_logged_in():
             try:
@@ -235,57 +302,6 @@ class PlayerService:
                     )
             except TidalUnavailableError:
                 pass
-        for release_id, played_ns in self._store.list_continue_listening_entries():
-            release = self.get_release(release_id)
-            if release is None:
-                continue
-            items.append(
-                RecentlyAddedItem(
-                    added_ns=suggestion_added_ns(
-                        release.source,
-                        played_at_ns=played_ns,
-                    ),
-                    release=release,
-                ),
-            )
-        if self._tidal.is_logged_in():
-            try:
-                for index, item in enumerate(self._tidal.list_suggestion_items()):
-                    items.append(
-                        RecentlyAddedItem(
-                            added_ns=suggestion_added_ns(
-                                Source.TIDAL,
-                                index=index,
-                            ),
-                            release=item.release,
-                        ),
-                    )
-            except TidalUnavailableError:
-                pass
-        if self._qobuz.is_logged_in():
-            try:
-                for index, item in enumerate(self._qobuz.list_suggestion_items()):
-                    items.append(
-                        RecentlyAddedItem(
-                            added_ns=suggestion_added_ns(
-                                Source.QOBUZ,
-                                index=index,
-                            ),
-                            release=item.release,
-                        ),
-                    )
-            except QobuzUnavailableError:
-                pass
-        for index, item in enumerate(self._store.list_rediscover_items()):
-            items.append(
-                RecentlyAddedItem(
-                    added_ns=suggestion_added_ns(
-                        Source.LOCAL,
-                        index=index,
-                    ),
-                    release=item.release,
-                ),
-            )
         by_release_id: dict[str, RecentlyAddedItem] = {}
         for item in items:
             existing = by_release_id.get(item.release.id)
@@ -296,6 +312,24 @@ class PlayerService:
             key=lambda item: (-item.added_ns, item.release.title.casefold()),
         )
         return deduped[:SUGGESTIONS_MERGE_LIMIT]
+
+    def get_release_summary(self, release_id: str) -> Release | None:
+        """Lightweight release lookup for grids (no full track list)."""
+        if release_id.startswith("tidal:"):
+            if not self._tidal.is_logged_in():
+                return None
+            try:
+                return self._tidal.get_release_summary(release_id)
+            except TidalUnavailableError:
+                return None
+        if release_id.startswith("qobuz:"):
+            if not self._qobuz.is_logged_in():
+                return None
+            try:
+                return self._qobuz.get_release_summary(release_id)
+            except QobuzUnavailableError:
+                return None
+        return self._store.get_release(release_id)
 
     def get_release(self, release_id: str) -> Release | None:
         if release_id.startswith("tidal:"):

@@ -101,8 +101,24 @@ class TidalConvertTests(unittest.TestCase):
             ],
         )
         session = _FakeSession()
-        release = release_from_tidal(session, sparse)
+        release = release_from_tidal(session, sparse, resolve_peak_quality=True)
         self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_HI_RES)
+
+    def test_release_from_tidal_skips_track_fetch_by_default(self) -> None:
+        sparse = SimpleNamespace(
+            id=42,
+            type="ALBUM",
+            name="Hi-Fi",
+            num_tracks=2,
+            artists=[SimpleNamespace(name="Artist")],
+            release_date=None,
+            tracks=lambda: (_ for _ in ()).throw(
+                AssertionError("tracks() must not run for grid conversion"),
+            ),
+        )
+        session = _FakeSession()
+        release = release_from_tidal(session, sparse)
+        self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_COMPRESSED)
 
     def test_release_peak_quality_fetches_sparse_album_tracks(self) -> None:
         sparse = SimpleNamespace(
@@ -118,7 +134,7 @@ class TidalConvertTests(unittest.TestCase):
                 SimpleNamespace(audio_quality="HIGH", media_metadata_tags=None),
             ],
         )
-        release = release_from_tidal(session, sparse)
+        release = release_from_tidal(session, sparse, resolve_peak_quality=True)
         self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_COMPRESSED)
 
 
