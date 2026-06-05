@@ -373,9 +373,11 @@ class TunesWindow(Adw.ApplicationWindow):
             and self._cached_selection_key == self._selection_cache_key(state)
         )
 
-    def _invalidate_selection_cache(self) -> None:
+    def _invalidate_selection_cache(self, *, clear_persisted: bool = False) -> None:
         self._cached_selection_key = None
         self._cached_releases = []
+        if clear_persisted and self._shell_state.cached_releases:
+            self._shell_state = replace(self._shell_state, cached_releases=())
 
     def _store_selection_cache(self, state: ShellState, releases: list[Release]) -> None:
         self._cached_selection_key = self._selection_cache_key(state)
@@ -768,11 +770,23 @@ class TunesWindow(Adw.ApplicationWindow):
             local_tier_by_id=local_tier_by_id,
         )
 
+    def _persisted_grid_cache_stale(self, state: ShellState) -> bool:
+        if state.base != ShellBase.ALL_LOCAL:
+            return False
+        if not self._service.config.config.music_folders:
+            return False
+        cached_count = len(state.cached_releases)
+        if cached_count == 0:
+            return False
+        return cached_count != self._service.store.release_count()
+
     def _try_restore_persisted_grid(self, state: ShellState) -> bool:
         if state.base == ShellBase.NONE or not state.cached_releases:
             return False
         available = self._available_sources()
         if state.base == ShellBase.ALL_LOCAL and Source.LOCAL not in available:
+            return False
+        if self._persisted_grid_cache_stale(state):
             return False
         if not cached_releases_compatible_with_available(state.cached_releases, available):
             return False
@@ -1091,7 +1105,7 @@ class TunesWindow(Adw.ApplicationWindow):
     def _on_sources_or_library_changed(self) -> bool:
         self._rebuild_source_filters()
         self._sync_shell_controls()
-        self._invalidate_selection_cache()
+        self._invalidate_selection_cache(clear_persisted=True)
         self._reload_grid()
         return False
 

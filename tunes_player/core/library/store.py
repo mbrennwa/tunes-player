@@ -100,6 +100,18 @@ class LibraryStore:
         row = self._db_connection().execute("SELECT COUNT(*) AS count FROM tracks").fetchone()
         return int(row["count"])
 
+    def release_count(self) -> int:
+        row = self._db_connection().execute(
+            """
+            SELECT COUNT(*) AS count FROM (
+                SELECT 1
+                FROM tracks
+                GROUP BY album_id, album, album_artist
+            )
+            """,
+        ).fetchone()
+        return int(row["count"])
+
     def list_releases(self) -> list[Release]:
         rows = self._db_connection().execute(
             f"""
