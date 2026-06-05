@@ -630,7 +630,7 @@ class _FixedMinWidthShell(Gtk.Box):
         return Gtk.Box.do_measure(self, orientation, for_size)
 
 
-class ReleaseTileGrid(Gtk.Box):
+class ReleaseTileGrid(Gtk.Grid):
     """Square release tiles; column count follows this widget's allocated width."""
 
     def __init__(
@@ -639,9 +639,13 @@ class ReleaseTileGrid(Gtk.Box):
         inner_width_fn: Callable[[], int] | None = None,
         service: PlayerService | None = None,
     ) -> None:
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=ALBUM_GRID_SPACING)
+        super().__init__()
+        self.set_column_spacing(ALBUM_GRID_SPACING)
+        self.set_row_spacing(ALBUM_GRID_SPACING)
+        self.set_column_homogeneous(False)
+        self.set_row_homogeneous(False)
         self.add_css_class("album-tile-grid")
-        self.set_halign(Gtk.Align.FILL)
+        self.set_halign(Gtk.Align.START)
         self.set_valign(Gtk.Align.START)
         self.set_hexpand(True)
         self.set_vexpand(False)
@@ -796,15 +800,11 @@ class ReleaseTileGrid(Gtk.Box):
             for card in self._cards:
                 _reset_album_tile_size(card)
 
-            for start in range(0, len(self._cards), columns):
-                row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=ALBUM_GRID_SPACING)
-                row.set_halign(Gtk.Align.START)
-                row.set_hexpand(False)
-                row.set_vexpand(False)
-                for card in self._cards[start : start + columns]:
-                    _apply_album_tile_size(card, edge)
-                    row.append(card)
-                self.append(row)
+            for index, card in enumerate(self._cards):
+                _apply_album_tile_size(card, edge)
+                row = index // columns
+                column = index % columns
+                self.attach(card, column, row, 1, 1)
         finally:
             self._in_relayout = False
 
@@ -1155,8 +1155,8 @@ def _release_card(
     shell.set_size_request(edge, edge)
     shell.set_hexpand(False)
     shell.set_vexpand(False)
-    shell.set_halign(Gtk.Align.FILL)
-    shell.set_valign(Gtk.Align.FILL)
+    shell.set_halign(Gtk.Align.START)
+    shell.set_valign(Gtk.Align.START)
     setattr(shell, "_tunes_release_id", release.id)
 
     frame = Gtk.AspectFrame()
