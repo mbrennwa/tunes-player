@@ -31,12 +31,14 @@ class FolderMonitorManagerTests(unittest.TestCase):
     def test_start_enqueues_startup_scan_only(self) -> None:
         self._config.add_music_folder(self._folder, auto_monitor=True)
         with (
+            patch.object(self._service, "enqueue_startup_art_maintenance") as art,
             patch.object(self._service, "enqueue_startup_scans") as startup,
             patch.object(GLib, "timeout_add_seconds") as periodic,
             patch.object(self._manager, "_sync_monitors"),
         ):
             self._manager.start()
 
+        art.assert_called_once_with()
         startup.assert_called_once_with()
         periodic.assert_not_called()
 

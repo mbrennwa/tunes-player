@@ -13,7 +13,7 @@ from typing import Literal
 from tunes_player.core.config import AppConfig
 from tunes_player.core.library import ids
 from tunes_player.core.library.art_cache import (
-    backfill_missing_album_art,
+    maintain_album_art,
     index_album_art_for_file,
     prune_orphan_album_art,
 )
@@ -200,8 +200,8 @@ class LibraryScanner:
             connection.commit()
             connection.execute("BEGIN")
             removed = self._remove_missing_files(connection, seen_paths, roots)
-            art_indexed = backfill_missing_album_art(connection, data_dir=self._data_dir)
-            prune_orphan_album_art(connection, data_dir=self._data_dir)
+            art_added, art_repaired = maintain_album_art(connection, data_dir=self._data_dir)
+            art_indexed = art_added + art_repaired
             connection.commit()
         except Exception:
             connection.rollback()
@@ -280,7 +280,8 @@ class LibraryScanner:
                     connection.commit()
                     connection.execute("BEGIN")
 
-            prune_orphan_album_art(connection, data_dir=self._data_dir)
+            art_added, art_repaired = maintain_album_art(connection, data_dir=self._data_dir)
+            art_indexed = art_added + art_repaired
             connection.commit()
         except Exception:
             connection.rollback()
@@ -369,8 +370,7 @@ class LibraryScanner:
                 connection,
                 data_dir=self._data_dir,
                 path=Path(parsed.path),
-                album_artist=parsed.album_artist,
-                album=parsed.album,
+                album_id=parsed.release_id,
             )
             connection.execute("RELEASE SAVEPOINT index_file")
         except Exception as exc:

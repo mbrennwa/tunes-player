@@ -11,6 +11,7 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
+from tunes_player.core.library.store import LibraryStore
 from tunes_player.core.models import Release, ReleaseCompleteness, Source, Track
 from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.album_grid import (
@@ -230,6 +231,21 @@ class ReleaseGridView(Gtk.ScrolledWindow):
         grid = getattr(self, "_tile_grid", None)
         if grid is not None:
             grid.sync_layout()
+        self._schedule_visible_art_sync()
+
+    def refresh_artwork(self, store: LibraryStore) -> None:
+        """Reload cover URIs for grid tiles and repaint visible artwork."""
+        grid = getattr(self, "_tile_grid", None)
+        if grid is None or not grid._cards:
+            return
+        release_ids = [
+            rid
+            for card in grid._cards
+            if isinstance(rid := getattr(card, "_tunes_release_id", None), str)
+        ]
+        if not release_ids:
+            return
+        grid.refresh_card_art_uris(store.art_uri_map(release_ids))
         self._schedule_visible_art_sync()
 
     def _schedule_visible_art_sync(self) -> None:
@@ -904,6 +920,14 @@ class ReleaseTileGrid(Gtk.Box):
         if inner > 0:
             return album_grid_layout(inner)
         return 1, self._tile_edge
+
+    def refresh_card_art_uris(self, art_by_id: dict[str, str | None]) -> None:
+        for card in self._cards:
+            release_id = getattr(card, "_tunes_release_id", None)
+            if not isinstance(release_id, str) or release_id not in art_by_id:
+                continue
+            setattr(card, "_tunes_art_uri", art_by_id[release_id])
+            setattr(card, "_tunes_art_loaded_key", None)
 
     def sync_visible_art(self, scroll_y: float, viewport_height: float) -> None:
         if not self._cards or self._art_loader is None or viewport_height <= 0:

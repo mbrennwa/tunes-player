@@ -227,8 +227,7 @@ class LibraryScannerScopedTests(unittest.TestCase):
         with (
             patch("tunes_player.core.library.scanner._parse_file", side_effect=fake_parse),
             patch("tunes_player.core.library.scanner.index_album_art_for_file"),
-            patch("tunes_player.core.library.scanner.backfill_missing_album_art", return_value=0),
-            patch("tunes_player.core.library.scanner.prune_orphan_album_art"),
+            patch("tunes_player.core.library.scanner.maintain_album_art", return_value=(0, 0)),
         ):
             result = scanner.scan(scan_folders=[str(collision_root.resolve())])
 
@@ -285,8 +284,7 @@ class LibraryScannerScopedTests(unittest.TestCase):
         with (
             patch("tunes_player.core.library.scanner._parse_file", side_effect=fake_parse),
             patch("tunes_player.core.library.scanner.index_album_art_for_file"),
-            patch("tunes_player.core.library.scanner.backfill_missing_album_art", return_value=0),
-            patch("tunes_player.core.library.scanner.prune_orphan_album_art"),
+            patch("tunes_player.core.library.scanner.maintain_album_art", return_value=(0, 0)),
         ):
             result = self._scanner.scan(scan_folders=[str(scan_root.resolve())])
 
@@ -344,8 +342,7 @@ class LibraryScannerScopedTests(unittest.TestCase):
             patch("tunes_player.core.library.scanner._parse_file", side_effect=fake_parse),
             patch.object(LibraryScanner, "_insert_track", side_effect=failing_insert_track),
             patch("tunes_player.core.library.scanner.index_album_art_for_file"),
-            patch("tunes_player.core.library.scanner.backfill_missing_album_art", return_value=0),
-            patch("tunes_player.core.library.scanner.prune_orphan_album_art"),
+            patch("tunes_player.core.library.scanner.maintain_album_art", return_value=(0, 0)),
         ):
             result = self._scanner.scan(scan_folders=[str(scan_root.resolve())])
 
@@ -383,10 +380,9 @@ class LibraryScannerScopedTests(unittest.TestCase):
                 return_value=("skipped", None),
             ),
             patch(
-                "tunes_player.core.library.scanner.backfill_missing_album_art",
-                return_value=0,
+                "tunes_player.core.library.scanner.maintain_album_art",
+                return_value=(0, 0),
             ),
-            patch("tunes_player.core.library.scanner.prune_orphan_album_art"),
         ):
             self._scanner.scan(scan_folders=[str(self._folder_a.resolve())])
 
@@ -409,7 +405,7 @@ class LibraryScannerScopedTests(unittest.TestCase):
         with (
             patch("tunes_player.core.library.scanner._parse_file") as parse_file,
             patch("tunes_player.core.library.scanner.index_album_art_for_file"),
-            patch("tunes_player.core.library.scanner.prune_orphan_album_art"),
+            patch("tunes_player.core.library.scanner.maintain_album_art", return_value=(0, 0)),
         ):
             parse_file.return_value = _ParsedTrack(
                 path=str(added.resolve()),

@@ -1130,7 +1130,32 @@ class TunesWindow(Adw.ApplicationWindow):
             GLib.idle_add(self._on_sources_or_library_changed)
         elif event == "sources_changed":
             GLib.idle_add(self._on_sources_or_library_changed)
+        elif event == "art_updated":
+            GLib.idle_add(self._on_art_updated)
         return False
+
+    def _on_art_updated(self) -> bool:
+        self._refresh_cached_local_art()
+        page = self._main_nav.get_visible_page()
+        if page is not None:
+            child = page.get_child()
+            if isinstance(child, ReleaseGridView):
+                child.refresh_artwork(self._service.store)
+        return False
+
+    def _refresh_cached_local_art(self) -> None:
+        if not self._cached_releases:
+            return
+        local_ids = [release.id for release in self._cached_releases if release.source == Source.LOCAL]
+        if not local_ids:
+            return
+        art_by_id = self._service.store.art_uri_map(local_ids)
+        self._cached_releases = [
+            replace(release, art_uri=art_by_id.get(release.id))
+            if release.source == Source.LOCAL
+            else release
+            for release in self._cached_releases
+        ]
 
     def _on_sources_or_library_changed(self) -> bool:
         self._rebuild_source_filters()

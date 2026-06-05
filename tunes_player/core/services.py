@@ -524,6 +524,44 @@ class PlayerService:
             if self.folder_auto_monitor_enabled(folder):
                 self.enqueue_scan(folder=folder)
 
+    def enqueue_startup_art_maintenance(self) -> None:
+        """Repair/backfill album art without walking the library tree."""
+        if not self._config_manager.config.music_folders:
+            return
+        threading.Thread(target=self._run_art_maintenance_worker, daemon=True).start()
+
+    def _run_art_maintenance_worker(self) -> None:
+        try:
+            added, repaired = self._maintain_library_art_blocking()
+        except Exception:
+            log.exception("Album art maintenance failed")
+            return
+        if added or repaired:
+            log.info("Album art maintenance indexed %d and repaired %d covers", added, repaired)
+            self.notify_art_updated()
+
+    def _maintain_library_art_blocking(self) -> tuple[int, int]:
+        from tunes_player.core.library.art_cache import maintain_album_art
+        from tunes_player.core.library.db import connect
+
+        db_path = self._config_manager.database_path
+        data_dir = self._config_manager.data_dir
+        self._store.close()
+        try:
+            connection = connect(db_path)
+            try:
+                connection.execute("BEGIN")
+                result = maintain_album_art(connection, data_dir=data_dir)
+                connection.commit()
+                return result
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+        finally:
+            self._store.reconnect()
+
     def remove_music_folder(self, folder: str) -> int:
         """Drop a configured folder and purge its indexed tracks from the catalog."""
         resolved = str(Path(folder).expanduser().resolve())
@@ -896,6 +934,16 @@ class PlayerService:
         """Call from the GTK main thread after a scan completes."""
         self._store.reconnect()
         self._emit("library_updated")
+
+    def notify_art_updated(self) -> None:
+        """Call after album-art cache repair; refreshes in-place UI cover art."""
+        self._store.reconnect()
+        track = self._current_track
+        if track is not None and track.id.startswith("local:"):
+            refreshed = self._store.get_track(track.id)
+            if refreshed is not None:
+                self._current_track = refreshed
+        self._emit("art_updated")
 
     def get_playback_state(self) -> PlaybackState:
         return PlaybackState(

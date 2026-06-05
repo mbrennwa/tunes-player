@@ -485,7 +485,8 @@ class LibraryStore:
         ).fetchone()
         return None if row is None else str(row["art_uri"])
 
-    def _art_uri_map(self, release_ids: list[str]) -> dict[str, str]:
+    def art_uri_map(self, release_ids: list[str]) -> dict[str, str | None]:
+        """Return art_uri per release id (missing entries are None)."""
         if not release_ids:
             return {}
         placeholders = ",".join("?" * len(release_ids))
@@ -493,7 +494,15 @@ class LibraryStore:
             f"SELECT album_id, art_uri FROM album_art WHERE album_id IN ({placeholders})",
             release_ids,
         ).fetchall()
-        return {str(row["album_id"]): str(row["art_uri"]) for row in rows}
+        found = {str(row["album_id"]): str(row["art_uri"]) for row in rows}
+        return {release_id: found.get(release_id) for release_id in release_ids}
+
+    def _art_uri_map(self, release_ids: list[str]) -> dict[str, str]:
+        return {
+            release_id: art_uri
+            for release_id, art_uri in self.art_uri_map(release_ids).items()
+            if art_uri is not None
+        }
 
     def _row_to_release(self, row: sqlite3.Row, *, art_uri: str | None = None) -> Release:
         track_count = int(row["track_count"])

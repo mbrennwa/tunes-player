@@ -397,6 +397,9 @@ class NowPlayingBar(Gtk.Box):
         if event == "position_changed":
             return False
 
+        if event == "art_updated":
+            self._art_track_id = None
+
         state = self._service.get_playback_state()
         track = state.current_track
 
