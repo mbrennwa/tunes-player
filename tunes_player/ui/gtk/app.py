@@ -20,9 +20,16 @@ from tunes_player.core.shell_state import (
     ShellBase,
     ShellState,
     apply_shell_view_filters,
+    cached_releases_compatible_with_available,
+    cached_releases_have_quality_tiers,
     ensure_source_enabled,
+    filter_releases_to_available_sources,
+    prune_enabled_sources,
+    refresh_local_peak_quality_tiers,
     genres_in_selection,
     prune_enabled_genres,
+    prune_enabled_quality_tiers,
+    quality_tiers_in_selection,
     release_to_cache_payload,
     releases_from_cache_payloads,
 )
@@ -33,6 +40,7 @@ from tunes_player.ui.gtk.now_playing import NowPlayingBar, attach_media_keys
 from tunes_player.ui.gtk.preferences import PreferencesWindow
 from tunes_player.ui.gtk.shell_controller import available_sources, fetch_base_releases
 from tunes_player.ui.gtk.genre_filter_menu import GenreFilterMenu
+from tunes_player.ui.gtk.quality_multi_switch import QualityMultiSwitch
 from tunes_player.ui.gtk.release_sort_switch import ReleaseSortSwitch
 from tunes_player.ui.gtk.release_type_multi_switch import ReleaseTypeMultiSwitch
 from tunes_player.ui.gtk.source_multi_switch import SourceMultiSwitch
@@ -88,6 +96,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._source_multi: SourceMultiSwitch | None = None
         self._genre_filter: GenreFilterMenu | None = None
         self._release_type_multi: ReleaseTypeMultiSwitch | None = None
+        self._quality_filter_multi: QualityMultiSwitch | None = None
         self._sort_switch: ReleaseSortSwitch | None = None
         self._cached_selection_key: tuple[str, str] | None = None
         self._cached_releases: list[Release] = []
@@ -119,20 +128,21 @@ class TunesWindow(Adw.ApplicationWindow):
         if not available_sources(self._service):
             return ShellState()
         sources = available_sources(self._service)
-        if state.enabled_sources and not state.enabled_sources <= sources:
-            state = replace(
-                state,
-                enabled_sources=state.enabled_sources & sources,
-            )
+        pruned_sources = prune_enabled_sources(state.enabled_sources, sources)
+        if pruned_sources != state.enabled_sources:
+            state = replace(state, enabled_sources=pruned_sources)
         if state.base == ShellBase.ALL_LOCAL:
-            state = replace(
-                state,
-                enabled_sources=ensure_source_enabled(
-                    state.enabled_sources,
-                    Source.LOCAL,
-                    available=sources,
-                ),
-            )
+            if Source.LOCAL not in sources:
+                state = replace(state, base=ShellBase.NONE, cached_releases=())
+            else:
+                state = replace(
+                    state,
+                    enabled_sources=ensure_source_enabled(
+                        state.enabled_sources,
+                        Source.LOCAL,
+                        available=sources,
+                    ),
+                )
         return state
 
     def _build_shell(self) -> None:
@@ -220,6 +230,14 @@ class TunesWindow(Adw.ApplicationWindow):
         self._genre_filter_slot.set_margin_start(24)
         filter_row.append(self._genre_filter_slot)
 
+        self._quality_filter_slot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self._quality_filter_slot.add_css_class("shell-quality-filter-slot")
+        self._quality_filter_slot.set_visible(False)
+        self._quality_filter_slot.set_hexpand(False)
+        self._quality_filter_slot.set_halign(Gtk.Align.START)
+        self._quality_filter_slot.set_margin_start(24)
+        filter_row.append(self._quality_filter_slot)
+
         self._sort_slot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         self._sort_slot.add_css_class("shell-sort-slot")
         self._sort_slot.set_visible(False)
@@ -289,7 +307,11 @@ class TunesWindow(Adw.ApplicationWindow):
         self._cached_releases = list(releases)
         self._sync_release_type_multi()
         self._sync_genre_filter()
+        self._sync_quality_filter()
         self._sync_sort_switch()
+
+    def _available_sources(self) -> frozenset[Source]:
+        return frozenset(available_sources(self._service))
 
     def _filtered_from_cache(self, state: ShellState) -> list[Release]:
         return apply_shell_view_filters(
@@ -297,6 +319,8 @@ class TunesWindow(Adw.ApplicationWindow):
             enabled_sources=state.enabled_sources,
             enabled_genres=state.enabled_genres,
             enabled_release_types=state.enabled_release_types,
+            enabled_quality_tiers=state.enabled_quality_tiers,
+            available_sources=self._available_sources(),
             sort_key=state.sort_key,
             sort_descending=state.sort_descending,
         )
@@ -364,6 +388,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._sync_source_multi()
         self._sync_release_type_multi()
         self._sync_genre_filter()
+        self._sync_quality_filter()
         self._sync_sort_switch()
 
     def _sync_sort_switch(self) -> None:
@@ -431,6 +456,43 @@ class TunesWindow(Adw.ApplicationWindow):
         self._schedule_persist()
         self._display_cached_selection()
 
+    def _sync_quality_filter(self) -> None:
+        available = quality_tiers_in_selection(self._cached_releases)
+        show = bool(self._cached_releases)
+        state = self._shell_state
+        pruned = prune_enabled_quality_tiers(state.enabled_quality_tiers, available)
+        if pruned != state.enabled_quality_tiers:
+            self._shell_state = replace(state, enabled_quality_tiers=pruned)
+            state = self._shell_state
+
+        self._quality_filter_slot.set_visible(show)
+        if not show:
+            return
+
+        if self._quality_filter_multi is None:
+            self._quality_filter_multi = QualityMultiSwitch(
+                enabled_quality_tiers=state.enabled_quality_tiers,
+                on_changed=self._on_quality_filter_changed,
+            )
+            self._quality_filter_slot.append(self._quality_filter_multi)
+        else:
+            self._quality_filter_multi.set_enabled_quality_tiers(
+                state.enabled_quality_tiers,
+            )
+
+    def _on_quality_filter_changed(self, enabled_quality_tiers: frozenset[str]) -> None:
+        self._set_enabled_quality_tiers(enabled_quality_tiers)
+
+    def _set_enabled_quality_tiers(self, enabled_quality_tiers: frozenset[str]) -> None:
+        state = self._shell_state
+        if state.enabled_quality_tiers == enabled_quality_tiers:
+            return
+        self._shell_state = replace(state, enabled_quality_tiers=enabled_quality_tiers)
+        if self._quality_filter_multi is not None:
+            self._quality_filter_multi.set_enabled_quality_tiers(enabled_quality_tiers)
+        self._schedule_persist()
+        self._display_cached_selection()
+
     def _sync_genre_filter(self) -> None:
         available = genres_in_selection(self._cached_releases)
         show = bool(self._cached_releases)
@@ -467,6 +529,9 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _rebuild_source_filters(self) -> None:
         sources = available_sources(self._service)
+        pruned = prune_enabled_sources(self._shell_state.enabled_sources, sources)
+        if pruned != self._shell_state.enabled_sources:
+            self._shell_state = replace(self._shell_state, enabled_sources=pruned)
         if len(sources) <= 1:
             self._source_row.set_visible(False)
             if self._shell_state.enabled_sources:
@@ -608,13 +673,37 @@ class TunesWindow(Adw.ApplicationWindow):
         self._service.config.set_shell_state(self._shell_state_for_persist())
         return False
 
+    def _refresh_cached_release_quality(self, releases: list[Release]) -> list[Release]:
+        if not any(release.source == Source.LOCAL for release in releases):
+            return releases
+        local_tier_by_id = {
+            release.id: release.peak_quality_tier
+            for release in self._service.list_releases()
+        }
+        return refresh_local_peak_quality_tiers(
+            releases,
+            local_tier_by_id=local_tier_by_id,
+        )
+
     def _try_restore_persisted_grid(self, state: ShellState) -> bool:
         if state.base == ShellBase.NONE or not state.cached_releases:
+            return False
+        available = self._available_sources()
+        if state.base == ShellBase.ALL_LOCAL and Source.LOCAL not in available:
+            return False
+        if not cached_releases_compatible_with_available(state.cached_releases, available):
+            return False
+        if not cached_releases_have_quality_tiers(state.cached_releases):
             return False
         releases = releases_from_cache_payloads(state.cached_releases)
         if not releases:
             return False
+        releases = filter_releases_to_available_sources(releases, available)
+        if not releases:
+            return False
+        releases = self._refresh_cached_release_quality(releases)
         self._store_selection_cache(state, releases)
+        self._schedule_persist()
         view_state = self._shell_state
         filtered = self._filtered_from_cache(view_state)
         self._show_grid(
@@ -760,6 +849,8 @@ class TunesWindow(Adw.ApplicationWindow):
             return "No releases match the selected genres."
         if state.enabled_release_types:
             return "No releases match the selected release types."
+        if state.enabled_quality_tiers:
+            return "No releases match the selected quality."
         if state.enabled_sources:
             names = ", ".join(
                 source_label(source)
@@ -845,6 +936,7 @@ class TunesWindow(Adw.ApplicationWindow):
         releases = list(snapshot.releases)
         if not releases and snapshot.state.cached_releases:
             releases = releases_from_cache_payloads(snapshot.state.cached_releases)
+        releases = self._refresh_cached_release_quality(releases)
         self._shell_state = snapshot.state
         self._sync_shell_controls()
         if releases:
@@ -882,6 +974,7 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _on_sources_or_library_changed(self) -> bool:
         self._rebuild_source_filters()
+        self._sync_shell_controls()
         self._invalidate_selection_cache()
         self._reload_grid()
         return False

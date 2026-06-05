@@ -9,8 +9,11 @@ from pathlib import Path
 
 from tunes_player.core.config import ConfigManager
 from tunes_player.core.models import Release, ReleaseType, Source
+from tunes_player.core.release_quality import QUALITY_FILTER_CD
 from tunes_player.core.shell_state import (
     NO_GENRE_LABEL,
+    QUALITY_FILTER_COMPRESSED,
+    QUALITY_FILTER_HI_RES,
     RELEASE_TYPE_FILTER_ALBUM,
     RELEASE_TYPE_FILTER_EP,
     RELEASE_TYPE_FILTER_OTHER,
@@ -22,13 +25,21 @@ from tunes_player.core.shell_state import (
     ShellBase,
     ShellState,
     apply_genre_filter,
+    apply_quality_filter,
     apply_release_type_filter,
     apply_shell_sort,
     apply_source_filter,
+    cached_releases_compatible_with_available,
     ensure_source_enabled,
+    filter_releases_to_available_sources,
+    prune_enabled_sources,
     genres_in_selection,
     parse_shell_state,
     prune_enabled_genres,
+    cached_releases_have_quality_tiers,
+    prune_enabled_quality_tiers,
+    refresh_local_peak_quality_tiers,
+    quality_tiers_in_selection,
     release_from_cache_payload,
     release_to_cache_payload,
     release_type_filter_bucket,
@@ -45,6 +56,7 @@ def _release(
     year: int | None = 2024,
     genre: str | None = "Rock",
     release_type: ReleaseType = ReleaseType.ALBUM,
+    peak_quality_tier: str = QUALITY_FILTER_CD,
 ) -> Release:
     return Release(
         id=release_id,
@@ -54,6 +66,7 @@ def _release(
         year=year,
         genre=genre,
         release_type=release_type,
+        peak_quality_tier=peak_quality_tier,
     )
 
 
@@ -65,6 +78,7 @@ class TestShellStateParsing(unittest.TestCase):
         self.assertEqual(state.enabled_sources, frozenset())
         self.assertEqual(state.enabled_genres, frozenset())
         self.assertEqual(state.enabled_release_types, frozenset())
+        self.assertEqual(state.enabled_quality_tiers, frozenset())
         self.assertIsNone(state.sort_key)
         self.assertTrue(state.sort_descending)
         self.assertEqual(state.cached_releases, ())
@@ -102,6 +116,13 @@ class TestShellStateParsing(unittest.TestCase):
         )
         restored = ShellState.from_dict(state.to_dict())
         self.assertEqual(restored.enabled_release_types, state.enabled_release_types)
+
+    def test_enabled_quality_tiers_roundtrip(self) -> None:
+        state = ShellState(
+            enabled_quality_tiers=frozenset({QUALITY_FILTER_CD, QUALITY_FILTER_HI_RES}),
+        )
+        restored = ShellState.from_dict(state.to_dict())
+        self.assertEqual(restored.enabled_quality_tiers, state.enabled_quality_tiers)
 
     def test_sort_state_roundtrip(self) -> None:
         state = ShellState(
@@ -263,6 +284,19 @@ class TestReleaseCachePayload(unittest.TestCase):
         assert restored is not None
         self.assertEqual(restored, release)
 
+    def test_cache_payload_always_includes_peak_quality_tier(self) -> None:
+        payload = release_to_cache_payload(_release("local:1", Source.LOCAL))
+        self.assertEqual(payload["peak_quality_tier"], QUALITY_FILTER_CD)
+
+    def test_cached_releases_have_quality_tiers(self) -> None:
+        self.assertFalse(cached_releases_have_quality_tiers(()))
+        payload = release_to_cache_payload(
+            _release("a", Source.LOCAL, peak_quality_tier=QUALITY_FILTER_HI_RES),
+        )
+        self.assertTrue(cached_releases_have_quality_tiers((payload,)))
+        legacy = {"id": "local:1", "title": "T", "artist_name": "A", "source": "local"}
+        self.assertFalse(cached_releases_have_quality_tiers((legacy,)))
+
     def test_releases_from_cache_payloads(self) -> None:
         payloads = (
             release_to_cache_payload(_release("local:1", Source.LOCAL)),
@@ -309,6 +343,56 @@ class TestGenreSelectionHelpers(unittest.TestCase):
         self.assertEqual(pruned, frozenset({"Rock"}))
 
 
+class TestRefreshLocalPeakQualityTiers(unittest.TestCase):
+    def test_replaces_stale_cached_tier(self) -> None:
+        releases = [
+            _release("local:1", Source.LOCAL, peak_quality_tier=QUALITY_FILTER_COMPRESSED),
+            _release("tidal:1", Source.TIDAL, peak_quality_tier=QUALITY_FILTER_COMPRESSED),
+        ]
+        refreshed = refresh_local_peak_quality_tiers(
+            releases,
+            local_tier_by_id={"local:1": QUALITY_FILTER_HI_RES},
+        )
+        self.assertEqual(refreshed[0].peak_quality_tier, QUALITY_FILTER_HI_RES)
+        self.assertEqual(refreshed[1].peak_quality_tier, QUALITY_FILTER_COMPRESSED)
+
+
+class TestQualityFilter(unittest.TestCase):
+    def test_quality_tiers_in_selection(self) -> None:
+        releases = [
+            _release("a", Source.LOCAL, peak_quality_tier=QUALITY_FILTER_CD),
+            _release("b", Source.TIDAL, peak_quality_tier=QUALITY_FILTER_HI_RES),
+            _release("c", Source.QOBUZ, peak_quality_tier=QUALITY_FILTER_CD),
+        ]
+        self.assertEqual(
+            quality_tiers_in_selection(releases),
+            (QUALITY_FILTER_CD, QUALITY_FILTER_HI_RES),
+        )
+
+    def test_apply_quality_filter(self) -> None:
+        releases = [
+            _release("a", Source.LOCAL, peak_quality_tier=QUALITY_FILTER_COMPRESSED),
+            _release("b", Source.TIDAL, peak_quality_tier=QUALITY_FILTER_CD),
+            _release("c", Source.QOBUZ, peak_quality_tier=QUALITY_FILTER_HI_RES),
+        ]
+        filtered = apply_quality_filter(
+            releases,
+            frozenset({QUALITY_FILTER_CD, QUALITY_FILTER_HI_RES}),
+        )
+        self.assertEqual([r.id for r in filtered], ["b", "c"])
+
+    def test_empty_quality_filter_is_passthrough(self) -> None:
+        releases = [_release("a", Source.LOCAL)]
+        self.assertEqual(len(apply_quality_filter(releases, frozenset())), 1)
+
+    def test_prune_enabled_quality_tiers(self) -> None:
+        pruned = prune_enabled_quality_tiers(
+            frozenset({QUALITY_FILTER_CD, QUALITY_FILTER_COMPRESSED}),
+            (QUALITY_FILTER_CD,),
+        )
+        self.assertEqual(pruned, frozenset({QUALITY_FILTER_CD}))
+
+
 class TestEnsureSourceEnabled(unittest.TestCase):
     def test_all_sources_unchanged(self) -> None:
         available = {Source.LOCAL, Source.TIDAL}
@@ -352,6 +436,19 @@ class TestApplySourceFilter(unittest.TestCase):
         ]
         self.assertEqual(len(apply_source_filter(releases, frozenset())), 2)
 
+    def test_empty_enabled_respects_available_sources(self) -> None:
+        releases = [
+            _release("local:1", Source.LOCAL),
+            _release("tidal:1", Source.TIDAL),
+            _release("qobuz:1", Source.QOBUZ),
+        ]
+        filtered = apply_source_filter(
+            releases,
+            frozenset(),
+            available_sources=frozenset({Source.TIDAL, Source.QOBUZ}),
+        )
+        self.assertEqual([r.id for r in filtered], ["tidal:1", "qobuz:1"])
+
     def test_single_source(self) -> None:
         releases = [
             _release("local:1", Source.LOCAL),
@@ -359,6 +456,45 @@ class TestApplySourceFilter(unittest.TestCase):
         ]
         filtered = apply_source_filter(releases, frozenset({Source.LOCAL}))
         self.assertEqual([r.id for r in filtered], ["local:1"])
+
+    def test_prune_enabled_sources(self) -> None:
+        pruned = prune_enabled_sources(
+            frozenset({Source.LOCAL, Source.TIDAL}),
+            {Source.TIDAL, Source.QOBUZ},
+        )
+        self.assertEqual(pruned, frozenset({Source.TIDAL}))
+
+    def test_cached_releases_compatible_with_available(self) -> None:
+        local_only = (
+            release_to_cache_payload(_release("local:1", Source.LOCAL)),
+        )
+        self.assertFalse(
+            cached_releases_compatible_with_available(
+                local_only,
+                frozenset({Source.TIDAL, Source.QOBUZ}),
+            ),
+        )
+        mixed = (
+            release_to_cache_payload(_release("local:1", Source.LOCAL)),
+            release_to_cache_payload(_release("tidal:1", Source.TIDAL)),
+        )
+        self.assertTrue(
+            cached_releases_compatible_with_available(
+                mixed,
+                frozenset({Source.TIDAL}),
+            ),
+        )
+
+    def test_filter_releases_to_available_sources(self) -> None:
+        releases = [
+            _release("local:1", Source.LOCAL),
+            _release("tidal:1", Source.TIDAL),
+        ]
+        filtered = filter_releases_to_available_sources(
+            releases,
+            frozenset({Source.QOBUZ}),
+        )
+        self.assertEqual(filtered, [])
 
 
 class TestShellStateConfigPersistence(unittest.TestCase):

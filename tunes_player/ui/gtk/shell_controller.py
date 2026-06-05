@@ -54,6 +54,7 @@ def fetch_filtered_releases(
     enabled_sources: frozenset[Source] | None = None,
     enabled_genres: frozenset[str] | None = None,
     enabled_release_types: frozenset[str] | None = None,
+    enabled_quality_tiers: frozenset[str] | None = None,
     sort_key: str | None = None,
     sort_descending: bool = True,
 ) -> list[Release]:
@@ -63,6 +64,8 @@ def fetch_filtered_releases(
         enabled_sources=enabled_sources or frozenset(),
         enabled_genres=enabled_genres or frozenset(),
         enabled_release_types=enabled_release_types or frozenset(),
+        enabled_quality_tiers=enabled_quality_tiers or frozenset(),
+        available_sources=frozenset(available_sources(service)),
         sort_key=sort_key,
         sort_descending=sort_descending,
     )

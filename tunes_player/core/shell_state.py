@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
 
@@ -13,6 +13,12 @@ from tunes_player.core.models import (
     ReleaseType,
     Source,
 )
+from tunes_player.core import release_quality as _release_quality
+from tunes_player.core.release_quality import release_quality_filter_bucket
+
+QUALITY_FILTER_COMPRESSED = _release_quality.QUALITY_FILTER_COMPRESSED
+QUALITY_FILTER_CD = _release_quality.QUALITY_FILTER_CD
+QUALITY_FILTER_HI_RES = _release_quality.QUALITY_FILTER_HI_RES
 
 
 class ShellBase(str, Enum):
@@ -43,6 +49,14 @@ _VALID_RELEASE_TYPE_FILTERS = frozenset(
     }
 )
 
+_VALID_QUALITY_FILTERS = frozenset(
+    {
+        QUALITY_FILTER_COMPRESSED,
+        QUALITY_FILTER_CD,
+        QUALITY_FILTER_HI_RES,
+    }
+)
+
 SORT_KEY_YEAR = "year"
 SORT_KEY_ALBUM = "album"
 SORT_KEY_ARTIST = "artist"
@@ -67,6 +81,8 @@ class ShellState:
     enabled_genres: frozenset[str] = field(default_factory=frozenset)
     # Empty set = all release-type buckets enabled. Non-empty = OR on filter buckets.
     enabled_release_types: frozenset[str] = field(default_factory=frozenset)
+    # Empty set = all quality tiers enabled. Non-empty = OR on peak_quality_tier.
+    enabled_quality_tiers: frozenset[str] = field(default_factory=frozenset)
     # None = preserve cache order; otherwise single-field sort after filters.
     sort_key: str | None = None
     sort_descending: bool = True
@@ -86,6 +102,8 @@ class ShellState:
             payload["enabled_genres"] = sorted(self.enabled_genres)
         if self.enabled_release_types:
             payload["enabled_release_types"] = sorted(self.enabled_release_types)
+        if self.enabled_quality_tiers:
+            payload["enabled_quality_tiers"] = sorted(self.enabled_quality_tiers)
         if self.sort_key is not None:
             payload["sort_key"] = self.sort_key
         if self.sort_descending is not True:
@@ -109,6 +127,7 @@ class ShellState:
         enabled_sources = _parse_enabled_sources(raw)
         enabled_genres = _parse_enabled_genres(raw)
         enabled_release_types = _parse_enabled_release_types(raw)
+        enabled_quality_tiers = _parse_enabled_quality_tiers(raw)
         sort_key, sort_descending = _parse_sort_state(raw)
         cached_releases = _parse_cached_releases(raw)
         return cls(
@@ -117,6 +136,7 @@ class ShellState:
             enabled_sources=enabled_sources,
             enabled_genres=enabled_genres,
             enabled_release_types=enabled_release_types,
+            enabled_quality_tiers=enabled_quality_tiers,
             sort_key=sort_key,
             sort_descending=sort_descending,
             cached_releases=cached_releases,
@@ -143,6 +163,11 @@ def release_to_cache_payload(release: Release) -> dict[str, Any]:
         payload["art_uri"] = release.art_uri
     if release.duration_sec is not None:
         payload["duration_sec"] = release.duration_sec
+    payload["peak_quality_tier"] = (
+        release.peak_quality_tier
+        if release.peak_quality_tier in _VALID_QUALITY_FILTERS
+        else QUALITY_FILTER_COMPRESSED
+    )
     return payload
 
 
@@ -176,6 +201,13 @@ def release_from_cache_payload(raw: object) -> Release | None:
         track_count = int(raw.get("track_count", 0))
     except (TypeError, ValueError):
         track_count = 0
+    peak_quality_tier_raw = raw.get("peak_quality_tier", QUALITY_FILTER_COMPRESSED)
+    peak_quality_tier = QUALITY_FILTER_COMPRESSED
+    if (
+        isinstance(peak_quality_tier_raw, str)
+        and peak_quality_tier_raw in _VALID_QUALITY_FILTERS
+    ):
+        peak_quality_tier = peak_quality_tier_raw
     return Release(
         id=release_id,
         title=title,
@@ -189,7 +221,44 @@ def release_from_cache_payload(raw: object) -> Release | None:
         genre=str(genre) if genre else None,
         art_uri=str(art_uri) if art_uri else None,
         duration_sec=float(duration) if duration is not None else None,
+        peak_quality_tier=peak_quality_tier,
     )
+
+
+def refresh_local_peak_quality_tiers(
+    releases: list[Release],
+    *,
+    local_tier_by_id: dict[str, str],
+) -> list[Release]:
+    """Replace stale cached peak_quality_tier values for local releases."""
+    if not local_tier_by_id:
+        return list(releases)
+    refreshed: list[Release] = []
+    for release in releases:
+        if release.source != Source.LOCAL:
+            refreshed.append(release)
+            continue
+        tier = local_tier_by_id.get(release.id)
+        if tier and tier != release.peak_quality_tier:
+            refreshed.append(replace(release, peak_quality_tier=tier))
+        else:
+            refreshed.append(release)
+    return refreshed
+
+
+def cached_releases_have_quality_tiers(
+    payloads: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+) -> bool:
+    """True when every cached row includes a valid peak_quality_tier."""
+    if not payloads:
+        return False
+    for item in payloads:
+        if not isinstance(item, dict):
+            return False
+        tier = item.get("peak_quality_tier")
+        if not isinstance(tier, str) or tier not in _VALID_QUALITY_FILTERS:
+            return False
+    return True
 
 
 def releases_from_cache_payloads(
@@ -234,6 +303,17 @@ def _parse_enabled_release_types(raw: dict[str, Any]) -> frozenset[str]:
         str(item)
         for item in enabled_raw
         if isinstance(item, str) and item in _VALID_RELEASE_TYPE_FILTERS
+    )
+
+
+def _parse_enabled_quality_tiers(raw: dict[str, Any]) -> frozenset[str]:
+    enabled_raw = raw.get("enabled_quality_tiers")
+    if not isinstance(enabled_raw, list):
+        return frozenset()
+    return frozenset(
+        str(item)
+        for item in enabled_raw
+        if isinstance(item, str) and item in _VALID_QUALITY_FILTERS
     )
 
 
@@ -283,10 +363,48 @@ def ensure_source_enabled(
     return enabled_sources | frozenset({source})
 
 
+def prune_enabled_sources(
+    enabled_sources: frozenset[Source],
+    available_sources: set[Source] | frozenset[Source],
+) -> frozenset[Source]:
+    available = frozenset(available_sources)
+    return frozenset(source for source in enabled_sources if source in available)
+
+
+def filter_releases_to_available_sources(
+    releases: list[Release],
+    available_sources: frozenset[Source],
+) -> list[Release]:
+    if not available_sources:
+        return []
+    return [release for release in releases if release.source in available_sources]
+
+
+def cached_releases_compatible_with_available(
+    payloads: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+    available_sources: frozenset[Source],
+) -> bool:
+    """True when at least one cached row is from a currently available source."""
+    if not payloads or not available_sources:
+        return False
+    for item in payloads:
+        if not isinstance(item, dict):
+            continue
+        source_raw = item.get("source")
+        if isinstance(source_raw, str) and source_raw in _VALID_SOURCES:
+            if Source(source_raw) in available_sources:
+                return True
+    return False
+
+
 def apply_source_filter(
     releases: list[Release],
     enabled_sources: frozenset[Source],
+    *,
+    available_sources: frozenset[Source] | None = None,
 ) -> list[Release]:
+    if available_sources is not None:
+        releases = filter_releases_to_available_sources(releases, available_sources)
     if not enabled_sources:
         return list(releases)
     return [release for release in releases if release.source in enabled_sources]
@@ -361,6 +479,46 @@ def apply_genre_filter(
     ]
 
 
+_QUALITY_TIER_ORDER: tuple[str, ...] = (
+    QUALITY_FILTER_COMPRESSED,
+    QUALITY_FILTER_CD,
+    QUALITY_FILTER_HI_RES,
+)
+
+
+def quality_tiers_in_selection(
+    releases: list[Release] | tuple[Release, ...],
+) -> tuple[str, ...]:
+    """Distinct quality tiers in *releases*, in stable bucket order."""
+    present = {
+        release_quality_filter_bucket(release)
+        for release in releases
+        if release.peak_quality_tier in _VALID_QUALITY_FILTERS
+    }
+    return tuple(tier for tier in _QUALITY_TIER_ORDER if tier in present)
+
+
+def prune_enabled_quality_tiers(
+    enabled_quality_tiers: frozenset[str],
+    available_tiers: tuple[str, ...] | frozenset[str],
+) -> frozenset[str]:
+    available = frozenset(available_tiers)
+    return frozenset(tier for tier in enabled_quality_tiers if tier in available)
+
+
+def apply_quality_filter(
+    releases: list[Release],
+    enabled_quality_tiers: frozenset[str],
+) -> list[Release]:
+    if not enabled_quality_tiers:
+        return list(releases)
+    return [
+        release
+        for release in releases
+        if release_quality_filter_bucket(release) in enabled_quality_tiers
+    ]
+
+
 def _year_sort_key(release: Release, *, sort_descending: bool) -> tuple:
     title_key = release.title.casefold()
     if release.year is None:
@@ -409,15 +567,25 @@ def apply_shell_view_filters(
     enabled_sources: frozenset[Source],
     enabled_genres: frozenset[str],
     enabled_release_types: frozenset[str] | None = None,
+    enabled_quality_tiers: frozenset[str] | None = None,
+    available_sources: frozenset[Source] | None = None,
     sort_key: str | None = None,
     sort_descending: bool = True,
 ) -> list[Release]:
-    filtered = apply_source_filter(releases, enabled_sources)
+    filtered = apply_source_filter(
+        releases,
+        enabled_sources,
+        available_sources=available_sources,
+    )
     filtered = apply_release_type_filter(
         filtered,
         enabled_release_types or frozenset(),
     )
     filtered = apply_genre_filter(filtered, enabled_genres)
+    filtered = apply_quality_filter(
+        filtered,
+        enabled_quality_tiers or frozenset(),
+    )
     return apply_shell_sort(
         filtered,
         sort_key=sort_key,

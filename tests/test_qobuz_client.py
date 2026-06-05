@@ -12,6 +12,10 @@ from tunes_player.core.backends.qobuz.client import (
 )
 from tunes_player.core.backends.qobuz.client import QobuzClient
 from tunes_player.core.backends.qobuz.convert import cover_url, release_from_qobuz
+from tunes_player.core.release_quality import (
+    QUALITY_FILTER_CD,
+    QUALITY_FILTER_HI_RES,
+)
 from tunes_player.core.models import Source
 
 
@@ -158,6 +162,45 @@ class TestReleaseFromQobuz(unittest.TestCase):
         }
         release = release_from_qobuz(album)
         self.assertEqual(release.release_type.value, "single")
+
+    def test_peak_quality_cd(self) -> None:
+        album = {
+            "id": "cd1",
+            "title": "CD Album",
+            "artist": {"name": "Band"},
+            "tracks_count": 8,
+            "maximum_bit_depth": 16,
+            "maximum_sampling_rate": 44100,
+            "hires": False,
+        }
+        release = release_from_qobuz(album)
+        self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_CD)
+
+    def test_peak_quality_hi_res(self) -> None:
+        album = {
+            "id": "hr1",
+            "title": "Hi-Res Album",
+            "artist": {"name": "Band"},
+            "tracks_count": 8,
+            "maximum_bit_depth": 24,
+            "maximum_sampling_rate": 96000,
+            "hires": True,
+        }
+        release = release_from_qobuz(album)
+        self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_HI_RES)
+
+    def test_peak_quality_hi_res_khz_sample_rate(self) -> None:
+        album = {
+            "id": "hr2",
+            "title": "192 Album",
+            "artist": {"name": "Band"},
+            "tracks_count": 8,
+            "maximum_bit_depth": 24,
+            "maximum_sampling_rate": 192,
+            "hires": False,
+        }
+        release = release_from_qobuz(album)
+        self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_HI_RES)
 
 
 if __name__ == "__main__":

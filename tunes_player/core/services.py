@@ -23,7 +23,7 @@ from tunes_player.core.home import (
     RecentlyAddedItem,
     suggestion_added_ns,
 )
-from tunes_player.core.library import LibraryStore, ScanResult
+from tunes_player.core.library import LibraryScanner, LibraryStore, ScanResult
 from tunes_player.core.library.scan_worker import create_scan_process
 from tunes_player.core.models import Album, Release, Source, Track
 from tunes_player.core.playback.engine import EngineEvent, PlaybackEngine
@@ -420,6 +420,20 @@ class PlayerService:
 
     def notify_sources_changed(self) -> None:
         self._emit("sources_changed")
+
+    def remove_music_folder(self, folder: str) -> int:
+        """Drop a configured folder and purge its indexed tracks from the catalog."""
+        resolved = str(Path(folder).expanduser().resolve())
+        scanner = LibraryScanner(
+            db_path=self._config_manager.database_path,
+            config=self._config_manager.config,
+        )
+        removed = scanner.purge_folder(resolved)
+        self._config_manager.remove_music_folder(folder)
+        self._store.reconnect()
+        self.notify_library_updated()
+        self.notify_sources_changed()
+        return removed
 
     @property
     def scanning_folder(self) -> str | None:

@@ -282,9 +282,10 @@ class PreferencesWindow(Adw.PreferencesWindow):
             return
         self._service.config.add_music_folder(path)
         self._reload_folders()
+        self._service.notify_sources_changed()
 
     def _remove_folder(self, folder: str) -> None:
-        self._service.config.remove_music_folder(folder)
+        self._service.remove_music_folder(folder)
         self._reload_folders()
 
     def _on_software_volume_fallback_changed(self, row: Adw.SwitchRow, *_args: object) -> None:

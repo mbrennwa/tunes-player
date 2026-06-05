@@ -31,7 +31,21 @@ _RELEASE_GROUP_SELECT = """
         MAX(t.track_number) AS max_track_number,
         MAX(t.release_type_tag) AS release_type_tag,
         MIN(t.genre) AS genre,
-        SUM(f.duration_sec) AS duration_sec
+        SUM(f.duration_sec) AS duration_sec,
+        MAX(f.bit_depth) AS max_bit_depth,
+        MAX(f.sample_rate) AS max_sample_rate,
+        MAX(
+            CASE
+                WHEN lower(f.codec) IN ('flac', 'alac', 'wav', 'aiff', 'aif') THEN 1
+                ELSE 0
+            END
+        ) AS has_lossless,
+        MAX(
+            CASE
+                WHEN lower(f.codec) IN ('mp3', 'aac', 'vorbis', 'ogg') THEN 1
+                ELSE 0
+            END
+        ) AS has_lossy
     FROM tracks t
     JOIN files f ON f.id = t.file_id
 """
@@ -432,6 +446,16 @@ class LibraryStore:
             release_type_tag=release_type_tag,
         )
         duration = row["duration_sec"]
+        from tunes_player.core.release_quality import tier_from_local
+
+        max_bit_depth = row["max_bit_depth"]
+        max_sample_rate = row["max_sample_rate"]
+        peak_quality_tier = tier_from_local(
+            max_bit_depth=int(max_bit_depth) if max_bit_depth is not None else None,
+            max_sample_rate=int(max_sample_rate) if max_sample_rate is not None else None,
+            has_lossless=bool(int(row["has_lossless"] or 0)),
+            has_lossy=bool(int(row["has_lossy"] or 0)),
+        )
         return Release(
             id=str(row["release_id"]),
             title=row["album"] or "Unknown",
@@ -445,6 +469,7 @@ class LibraryStore:
             genre=row["genre"],
             art_uri=art_uri,
             duration_sec=float(duration) if duration is not None else None,
+            peak_quality_tier=peak_quality_tier,
         )
 
     @staticmethod

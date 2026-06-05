@@ -5,9 +5,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from tunes_player.core.backends.tidal import ids as tidal_ids
+from tunes_player.core.backends.tidal.stream_quality import track_peak_quality
 from tunes_player.core.library.release_logic import (
     infer_release_completeness,
     release_type_from_metadata,
+)
+from tunes_player.core.release_quality import (
+    QUALITY_FILTER_COMPRESSED,
+    tier_from_tidal_peak,
 )
 from tunes_player.core.models import (
     Artist,
@@ -63,6 +68,39 @@ def _resolve_tidal_release_type(session: Session, album: TidalAlbum) -> str | No
     return _tidal_album_type_raw(full)
 
 
+def _tidal_album_for_quality(session: Session, album: TidalAlbum) -> TidalAlbum:
+    album_id = getattr(album, "id", None)
+    if album_id is None or album_id == -1:
+        return album
+    try:
+        return session.album(album_id)
+    except Exception:
+        return album
+
+
+def _tidal_album_tracks(session: Session, album: TidalAlbum) -> list[object]:
+    try:
+        tracks = list(album.tracks())
+        if tracks:
+            return tracks
+    except Exception:
+        pass
+    resolved = _tidal_album_for_quality(session, album)
+    try:
+        return list(resolved.tracks())
+    except Exception:
+        return []
+
+
+def _resolve_tidal_peak_quality_tier(session: Session, album: TidalAlbum) -> str:
+    """Peak catalog tier from album tracks."""
+    tracks = _tidal_album_tracks(session, album)
+    if not tracks:
+        return QUALITY_FILTER_COMPRESSED
+    peak_rank = max(track_peak_quality(track) for track in tracks)
+    return tier_from_tidal_peak(peak_rank)
+
+
 def release_from_tidal(session: Session, album: TidalAlbum, *, owned_track_count: int | None = None) -> Release:
     artists = album.artists or []
     artist_name = artists[0].name if artists else "Unknown Artist"
@@ -92,6 +130,7 @@ def release_from_tidal(session: Session, album: TidalAlbum, *, owned_track_count
         completeness=completeness,
         release_type=release_type,
         art_uri=_album_art(session, album),
+        peak_quality_tier=_resolve_tidal_peak_quality_tier(session, album),
     )
 
 

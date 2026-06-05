@@ -107,6 +107,84 @@ class LibraryScannerScopedTests(unittest.TestCase):
             ids.track_id("/tmp/music/song.flac"),
         )
 
+    def test_purge_folder_removes_indexed_files_and_tracks(self) -> None:
+        path_a = str((self._folder_a / "track_a.flac").resolve())
+        path_b = str((self._folder_b / "track_b.flac").resolve())
+        connection = connect(self._db_path)
+        try:
+            connection.execute(
+                "INSERT INTO files(path, mtime_ns, size_bytes, indexed_at_ns) VALUES (?, ?, ?, ?)",
+                (path_a, 1, 1, 1),
+            )
+            file_a_id = connection.execute(
+                "SELECT id FROM files WHERE path = ?",
+                (path_a,),
+            ).fetchone()["id"]
+            connection.execute(
+                """
+                INSERT INTO tracks(
+                    id, file_id, album_id, title, artist, album_artist, album, is_synthetic
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    ids.track_id(path_a),
+                    file_a_id,
+                    ids.release_id("Artist", "Album A"),
+                    "Track A",
+                    "Artist",
+                    "Artist",
+                    "Album A",
+                ),
+            )
+            connection.execute(
+                "INSERT INTO files(path, mtime_ns, size_bytes, indexed_at_ns) VALUES (?, ?, ?, ?)",
+                (path_b, 1, 1, 1),
+            )
+            file_b_id = connection.execute(
+                "SELECT id FROM files WHERE path = ?",
+                (path_b,),
+            ).fetchone()["id"]
+            connection.execute(
+                """
+                INSERT INTO tracks(
+                    id, file_id, album_id, title, artist, album_artist, album, is_synthetic
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    ids.track_id(path_b),
+                    file_b_id,
+                    ids.release_id("Artist", "Album B"),
+                    "Track B",
+                    "Artist",
+                    "Artist",
+                    "Album B",
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        removed = self._scanner.purge_folder(str(self._folder_a.resolve()))
+
+        connection = connect(self._db_path)
+        try:
+            paths = {
+                row["path"]
+                for row in connection.execute("SELECT path FROM files").fetchall()
+            }
+            track_ids = {
+                row["id"]
+                for row in connection.execute("SELECT id FROM tracks").fetchall()
+            }
+        finally:
+            connection.close()
+
+        self.assertEqual(removed, 1)
+        self.assertNotIn(path_a, paths)
+        self.assertIn(path_b, paths)
+        self.assertNotIn(ids.track_id(path_a), track_ids)
+        self.assertIn(ids.track_id(path_b), track_ids)
+
     def test_scan_indexes_paths_that_old_casefold_ids_would_collide(self) -> None:
         collision_root = self._root / "collision"
         dir_a = collision_root / "Music"

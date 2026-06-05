@@ -185,6 +185,22 @@ class LibraryScanner:
             art_indexed=art_indexed,
         )
 
+    def purge_folder(self, folder: str) -> int:
+        """Remove all indexed files under *folder* from the library database."""
+        root = str(Path(folder).resolve())
+        connection = connect(self._db_path)
+        try:
+            connection.execute("BEGIN")
+            removed = self._purge_files_under_roots(connection, [root])
+            prune_orphan_album_art(connection, data_dir=self._data_dir)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return removed
+
     def _should_bump_indexed_at(
         self,
         *,
@@ -304,16 +320,29 @@ class LibraryScanner:
         seen_paths: set[str],
         scan_roots: list[str],
     ) -> int:
+        return LibraryScanner._purge_files_under_roots(
+            connection,
+            scan_roots,
+            exclude_paths=seen_paths,
+        )
+
+    @staticmethod
+    def _purge_files_under_roots(
+        connection: sqlite3.Connection,
+        roots: list[str],
+        *,
+        exclude_paths: set[str] | None = None,
+    ) -> int:
         rows = connection.execute("SELECT id, path FROM files").fetchall()
         removed = 0
         for row in rows:
             path_str = row["path"]
-            if (
-                LibraryScanner._path_under_roots(path_str, scan_roots)
-                and path_str not in seen_paths
-            ):
-                connection.execute("DELETE FROM files WHERE id = ?", (row["id"],))
-                removed += 1
+            if not LibraryScanner._path_under_roots(path_str, roots):
+                continue
+            if exclude_paths is not None and path_str in exclude_paths:
+                continue
+            connection.execute("DELETE FROM files WHERE id = ?", (row["id"],))
+            removed += 1
         return removed
 
 

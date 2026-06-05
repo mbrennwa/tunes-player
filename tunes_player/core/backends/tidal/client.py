@@ -526,6 +526,7 @@ class TidalClient:
             genre=release.genre,
             art_uri=release.art_uri,
             duration_sec=duration or None,
+            peak_quality_tier=release.peak_quality_tier,
         )
 
     def get_album(self, album_id: str) -> Release | None:

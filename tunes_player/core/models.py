@@ -49,6 +49,7 @@ class Release:
     genre: str | None = None
     art_uri: str | None = None
     duration_sec: float | None = None
+    peak_quality_tier: str = ""
 
     @property
     def is_partial(self) -> bool:

@@ -15,6 +15,7 @@ from tunes_player.core.models import (
     Source,
     Track,
 )
+from tunes_player.core.release_quality import tier_from_qobuz_album
 
 
 def cover_url(image: Any) -> str | None:
@@ -103,6 +104,7 @@ def release_from_qobuz(
         genre=str(genre_name) if genre_name else None,
         art_uri=cover_url(album.get("image")),
         duration_sec=duration_sec,
+        peak_quality_tier=tier_from_qobuz_album(album),
     )
 
 
