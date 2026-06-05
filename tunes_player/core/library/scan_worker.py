@@ -57,6 +57,7 @@ def run_library_scan(
             result.errors,
             result.art_indexed,
             file_errors,
+            result.total_candidates,
         ),
     )
 

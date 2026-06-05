@@ -47,6 +47,7 @@ class ScanResult:
     errors: int
     art_indexed: int = 0
     file_errors: tuple[ScanFileError, ...] = ()
+    total_candidates: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +216,7 @@ class LibraryScanner:
             errors=errors,
             art_indexed=art_indexed,
             file_errors=tuple(file_errors),
+            total_candidates=total,
         )
 
     def _scan_changes_once(
@@ -293,6 +295,7 @@ class LibraryScanner:
             errors=errors,
             art_indexed=art_indexed,
             file_errors=tuple(file_errors),
+            total_candidates=total,
         )
 
     @staticmethod

@@ -164,6 +164,7 @@ class PlayerService:
         self._scan_finished_folder: str | None = None
         self._scan_last_result: ScanResult | None = None
         self._scan_last_error: str | None = None
+        self._current_scan_job: _ScanJob | None = None
         self._pending_scan_jobs: list[_ScanJob] = []
         self._incremental_coalesce: dict[str, tuple[set[str], set[str]]] = {}
         self._last_recorded_track_id: str | None = None
@@ -572,7 +573,15 @@ class PlayerService:
         if self._scanning_folder != resolved or not self.is_scanning():
             return
         self._terminate_active_scan()
-        self._config_manager.record_folder_scan(resolved, errors=FOLDER_SCAN_INCOMPLETE)
+        self._config_manager.record_folder_scan(
+            resolved,
+            errors=FOLDER_SCAN_INCOMPLETE,
+            scan_kind=(
+                "incremental"
+                if self._current_scan_job is not None and self._current_scan_job.is_incremental
+                else "full"
+            ),
+        )
         self._emit("scan_finished")
         self.notify_library_updated()
         self._try_start_scan()
@@ -721,7 +730,11 @@ class PlayerService:
         job = self._pending_scan_jobs.pop(0)
         self._start_scan_job(job)
 
+    def count_indexed_files(self, folder: str) -> int:
+        return self._store.count_files_under_folder(folder)
+
     def _start_scan_job(self, job: _ScanJob) -> None:
+        self._current_scan_job = job
         self._scanning_folder = job.folder
         self._scan_progress = None
         self._scan_finished_folder = None
@@ -766,8 +779,11 @@ class PlayerService:
                     errors=message[4],
                     art_indexed=message[5] if len(message) > 5 else 0,
                     file_errors=file_errors,
+                    total_candidates=message[7] if len(message) > 7 else 0,
                 )
                 finished_folder = self._scanning_folder
+                job = self._current_scan_job
+                scan_kind = "incremental" if job is not None and job.is_incremental else "full"
                 self._scan_last_result = result
                 self._scan_finished_folder = finished_folder
                 if finished_folder is not None:
@@ -781,6 +797,8 @@ class PlayerService:
                     self._config_manager.record_folder_scan(
                         finished_folder,
                         errors=result.errors,
+                        scan_kind=scan_kind,
+                        catalog_total=result.total_candidates if scan_kind == "full" else None,
                     )
                 self._cleanup_scan()
                 self._emit("scan_finished")
@@ -800,6 +818,12 @@ class PlayerService:
                     self._config_manager.record_folder_scan(
                         finished_folder,
                         errors=FOLDER_SCAN_FAILED,
+                        scan_kind=(
+                            "incremental"
+                            if self._current_scan_job is not None
+                            and self._current_scan_job.is_incremental
+                            else "full"
+                        ),
                     )
                 self._cleanup_scan()
                 self._emit("scan_error")
@@ -824,6 +848,12 @@ class PlayerService:
                     self._config_manager.record_folder_scan(
                         finished_folder,
                         errors=FOLDER_SCAN_FAILED,
+                        scan_kind=(
+                            "incremental"
+                            if self._current_scan_job is not None
+                            and self._current_scan_job.is_incremental
+                            else "full"
+                        ),
                     )
                 self._cleanup_scan()
                 self._emit("scan_error")
@@ -839,6 +869,7 @@ class PlayerService:
         self._scan_queue = None
         self._scanning_folder = None
         self._scan_progress = None
+        self._current_scan_job = None
         self._store.reconnect()
         self._flush_deferred_plays()
         if finished_folder is not None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -109,6 +110,18 @@ class LibraryStore:
                 GROUP BY album_id, album, album_artist
             )
             """,
+        ).fetchone()
+        return int(row["count"])
+
+    def count_files_under_folder(self, folder: str) -> int:
+        root = str(Path(folder).expanduser().resolve())
+        row = self._db_connection().execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM files
+            WHERE path = ? OR path LIKE ?
+            """,
+            (root, root + os.sep + "%"),
         ).fetchone()
         return int(row["count"])
 

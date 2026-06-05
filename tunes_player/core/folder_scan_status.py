@@ -6,6 +6,7 @@ import logging
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from tunes_player.core.library.scanner import ScanFileError
 
@@ -16,6 +17,8 @@ FOLDER_SCAN_INCOMPLETE = -2
 DIAGNOSTICS_SCAN_HINT = "see Diagnostics"
 
 _SCAN_LOG = logging.getLogger("tunes_player.scan")
+
+ScanKind = Literal["full", "incremental"]
 
 
 def log_folder_scan_failure(
@@ -53,29 +56,82 @@ def log_folder_scan_failure(
     _SCAN_LOG.error("Scan diagnostics: %s", log_ref)
 
 
+def _format_coverage(
+    *,
+    indexed_files: int | None,
+    catalog_total: int | None,
+) -> str | None:
+    if indexed_files is None:
+        return None
+    if catalog_total is not None and catalog_total > 0:
+        return f"{indexed_files:,} / {catalog_total:,} files indexed"
+    if indexed_files > 0:
+        return f"{indexed_files:,} files indexed"
+    return None
+
+
+def _format_status_detail(
+    *,
+    errors: int | None,
+    indexed_files: int | None,
+    catalog_total: int | None,
+    last_scan_kind: ScanKind | None,
+) -> str:
+    if errors == FOLDER_SCAN_INCOMPLETE:
+        return "incomplete"
+    if errors is not None and errors < 0:
+        return "scan failed"
+    if errors is None:
+        return "incomplete"
+
+    catalog_known = catalog_total is not None and catalog_total > 0
+    fully_indexed = (
+        catalog_known
+        and indexed_files is not None
+        and indexed_files >= catalog_total
+    )
+    last_full_scan = last_scan_kind == "full"
+
+    if last_full_scan and fully_indexed and errors == 0:
+        return "complete"
+    if errors == 1:
+        return "1 error"
+    if errors > 1:
+        return f"{errors} errors"
+    return "incomplete"
+
+
 def format_folder_last_scan_line(
     *,
     scanned_at: float | None,
     errors: int | None,
+    indexed_files: int | None = None,
+    catalog_total: int | None = None,
+    last_scan_kind: ScanKind | None = None,
 ) -> str:
+    coverage = _format_coverage(
+        indexed_files=indexed_files,
+        catalog_total=catalog_total,
+    )
     if scanned_at is None:
-        return "Last scan: never"
+        if coverage is None:
+            return "Last scan: never"
+        return f"Last scan: never · {coverage} · incomplete"
 
     stamp = datetime.fromtimestamp(scanned_at).strftime("%Y-%m-%d %H:%M")
-    if errors is None:
-        detail = "errors unknown"
-    elif errors == FOLDER_SCAN_INCOMPLETE:
-        detail = "incomplete"
-    elif errors < 0:
-        detail = "scan failed"
-    elif errors == 0:
-        detail = "no errors"
-    elif errors == 1:
-        detail = "1 error"
-    else:
-        detail = f"{errors} errors"
+    detail = _format_status_detail(
+        errors=errors,
+        indexed_files=indexed_files,
+        catalog_total=catalog_total,
+        last_scan_kind=last_scan_kind,
+    )
 
-    line = f"Last scan: {stamp} · {detail}"
+    parts = [f"Last scan: {stamp}"]
+    if coverage is not None:
+        parts.append(coverage)
+    parts.append(detail)
+
+    line = " · ".join(parts)
     if errors is not None and errors != FOLDER_SCAN_INCOMPLETE and (errors > 0 or errors < 0):
         line = f"{line} · {DIAGNOSTICS_SCAN_HINT}"
     return line

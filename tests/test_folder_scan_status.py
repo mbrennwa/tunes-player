@@ -26,14 +26,63 @@ class FolderScanStatusFormatTests(unittest.TestCase):
             "Last scan: never",
         )
 
+    def test_never_scanned_with_partial_index_shows_coverage(self) -> None:
+        line = format_folder_last_scan_line(
+            scanned_at=None,
+            errors=None,
+            indexed_files=12_319,
+            catalog_total=18_050,
+        )
+        self.assertIn("Last scan: never", line)
+        self.assertIn("12,319 / 18,050 files indexed", line)
+        self.assertIn("incomplete", line)
+
+    def test_partial_index_after_incremental_scan(self) -> None:
+        line = format_folder_last_scan_line(
+            scanned_at=1_700_000_000.0,
+            errors=0,
+            indexed_files=12_319,
+            catalog_total=18_050,
+            last_scan_kind="incremental",
+        )
+        self.assertIn("12,319 / 18,050 files indexed", line)
+        self.assertIn("incomplete", line)
+        self.assertNotIn("no errors", line)
+        self.assertNotIn(" · complete", line)
+
+    def test_complete_after_full_scan(self) -> None:
+        line = format_folder_last_scan_line(
+            scanned_at=1_700_000_000.0,
+            errors=0,
+            indexed_files=18_050,
+            catalog_total=18_050,
+            last_scan_kind="full",
+        )
+        self.assertIn("18,050 / 18,050 files indexed", line)
+        self.assertIn("complete", line)
+        self.assertNotIn(DIAGNOSTICS_SCAN_HINT, line)
+
     def test_successful_scan_with_errors_refers_to_diagnostics(self) -> None:
-        line = format_folder_last_scan_line(scanned_at=1_700_000_000.0, errors=3)
+        line = format_folder_last_scan_line(
+            scanned_at=1_700_000_000.0,
+            errors=3,
+            indexed_files=17_900,
+            catalog_total=18_050,
+            last_scan_kind="full",
+        )
         self.assertIn("Last scan:", line)
         self.assertIn("3 errors", line)
         self.assertIn(DIAGNOSTICS_SCAN_HINT, line)
+        self.assertNotIn(" · complete", line)
 
     def test_failed_scan_refers_to_diagnostics(self) -> None:
-        line = format_folder_last_scan_line(scanned_at=1_700_000_000.0, errors=-1)
+        line = format_folder_last_scan_line(
+            scanned_at=1_700_000_000.0,
+            errors=FOLDER_SCAN_FAILED,
+            indexed_files=12_319,
+            catalog_total=18_050,
+            last_scan_kind="full",
+        )
         self.assertIn("scan failed", line)
         self.assertIn(DIAGNOSTICS_SCAN_HINT, line)
 
@@ -41,13 +90,11 @@ class FolderScanStatusFormatTests(unittest.TestCase):
         line = format_folder_last_scan_line(
             scanned_at=1_700_000_000.0,
             errors=FOLDER_SCAN_INCOMPLETE,
+            indexed_files=12_319,
+            catalog_total=18_050,
+            last_scan_kind="full",
         )
         self.assertIn("incomplete", line)
-        self.assertNotIn(DIAGNOSTICS_SCAN_HINT, line)
-
-    def test_clean_scan_has_no_diagnostics_hint(self) -> None:
-        line = format_folder_last_scan_line(scanned_at=1_700_000_000.0, errors=0)
-        self.assertIn("no errors", line)
         self.assertNotIn(DIAGNOSTICS_SCAN_HINT, line)
 
 
@@ -106,17 +153,49 @@ class FolderScanStatusConfigTests(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def test_record_folder_scan_persists(self) -> None:
-        self._config.record_folder_scan(self._folder, errors=2, scanned_at=1_700_000_100.0)
+        self._config.record_folder_scan(
+            self._folder,
+            errors=2,
+            scanned_at=1_700_000_100.0,
+            scan_kind="full",
+            catalog_total=18_050,
+        )
         self._config.load()
         self.assertEqual(self._config.folder_last_scan_at(self._folder), 1_700_000_100.0)
         self.assertEqual(self._config.folder_last_scan_errors(self._folder), 2)
+        self.assertEqual(self._config.folder_catalog_total(self._folder), 18_050)
+        self.assertEqual(self._config.folder_last_scan_kind(self._folder), "full")
+
+    def test_incremental_scan_does_not_update_catalog_total(self) -> None:
+        self._config.record_folder_scan(
+            self._folder,
+            errors=0,
+            scan_kind="full",
+            catalog_total=18_050,
+        )
+        self._config.record_folder_scan(
+            self._folder,
+            errors=0,
+            scan_kind="incremental",
+            catalog_total=99,
+        )
+        self._config.load()
+        self.assertEqual(self._config.folder_catalog_total(self._folder), 18_050)
+        self.assertEqual(self._config.folder_last_scan_kind(self._folder), "incremental")
 
     def test_remove_folder_clears_scan_status(self) -> None:
-        self._config.record_folder_scan(self._folder, errors=0)
+        self._config.record_folder_scan(
+            self._folder,
+            errors=0,
+            scan_kind="full",
+            catalog_total=100,
+        )
         self._config.remove_music_folder(self._folder)
         raw = json.loads(self._config.path.read_text(encoding="utf-8"))
         self.assertEqual(raw.get("music_folder_last_scan_at", {}), {})
         self.assertEqual(raw.get("music_folder_last_scan_errors", {}), {})
+        self.assertEqual(raw.get("music_folder_catalog_total", {}), {})
+        self.assertEqual(raw.get("music_folder_last_scan_kind", {}), {})
 
 
 if __name__ == "__main__":

@@ -348,6 +348,9 @@ class PreferencesWindow(Adw.PreferencesWindow):
         return format_folder_last_scan_line(
             scanned_at=config.folder_last_scan_at(folder),
             errors=config.folder_last_scan_errors(folder),
+            indexed_files=self._service.count_indexed_files(folder),
+            catalog_total=config.folder_catalog_total(folder),
+            last_scan_kind=config.folder_last_scan_kind(folder),
         )
 
     def _folder_scan_error_tooltip(self, folder: str) -> str | None:

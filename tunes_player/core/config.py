@@ -6,6 +6,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from platformdirs import user_config_dir, user_data_dir
 
@@ -57,6 +58,26 @@ def _load_music_folders(raw: object) -> list[str]:
     return folders
 
 
+def _load_folder_str_map(
+    raw: object,
+    folder_set: set[str],
+    *,
+    allowed: set[str] | None = None,
+) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not isinstance(raw, dict):
+        return values
+    for key, value in raw.items():
+        path = _normalize_folder_path(key)
+        if path is None or path not in folder_set:
+            continue
+        text = str(value).strip()
+        if not text or (allowed is not None and text not in allowed):
+            continue
+        values[path] = text
+    return values
+
+
 def _load_folder_int_map(raw: object, folder_set: set[str]) -> dict[str, int]:
     values: dict[str, int] = {}
     if not isinstance(raw, dict):
@@ -90,6 +111,9 @@ class AppConfig:
     # Unix seconds and error count from the most recent completed scan attempt.
     music_folder_last_scan_at: dict[str, float] = field(default_factory=dict)
     music_folder_last_scan_errors: dict[str, int] = field(default_factory=dict)
+    # Tier-1 file count from the most recent completed full scan.
+    music_folder_catalog_total: dict[str, int] = field(default_factory=dict)
+    music_folder_last_scan_kind: dict[str, str] = field(default_factory=dict)
     output_sink_id: str | None = None
     allow_software_volume_fallback: bool = True
     exclusive_device_access: bool = False
@@ -162,6 +186,15 @@ class ConfigManager:
             raw.get("music_folder_last_scan_errors", {}),
             folder_set,
         )
+        catalog_total = _load_folder_int_map(
+            raw.get("music_folder_catalog_total", {}),
+            folder_set,
+        )
+        last_scan_kind = _load_folder_str_map(
+            raw.get("music_folder_last_scan_kind", {}),
+            folder_set,
+            allowed={"full", "incremental"},
+        )
         app_id = raw.get("qobuz_app_id")
         app_secret = raw.get("qobuz_app_secret")
         self._config = AppConfig(
@@ -170,6 +203,8 @@ class ConfigManager:
             music_folder_auto_monitor=auto_monitor,
             music_folder_last_scan_at=last_scan_at,
             music_folder_last_scan_errors=last_scan_errors,
+            music_folder_catalog_total=catalog_total,
+            music_folder_last_scan_kind=last_scan_kind,
             output_sink_id=raw.get("output_sink_id") or None,
             allow_software_volume_fallback=bool(
                 raw.get("allow_software_volume_fallback", True)
@@ -197,6 +232,8 @@ class ConfigManager:
             },
             "music_folder_last_scan_at": dict(self._config.music_folder_last_scan_at),
             "music_folder_last_scan_errors": dict(self._config.music_folder_last_scan_errors),
+            "music_folder_catalog_total": dict(self._config.music_folder_catalog_total),
+            "music_folder_last_scan_kind": dict(self._config.music_folder_last_scan_kind),
             "output_sink_id": self._config.output_sink_id,
             "allow_software_volume_fallback": self._config.allow_software_volume_fallback,
             "exclusive_device_access": self._config.exclusive_device_access,
@@ -244,14 +281,27 @@ class ConfigManager:
         self._config.music_folder_auto_monitor.pop(path, None)
         self._config.music_folder_last_scan_at.pop(path, None)
         self._config.music_folder_last_scan_errors.pop(path, None)
+        self._config.music_folder_catalog_total.pop(path, None)
+        self._config.music_folder_last_scan_kind.pop(path, None)
         self.save()
 
-    def record_folder_scan(self, folder: str, *, errors: int, scanned_at: float | None = None) -> None:
+    def record_folder_scan(
+        self,
+        folder: str,
+        *,
+        errors: int,
+        scanned_at: float | None = None,
+        scan_kind: Literal["full", "incremental"] = "full",
+        catalog_total: int | None = None,
+    ) -> None:
         path = self._canonical_folder_path(folder)
         if path is None:
             return
         self._config.music_folder_last_scan_at[path] = scanned_at if scanned_at is not None else time.time()
         self._config.music_folder_last_scan_errors[path] = int(errors)
+        self._config.music_folder_last_scan_kind[path] = scan_kind
+        if scan_kind == "full" and catalog_total is not None and catalog_total > 0:
+            self._config.music_folder_catalog_total[path] = int(catalog_total)
         self.save()
 
     def folder_last_scan_at(self, folder: str) -> float | None:
@@ -265,6 +315,18 @@ class ConfigManager:
         if path is None:
             return None
         return self._config.music_folder_last_scan_errors.get(path)
+
+    def folder_catalog_total(self, folder: str) -> int | None:
+        path = self._canonical_folder_path(folder)
+        if path is None:
+            return None
+        return self._config.music_folder_catalog_total.get(path)
+
+    def folder_last_scan_kind(self, folder: str) -> str | None:
+        path = self._canonical_folder_path(folder)
+        if path is None:
+            return None
+        return self._config.music_folder_last_scan_kind.get(path)
 
     def set_folder_auto_monitor(self, folder: str, enabled: bool) -> None:
         path = self._canonical_folder_path(folder)
