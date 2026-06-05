@@ -233,9 +233,12 @@ class ReleaseGridView(Gtk.ScrolledWindow):
         on_release_play: Callable[[str], None],
         on_artist_search: Callable[[str], None] | None = None,
         art_loader: ArtLoader | None = None,
+        start: int = 0,
+        batch_size: int = 24,
         small: bool = False,
     ) -> None:
-        for release in releases:
+        end = min(start + batch_size, len(releases))
+        for release in releases[start:end]:
             grid.append_release(
                 release,
                 on_activate=lambda release_id=release.id: on_release_activated(release_id),
@@ -244,7 +247,24 @@ class ReleaseGridView(Gtk.ScrolledWindow):
                 art_loader=art_loader,
                 small=small,
             )
-        grid.sync_layout()
+
+        if end < len(releases):
+            # GLib.idle_add only forwards positional arguments to the callback.
+            GLib.idle_add(
+                ReleaseGridView._populate_releases,
+                grid,
+                releases,
+                on_release_activated,
+                on_release_play,
+                on_artist_search,
+                art_loader,
+                end,
+                batch_size,
+                small,
+            )
+            GLib.idle_add(grid._sync_layout_idle)
+        else:
+            GLib.idle_add(grid._sync_layout_idle)
 
     def _viewport_inner_width(self) -> int:
         width = self.get_width()

@@ -24,6 +24,7 @@ from tunes_player.core.shell_state import (
     ShellState,
     apply_shell_view_filters,
     cached_releases_compatible_with_available,
+    cached_releases_have_quality_tiers,
     ensure_source_enabled,
     filter_releases_to_available_sources,
     prune_enabled_sources,
@@ -76,6 +77,7 @@ _PRESET_LABELS = {
 _LOADING_MESSAGES = {
     ShellBase.NEW_MUSIC: "Loading new releases…",
     ShellBase.SUGGESTION: "Finding suggestions...",
+    ShellBase.ALL_LOCAL: "Loading local library…",
 }
 
 log = logging.getLogger(__name__)
@@ -790,99 +792,97 @@ class TunesWindow(Adw.ApplicationWindow):
             return False
         return cached_count != self._service.store.release_count()
 
-    def _try_restore_persisted_grid(self, state: ShellState) -> bool:
+    def _restore_persisted_releases(self, state: ShellState) -> list[Release] | None:
+        """Deserialize persisted grid rows when still valid (safe off the UI thread)."""
         if state.base == ShellBase.NONE or not state.cached_releases:
-            return False
+            return None
         available = self._available_sources()
         if state.base == ShellBase.ALL_LOCAL and Source.LOCAL not in available:
-            return False
+            return None
         if self._persisted_grid_cache_stale(state):
-            return False
+            return None
         if not cached_releases_compatible_with_available(state.cached_releases, available):
-            return False
+            return None
         releases = releases_from_cache_payloads(state.cached_releases)
         if not releases:
-            return False
+            return None
         releases = filter_releases_to_available_sources(releases, available)
         if not releases:
-            return False
-        releases = self._refresh_cached_release_quality(releases)
-        self._store_selection_cache(state, releases)
-        self._schedule_persist()
-        view_state = self._shell_state
-        filtered = self._filtered_from_cache(view_state)
-        self._show_grid(
-            releases=filtered,
-            empty_message=self._empty_message(view_state, filtered),
-            title=self._grid_title(view_state),
-        )
-        return True
+            return None
+        if not cached_releases_have_quality_tiers(state.cached_releases):
+            releases = self._refresh_cached_release_quality(releases)
+        return releases
 
-    def _reload_grid(self) -> bool:
-        state = self._effective_shell_state()
-
-        if self._try_restore_persisted_grid(state):
-            return False
-
-        if state.base in (ShellBase.NEW_MUSIC, ShellBase.SUGGESTION):
-            self._start_async_load(state.base)
-            return False
-
-        releases = fetch_base_releases(
+    def _load_releases_for_state(self, state: ShellState) -> list[Release]:
+        restored = self._restore_persisted_releases(state)
+        if restored is not None:
+            return restored
+        return fetch_base_releases(
             self._service,
             state.base,
             search_query=state.search_query,
             search_scope=state.search_scope,
         )
-        self._store_selection_cache(state, releases)
-        view_state = self._shell_state
-        filtered = self._filtered_from_cache(view_state)
-        self._show_grid(
-            releases=filtered,
-            empty_message=self._empty_message(view_state, filtered),
-            title=self._grid_title(view_state),
-        )
-        self._schedule_persist()
+
+    def _reload_grid(self) -> bool:
+        state = self._effective_shell_state()
+
+        if state.base == ShellBase.NONE:
+            self._store_selection_cache(state, [])
+            self._show_grid(
+                releases=[],
+                empty_message=self._empty_message(state, []),
+                title=self._grid_title(state),
+            )
+            return False
+
+        self._start_async_load(state)
         return False
 
-    def _start_async_load(self, base: ShellBase) -> None:
+    def _async_load_matches(self, request: ShellState) -> bool:
+        current = self._shell_state
+        if current.base != request.base:
+            return False
+        if request.base == ShellBase.SEARCH:
+            return (
+                current.search_query == request.search_query
+                and current.search_scope == request.search_scope
+            )
+        return True
+
+    def _start_async_load(self, state: ShellState) -> None:
         self._load_token += 1
         token = self._load_token
-        self._show_grid_loading(base)
+        self._show_grid_loading(state)
 
         def work() -> None:
             try:
-                releases = fetch_base_releases(self._service, base)
-                GLib.idle_add(self._finish_async_load, token, base, releases, None)
+                releases = self._load_releases_for_state(state)
+                GLib.idle_add(self._finish_async_load, token, state, releases, None)
             except Exception as exc:
-                log.exception("Shell load failed for %s", base.value)
-                GLib.idle_add(self._finish_async_load, token, base, None, exc)
+                log.exception("Shell load failed for %s", state.base.value)
+                GLib.idle_add(self._finish_async_load, token, state, None, exc)
 
         threading.Thread(target=work, daemon=True).start()
 
     def _finish_async_load(
         self,
         token: int,
-        base: ShellBase,
+        request: ShellState,
         releases: list | None,
         error: BaseException | None,
     ) -> bool:
         if token != self._load_token:
             return False
-        if self._shell_state.base != base:
+        if not self._async_load_matches(request):
             return False
 
-        label = _PRESET_LABELS[base]
+        title = self._grid_title(request)
         if error is not None:
-            show_error_toast(
-                self._toast_overlay,
-                f"Could not load {label}. Check your connection and sign-in.",
-            )
-            view = PlaceholderView(
-                title=label,
-                message=f"Could not load {label}. Try again in a moment.",
-            )
-            self._replace_root_page(title=label, child=view)
+            toast, message = self._async_load_error_copy(request, title=title)
+            show_error_toast(self._toast_overlay, toast)
+            view = PlaceholderView(title=title, message=message)
+            self._replace_root_page(title=title, child=view)
             self._hide_release_count_label()
             return False
 
@@ -892,17 +892,43 @@ class TunesWindow(Adw.ApplicationWindow):
         self._show_grid(
             releases=filtered,
             empty_message=self._empty_message(self._shell_state, filtered),
-            title=label,
+            title=title,
         )
         self._schedule_persist()
         return False
 
-    def _show_grid_loading(self, base: ShellBase) -> None:
-        title = _PRESET_LABELS[base]
-        message = _LOADING_MESSAGES.get(base, f"Loading {title}…")
+    def _async_load_error_copy(
+        self,
+        request: ShellState,
+        *,
+        title: str,
+    ) -> tuple[str, str]:
+        if request.base == ShellBase.SEARCH:
+            return (
+                "Search failed. Check your connection and sign-in.",
+                "Could not complete search. Try again in a moment.",
+            )
+        if request.base == ShellBase.ALL_LOCAL:
+            return (
+                "Could not load your local library.",
+                "Could not load All Local. Try again in a moment.",
+            )
+        return (
+            f"Could not load {title}. Check your connection and sign-in.",
+            f"Could not load {title}. Try again in a moment.",
+        )
+
+    def _loading_message(self, state: ShellState) -> str:
+        if state.base == ShellBase.SEARCH and state.search_query.strip():
+            return f'Searching for “{state.search_query}”…'
+        title = _PRESET_LABELS.get(state.base, "Tunes")
+        return _LOADING_MESSAGES.get(state.base, f"Loading {title}…")
+
+    def _show_grid_loading(self, state: ShellState) -> None:
+        title = self._grid_title(state)
         self._replace_root_page(
             title=title,
-            child=LoadingDiscoverView(message=message),
+            child=LoadingDiscoverView(message=self._loading_message(state)),
         )
         self._sync_release_count_loading()
 
@@ -966,12 +992,7 @@ class TunesWindow(Adw.ApplicationWindow):
     def _catalog_releases_for_message(self, state: ShellState) -> list[Release]:
         if self._cache_matches(state) and self._cached_releases:
             return self._cached_releases
-        return fetch_base_releases(
-            self._service,
-            state.base,
-            search_query=state.search_query,
-            search_scope=state.search_scope,
-        )
+        return []
 
     def _empty_message(self, state: ShellState, releases: list) -> str | None:
         if releases:
@@ -1076,7 +1097,6 @@ class TunesWindow(Adw.ApplicationWindow):
         releases = list(snapshot.releases)
         if not releases and snapshot.state.cached_releases:
             releases = releases_from_cache_payloads(snapshot.state.cached_releases)
-        releases = self._refresh_cached_release_quality(releases)
         self._shell_state = snapshot.state
         self._sync_shell_controls()
         if releases:
