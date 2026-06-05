@@ -188,18 +188,29 @@ class LibraryScanner:
     def purge_folder(self, folder: str) -> int:
         """Remove all indexed files under *folder* from the library database."""
         root = str(Path(folder).resolve())
-        connection = connect(self._db_path)
-        try:
-            connection.execute("BEGIN")
-            removed = self._purge_files_under_roots(connection, [root])
-            prune_orphan_album_art(connection, data_dir=self._data_dir)
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-        return removed
+        last_error: sqlite3.OperationalError | None = None
+        for attempt in range(6):
+            connection = connect(self._db_path)
+            try:
+                connection.execute("BEGIN")
+                removed = self._purge_files_under_roots(connection, [root])
+                prune_orphan_album_art(connection, data_dir=self._data_dir)
+                connection.commit()
+                return removed
+            except sqlite3.OperationalError as exc:
+                connection.rollback()
+                if "locked" not in str(exc).lower() or attempt == 5:
+                    raise
+                last_error = exc
+                time.sleep(0.15 * (attempt + 1))
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+        if last_error is not None:
+            raise last_error
+        return 0
 
     def _should_bump_indexed_at(
         self,

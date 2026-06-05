@@ -128,6 +128,7 @@ class PlayerService:
         self._scan_finished_folder: str | None = None
         self._scan_last_result: ScanResult | None = None
         self._scan_last_error: str | None = None
+        self._pending_scan_folders: list[str] = []
         self._last_recorded_track_id: str | None = None
         self._last_recorded_at_ns = 0
         self._discover_fetch_lock = threading.Lock()
@@ -458,19 +459,77 @@ class PlayerService:
     def notify_sources_changed(self) -> None:
         self._emit("sources_changed")
 
+    def folder_auto_monitor_enabled(self, folder: str) -> bool:
+        return self._config_manager.folder_auto_monitor_enabled(folder)
+
+    def set_folder_auto_monitor(self, folder: str, enabled: bool) -> None:
+        self._config_manager.set_folder_auto_monitor(folder, enabled)
+        if enabled:
+            self.enqueue_scan(folder=folder, priority=True)
+        else:
+            self._cancel_scan_for_folder(folder)
+        self.notify_sources_changed()
+
+    def add_music_folder(self, folder: str, *, auto_monitor: bool = False) -> None:
+        self._config_manager.add_music_folder(folder, auto_monitor=auto_monitor)
+        if auto_monitor:
+            self.enqueue_scan(folder=folder, priority=True)
+        self.notify_sources_changed()
+
+    def enqueue_startup_scans(self) -> None:
+        for folder in self._config_manager.config.music_folders:
+            if self.folder_auto_monitor_enabled(folder):
+                self.enqueue_scan(folder=folder)
+
     def remove_music_folder(self, folder: str) -> int:
         """Drop a configured folder and purge its indexed tracks from the catalog."""
         resolved = str(Path(folder).expanduser().resolve())
+        self._pending_scan_folders = [
+            item
+            for item in self._pending_scan_folders
+            if str(Path(item).expanduser().resolve()) != resolved
+        ]
+        if self.is_scanning():
+            self._terminate_active_scan()
+
         scanner = LibraryScanner(
             db_path=self._config_manager.database_path,
             config=self._config_manager.config,
         )
-        removed = scanner.purge_folder(resolved)
+        self._store.close()
+        try:
+            removed = scanner.purge_folder(resolved)
+        finally:
+            self._store.reconnect()
+
         self._config_manager.remove_music_folder(folder)
-        self._store.reconnect()
         self.notify_library_updated()
         self.notify_sources_changed()
+        self._try_start_scan()
         return removed
+
+    def _terminate_active_scan(self) -> None:
+        process = self._scan_process
+        if process is not None and process.is_alive():
+            process.terminate()
+            process.join(timeout=5.0)
+        self._scan_process = None
+        self._scan_queue = None
+        self._scanning_folder = None
+        self._scan_progress = None
+
+    def _cancel_scan_for_folder(self, folder: str) -> None:
+        resolved = str(Path(folder).expanduser().resolve())
+        self._pending_scan_folders = [
+            item
+            for item in self._pending_scan_folders
+            if str(Path(item).expanduser().resolve()) != resolved
+        ]
+        if self._scanning_folder != resolved or not self.is_scanning():
+            return
+        self._terminate_active_scan()
+        self._emit("scan_finished")
+        self._try_start_scan()
 
     @property
     def scanning_folder(self) -> str | None:
@@ -493,9 +552,38 @@ class PlayerService:
         return self._scan_last_error
 
     def scan_library(self, *, folder: str) -> None:
-        if self._scan_queue is not None:
-            return
+        """Queue a priority scan for one configured folder."""
+        self.enqueue_scan(folder=folder, priority=True)
 
+    def enqueue_scan(self, *, folder: str, priority: bool = False) -> None:
+        resolved = str(Path(folder).expanduser().resolve())
+        configured = {
+            str(Path(item).expanduser().resolve())
+            for item in self._config_manager.config.music_folders
+        }
+        if resolved not in configured:
+            return
+        if self._scanning_folder == resolved:
+            return
+        pending = self._pending_scan_folders
+        if resolved in pending:
+            if priority:
+                pending.remove(resolved)
+                pending.insert(0, resolved)
+            return
+        if priority:
+            pending.insert(0, resolved)
+        else:
+            pending.append(resolved)
+        self._try_start_scan()
+
+    def _try_start_scan(self) -> None:
+        if self._scan_queue is not None or not self._pending_scan_folders:
+            return
+        folder = self._pending_scan_folders.pop(0)
+        self._start_scan(folder)
+
+    def _start_scan(self, folder: str) -> None:
         resolved = str(Path(folder).expanduser().resolve())
         self._scanning_folder = resolved
         self._scan_progress = None
@@ -534,15 +622,24 @@ class PlayerService:
                     errors=message[4],
                     art_indexed=message[5] if len(message) > 5 else 0,
                 )
+                finished_folder = self._scanning_folder
                 self._scan_last_result = result
-                self._scan_finished_folder = self._scanning_folder
+                self._scan_finished_folder = finished_folder
+                if finished_folder is not None:
+                    self._config_manager.record_folder_scan(
+                        finished_folder,
+                        errors=result.errors,
+                    )
                 self._cleanup_scan()
                 self._emit("scan_finished")
                 self.notify_library_updated()
                 return False
             elif kind == "error":
+                finished_folder = self._scanning_folder
                 self._scan_last_error = message[1]
-                self._scan_finished_folder = self._scanning_folder
+                self._scan_finished_folder = finished_folder
+                if finished_folder is not None:
+                    self._config_manager.record_folder_scan(finished_folder, errors=-1)
                 self._cleanup_scan()
                 self._emit("scan_error")
                 return False
@@ -553,8 +650,11 @@ class PlayerService:
         if self._scan_process is not None:
             code = self._scan_process.exitcode
             if code not in (0, None):
+                finished_folder = self._scanning_folder
                 self._scan_last_error = f"Scan process exited with code {code}"
-                self._scan_finished_folder = self._scanning_folder
+                self._scan_finished_folder = finished_folder
+                if finished_folder is not None:
+                    self._config_manager.record_folder_scan(finished_folder, errors=-1)
                 self._cleanup_scan()
                 self._emit("scan_error")
         else:
@@ -568,6 +668,7 @@ class PlayerService:
         self._scan_queue = None
         self._scanning_folder = None
         self._scan_progress = None
+        self._try_start_scan()
 
     def is_scanning(self) -> bool:
         return self._scan_queue is not None

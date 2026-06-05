@@ -37,7 +37,11 @@ from tunes_player.ui.gtk.art import ArtLoader
 from tunes_player.ui.gtk.errors import attach_error_toasts, show_error_toast
 from tunes_player.ui.gtk.now_playing import NowPlayingBar, attach_media_keys
 from tunes_player.ui.gtk.preferences import PreferencesWindow
-from tunes_player.ui.gtk.shell_controller import available_sources, fetch_base_releases
+from tunes_player.ui.gtk.shell_controller import (
+    available_sources,
+    empty_grid_message,
+    fetch_base_releases,
+)
 from tunes_player.ui.gtk.genre_filter_menu import GenreFilterMenu
 from tunes_player.ui.gtk.quality_multi_switch import QualityMultiSwitch
 from tunes_player.ui.gtk.release_sort_switch import ReleaseSortSwitch
@@ -817,6 +821,15 @@ class TunesWindow(Adw.ApplicationWindow):
         )
         self._replace_root_page(title=title, child=view)
 
+    def _catalog_releases_for_message(self, state: ShellState) -> list[Release]:
+        if self._cache_matches(state) and self._cached_releases:
+            return self._cached_releases
+        return fetch_base_releases(
+            self._service,
+            state.base,
+            search_query=state.search_query,
+        )
+
     def _empty_message(self, state: ShellState, releases: list) -> str | None:
         if releases:
             return None
@@ -824,39 +837,14 @@ class TunesWindow(Adw.ApplicationWindow):
             return _ONBOARDING_MESSAGE
         if state.base == ShellBase.NONE:
             return _ONBOARDING_MESSAGE
-        if state.base == ShellBase.SEARCH:
-            if not state.search_query.strip():
-                return _ONBOARDING_MESSAGE
-            return f'No results for “{state.search_query}”.'
-        if state.base == ShellBase.NEW_MUSIC:
-            days = self._service.config.config.new_music_within_days
-            return (
-                f"Nothing new in the last {days} days.\n"
-                "Add music folders or sign in to TIDAL or Qobuz in Settings → Sources."
-            )
-        if state.base == ShellBase.SUGGESTION:
-            return (
-                "Play music to build suggestions from your library, or sign in to "
-                "TIDAL or Qobuz in Settings → Sources."
-            )
-        if state.base == ShellBase.ALL_LOCAL:
-            return (
-                "No local releases.\n"
-                "Add music folders in Settings → Sources and scan your library."
-            )
-        if state.enabled_genres:
-            return "No releases match the selected genres."
-        if state.enabled_release_types:
-            return "No releases match the selected release types."
-        if state.enabled_quality_tiers:
-            return "No releases match the selected quality."
-        if state.enabled_sources:
-            names = ", ".join(
-                source_label(source)
-                for source in sorted(state.enabled_sources, key=lambda s: s.value)
-            )
-            return f"No releases from {names} in this selection."
-        return None
+        if state.base == ShellBase.SEARCH and not state.search_query.strip():
+            return _ONBOARDING_MESSAGE
+        catalog = self._catalog_releases_for_message(state)
+        return empty_grid_message(
+            self._service,
+            state,
+            catalog_count=len(catalog),
+        )
 
     def _grid_title(self, state: ShellState) -> str:
         if state.base == ShellBase.SEARCH and state.search_query.strip():
@@ -1046,7 +1034,8 @@ def run() -> int:
             window.present()
 
         def do_shutdown(self) -> None:  # noqa: N802 — GTK vfunc
-            nonlocal mpris_service
+            nonlocal mpris_service, folder_monitor
+            folder_monitor.stop()
             if mpris_service is not None:
                 mpris_service.stop()
                 mpris_service = None
@@ -1068,6 +1057,11 @@ def run() -> int:
         on_quit=app.quit,
     )
     mpris_service.start()
+
+    from tunes_player.ui.gtk.folder_monitor import FolderMonitorManager
+
+    folder_monitor = FolderMonitorManager(service)
+    folder_monitor.start()
 
     def _poll_playback() -> bool:
         service.poll_playback()

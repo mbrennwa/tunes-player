@@ -3,12 +3,30 @@
 from __future__ import annotations
 
 from tunes_player.core.models import Release, Source
+from tunes_player.core.release_quality import (
+    QUALITY_FILTER_CD,
+    QUALITY_FILTER_COMPRESSED,
+    QUALITY_FILTER_HI_RES,
+)
 from tunes_player.core.services import PlayerService
 from tunes_player.core.shell_state import (
     ShellBase,
+    ShellState,
     apply_shell_view_filters,
     releases_from_recently_added,
 )
+
+_QUALITY_FILTER_LABELS = {
+    QUALITY_FILTER_COMPRESSED: "Compressed",
+    QUALITY_FILTER_CD: "CD",
+    QUALITY_FILTER_HI_RES: "Hi-res",
+}
+
+_SOURCE_FILTER_LABELS = {
+    Source.LOCAL: "Local",
+    Source.TIDAL: "TIDAL",
+    Source.QOBUZ: "Qobuz",
+}
 
 
 def available_sources(service: PlayerService) -> set[Source]:
@@ -20,6 +38,78 @@ def available_sources(service: PlayerService) -> set[Source]:
     if service.qobuz_is_logged_in():
         sources.add(Source.QOBUZ)
     return sources
+
+
+def all_local_empty_message(
+    service: PlayerService,
+    *,
+    has_unfiltered_releases: bool,
+) -> str | None:
+    """Placeholder copy for an empty All Local grid."""
+    if not service.config.config.music_folders:
+        return (
+            "No local music yet.\n"
+            "Add folders in Settings → Sources, then scan your library."
+        )
+    if not has_unfiltered_releases:
+        return (
+            "No local music scanned yet.\n"
+            "Open Settings → Sources and turn on Watch folder for your libraries."
+        )
+    return None
+
+
+def filter_empty_message(state: ShellState) -> str | None:
+    """Explain an empty grid when the catalog still has releases."""
+    if state.enabled_genres:
+        return "No releases match the selected genres."
+    if state.enabled_release_types:
+        return "No releases match the selected release types."
+    if state.enabled_quality_tiers:
+        labels = ", ".join(
+            _QUALITY_FILTER_LABELS.get(tier, tier)
+            for tier in sorted(state.enabled_quality_tiers)
+        )
+        return f"No releases match the selected quality ({labels})."
+    if state.enabled_sources:
+        names = ", ".join(
+            _SOURCE_FILTER_LABELS.get(source, source.value.capitalize())
+            for source in sorted(state.enabled_sources, key=lambda item: item.value)
+        )
+        return f"No releases from {names} in this selection."
+    return None
+
+
+def empty_grid_message(
+    service: PlayerService,
+    state: ShellState,
+    *,
+    catalog_count: int,
+) -> str | None:
+    """User-facing placeholder when a filtered grid has no rows."""
+    if catalog_count > 0:
+        return filter_empty_message(state) or "No releases match the current filters."
+
+    if state.base == ShellBase.ALL_LOCAL:
+        return all_local_empty_message(service, has_unfiltered_releases=False)
+
+    if state.base == ShellBase.NEW_MUSIC:
+        days = service.config.config.new_music_within_days
+        return (
+            f"Nothing new in the last {days} days.\n"
+            "Add music folders or sign in to TIDAL or Qobuz in Settings → Sources."
+        )
+
+    if state.base == ShellBase.SUGGESTION:
+        return (
+            "Play music to build suggestions from your library, or sign in to "
+            "TIDAL or Qobuz in Settings → Sources."
+        )
+
+    if state.base == ShellBase.SEARCH and state.search_query.strip():
+        return f'No results for “{state.search_query}”.'
+
+    return filter_empty_message(state)
 
 
 def fetch_base_releases(

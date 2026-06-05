@@ -173,10 +173,16 @@ class ReleaseGridView(Gtk.ScrolledWindow):
         self._last_window_inner = 0
         self._root_width_notify_id = 0
 
-        if not releases and empty_message:
-            label = Gtk.Label(label=empty_message, vexpand=True, justify=Gtk.Justification.CENTER)
+        if not releases:
+            label = Gtk.Label(
+                label=empty_message or "No releases to show.",
+                vexpand=True,
+                justify=Gtk.Justification.CENTER,
+            )
             label.add_css_class("dim-label")
             label.set_valign(Gtk.Align.CENTER)
+            label.set_wrap(True)
+            label.set_max_width_chars(52)
             label.set_margin_top(24)
             label.set_margin_bottom(24)
             label.set_margin_start(24)

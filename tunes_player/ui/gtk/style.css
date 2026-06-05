@@ -256,3 +256,8 @@ button.artist-link:hover label {
 .tidal-pkce-signin .tidal-pkce-steps list {
   background: none;
 }
+
+/* Settings: folder scan status stays on one line beside watch/remove controls */
+.music-folder-row box.title {
+  min-width: 0;
+}

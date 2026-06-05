@@ -8,14 +8,17 @@ import gi
 
 gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
+gi.require_version("Gio", "2.0")
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.audio_labels import endpoint_dropdown_label
-from tunes_player.core.library import ScanResult
+from tunes_player.core.folder_scan_status import format_folder_last_scan_line
 from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.util import escape_markup, open_external_uri, read_clipboard_text
+
+_FOLDER_WATCH_LABEL = "Watch folder"
 
 
 class PreferencesWindow(Adw.PreferencesWindow):
@@ -25,7 +28,8 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._parent = parent
         self._dynamic_rows: list[Adw.ActionRow] = []
         self._folder_rows: dict[str, Adw.ActionRow] = {}
-        self._folder_scan_buttons: dict[str, Gtk.Button] = {}
+        self._folder_monitor_switches: dict[str, Gtk.Switch] = {}
+        self._updating_monitor_switches = False
         self.set_transient_for(parent)
         self.set_modal(True)
         self.set_title("Settings")
@@ -56,7 +60,10 @@ class PreferencesWindow(Adw.PreferencesWindow):
         sources_page = Adw.PreferencesPage(title="Sources", icon_name="folder-music-symbolic")
         local_group = Adw.PreferencesGroup(
             title="Local files",
-            description="Folders are scanned into the local library index.",
+            description=(
+                "Turn on Watch folder to scan a library path and keep it updated "
+                "in the background when files change."
+            ),
         )
         local_group.add(self._folders_group)
         sources_page.add(local_group)
@@ -229,7 +236,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
             self._folders_group.remove(row)
         self._dynamic_rows.clear()
         self._folder_rows.clear()
-        self._folder_scan_buttons.clear()
+        self._folder_monitor_switches.clear()
 
         folders = self._service.config.config.music_folders
         if not folders:
@@ -245,32 +252,47 @@ class PreferencesWindow(Adw.PreferencesWindow):
                 folder_key = self._folder_key(folder)
                 row = Adw.ActionRow(
                     title=escape_markup(folder),
-                    subtitle="Local music library",
+                    subtitle=self._folder_row_subtitle(folder),
                 )
-                scan_button = Gtk.Button(label="Scan")
-                scan_button.set_valign(Gtk.Align.CENTER)
-                scan_button.connect(
-                    "clicked",
-                    lambda _btn, path=folder: self._on_scan_folder_clicked(path),
+                row.add_css_class("music-folder-row")
+                row.set_subtitle_lines(1)
+                monitor_switch = Gtk.Switch()
+                monitor_switch.set_valign(Gtk.Align.CENTER)
+                monitor_switch.set_tooltip_text(
+                    "Scan this folder and keep it updated in the background",
                 )
+                monitor_switch.set_active(self._service.folder_auto_monitor_enabled(folder))
+                monitor_switch.connect(
+                    "notify::active",
+                    self._on_monitor_toggled,
+                    folder,
+                )
+                monitor_label = Gtk.Label(label=_FOLDER_WATCH_LABEL)
+                monitor_label.add_css_class("dim-label")
+                monitor_label.set_mnemonic_widget(monitor_switch)
+                monitor_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+                monitor_box.set_valign(Gtk.Align.CENTER)
+                monitor_box.append(monitor_label)
+                monitor_box.append(monitor_switch)
                 remove_button = Gtk.Button(icon_name="user-trash-symbolic")
                 remove_button.set_valign(Gtk.Align.CENTER)
+                remove_button.set_tooltip_text("Remove folder")
                 remove_button.connect("clicked", lambda _btn, path=folder: self._remove_folder(path))
-                btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-                btn_box.set_valign(Gtk.Align.CENTER)
-                btn_box.append(scan_button)
-                btn_box.append(remove_button)
-                row.add_suffix(btn_box)
+                controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+                controls.set_valign(Gtk.Align.CENTER)
+                controls.append(monitor_box)
+                controls.append(remove_button)
+                row.add_suffix(controls)
                 self._folders_group.add(row)
                 self._dynamic_rows.append(row)
                 self._folder_rows[folder_key] = row
-                self._folder_scan_buttons[folder_key] = scan_button
+                self._folder_monitor_switches[folder_key] = monitor_switch
 
         self._sync_scan_ui()
 
     def _on_add_folder_clicked(self, *_args: object) -> None:
         dialog = Gtk.FileDialog(title="Choose Music Folder")
-        dialog.select_folder(self._parent, None, self._on_folder_selected)
+        dialog.select_folder(self, None, self._on_folder_selected)
 
     def _on_folder_selected(self, dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
         try:
@@ -280,9 +302,68 @@ class PreferencesWindow(Adw.PreferencesWindow):
         path = folder.get_path()
         if path is None:
             return
-        self._service.config.add_music_folder(path)
+        self._prompt_auto_monitor(path)
+
+    def _prompt_auto_monitor(self, path: str) -> None:
+        dialog = Adw.AlertDialog(
+            heading="Watch this folder?",
+            body=(
+                "Tunes can scan this folder now and keep it updated in the "
+                "background when files are added, removed, or changed."
+            ),
+        )
+        dialog.add_response("no", "Not now")
+        dialog.add_response("yes", "Watch folder")
+        dialog.set_default_response("yes")
+        dialog.set_close_response("no")
+        dialog.connect("response", self._on_auto_monitor_response, path)
+        dialog.present(self)
+
+    def _on_auto_monitor_response(
+        self,
+        _dialog: Adw.AlertDialog,
+        response: str,
+        path: str,
+    ) -> None:
+        auto_monitor = response == "yes"
+        self._service.add_music_folder(path, auto_monitor=auto_monitor)
         self._reload_folders()
-        self._service.notify_sources_changed()
+
+    def _folder_last_scan_line(self, folder: str) -> str:
+        config = self._service.config
+        return format_folder_last_scan_line(
+            scanned_at=config.folder_last_scan_at(folder),
+            errors=config.folder_last_scan_errors(folder),
+        )
+
+    def _format_scan_progress(self, current: int, total: int, path: str) -> str:
+        if total == 0:
+            text = path or "Discovering files…"
+        else:
+            name = path.rsplit("/", 1)[-1]
+            text = f"Scanning {current}/{total}: {name}"
+        return escape_markup(text)
+
+    def _folder_row_subtitle(self, folder: str) -> str:
+        if (
+            self._service.is_scanning()
+            and self._service.scanning_folder == folder
+        ):
+            progress = self._service.scan_progress
+            if progress is not None:
+                return self._format_scan_progress(*progress)
+            return "Starting scan…"
+        return self._folder_last_scan_line(folder)
+
+    def _on_monitor_toggled(
+        self,
+        switch: Gtk.Switch,
+        _pspec: object,
+        folder: str,
+    ) -> None:
+        if self._updating_monitor_switches:
+            return
+        self._service.set_folder_auto_monitor(folder, switch.get_active())
 
     def _remove_folder(self, folder: str) -> None:
         self._service.remove_music_folder(folder)
@@ -407,74 +488,20 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._sync_software_volume_row()
         self._sync_exclusive_row()
 
-    def _on_scan_folder_clicked(self, folder: str) -> None:
-        if self._service.is_scanning():
-            folder_key = self._folder_key(folder)
-            active_folder = self._service.scanning_folder
-            if active_folder is not None and folder_key != active_folder:
-                row = self._folder_rows.get(folder_key)
-                if row is not None:
-                    row.set_subtitle("Another folder is scanning")
-            return
-        folder_key = self._folder_key(folder)
-        row = self._folder_rows.get(folder_key)
-        if row is not None:
-            row.set_subtitle("Starting scan…")
-        scan_button = self._folder_scan_buttons.get(folder_key)
-        if scan_button is not None:
-            scan_button.set_sensitive(False)
-        self._service.scan_library(folder=folder)
-
-    def _format_scan_result(self, result: ScanResult) -> str:
-        parts = [
-            f"indexed {result.indexed}",
-            f"skipped {result.skipped}",
-            f"removed {result.removed}",
-            f"errors {result.errors}",
-        ]
-        if result.art_indexed:
-            parts.insert(1, f"art {result.art_indexed}")
-        return f"Done — {', '.join(parts)}"
-
-    def _format_scan_progress(self, current: int, total: int, path: str) -> str:
-        if total == 0:
-            text = path or "Discovering files…"
-        else:
-            name = path.rsplit("/", 1)[-1]
-            text = f"Scanning {current}/{total}: {name}"
-        return escape_markup(text)
-
     def _sync_scan_ui(self) -> None:
-        scanning = self._service.is_scanning()
-        active_folder = self._service.scanning_folder
-        progress = self._service.scan_progress
-        finished_folder = self._service.scan_finished_folder
-        last_result = self._service.scan_last_result
-        last_error = self._service.scan_last_error
-
         for folder_key, row in self._folder_rows.items():
-            scan_button = self._folder_scan_buttons.get(folder_key)
-            if scan_button is None:
+            monitor_switch = self._folder_monitor_switches.get(folder_key)
+            if monitor_switch is None:
                 continue
 
-            if scanning and active_folder == folder_key:
-                scan_button.set_sensitive(False)
-                if progress is not None:
-                    row.set_subtitle(self._format_scan_progress(*progress))
-                else:
-                    row.set_subtitle("Starting scan…")
-            elif scanning:
-                scan_button.set_sensitive(False)
-                row.set_subtitle("Another folder is scanning")
-            elif finished_folder == folder_key and last_result is not None:
-                scan_button.set_sensitive(True)
-                row.set_subtitle(self._format_scan_result(last_result))
-            elif finished_folder == folder_key and last_error is not None:
-                scan_button.set_sensitive(True)
-                row.set_subtitle(escape_markup(f"Scan failed: {last_error}"))
-            else:
-                scan_button.set_sensitive(True)
-                row.set_subtitle("Local music library")
+            self._updating_monitor_switches = True
+            try:
+                monitor_switch.set_active(
+                    self._service.folder_auto_monitor_enabled(folder_key)
+                )
+            finally:
+                self._updating_monitor_switches = False
+            row.set_subtitle(self._folder_row_subtitle(folder_key))
 
     def _copy_text(self, text: str) -> None:
         display = Gdk.Display.get_default()
