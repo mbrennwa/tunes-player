@@ -246,6 +246,114 @@ class LibraryScannerScopedTests(unittest.TestCase):
         self.assertEqual(len(paths), 2)
         self.assertEqual(track_count, 2)
 
+    def test_scan_records_file_parse_errors(self) -> None:
+        scan_root = self._folder_a / "error_case"
+        scan_root.mkdir()
+        bad = scan_root / "broken.flac"
+        bad.write_bytes(b"not flac")
+        good = scan_root / "good.flac"
+        good.write_bytes(b"")
+
+        def fake_parse(path: Path, mtime_ns: int, size_bytes: int) -> _ParsedTrack:
+            if path.name == "broken.flac":
+                raise ValueError("invalid FLAC header")
+            path_str = str(path.resolve())
+            return _ParsedTrack(
+                path=path_str,
+                mtime_ns=mtime_ns,
+                size_bytes=size_bytes,
+                codec="flac",
+                duration_sec=None,
+                sample_rate=None,
+                bit_depth=None,
+                channels=None,
+                title=path.stem,
+                artist="Artist",
+                album_artist="Artist",
+                album="Album",
+                release_id=ids.release_id("Artist", "Album"),
+                is_synthetic=False,
+                disc_number=None,
+                track_number=None,
+                year=None,
+                genre=None,
+                total_tracks=None,
+                release_type_tag=None,
+            )
+
+        with (
+            patch("tunes_player.core.library.scanner._parse_file", side_effect=fake_parse),
+            patch("tunes_player.core.library.scanner.index_album_art_for_file"),
+            patch("tunes_player.core.library.scanner.backfill_missing_album_art", return_value=0),
+            patch("tunes_player.core.library.scanner.prune_orphan_album_art"),
+        ):
+            result = self._scanner.scan(scan_folders=[str(scan_root.resolve())])
+
+        self.assertEqual(result.errors, 1)
+        self.assertEqual(result.indexed, 1)
+        self.assertEqual(len(result.file_errors), 1)
+        self.assertIn("broken.flac", result.file_errors[0].path)
+        self.assertEqual(result.file_errors[0].reason, "invalid FLAC header")
+
+    def test_scan_continues_after_indexing_failure(self) -> None:
+        scan_root = self._folder_a / "index_error_case"
+        scan_root.mkdir()
+        bad = scan_root / "bad.flac"
+        bad.write_bytes(b"")
+        good = scan_root / "good.flac"
+        good.write_bytes(b"")
+
+        def fake_parse(path: Path, mtime_ns: int, size_bytes: int) -> _ParsedTrack:
+            path_str = str(path.resolve())
+            return _ParsedTrack(
+                path=path_str,
+                mtime_ns=mtime_ns,
+                size_bytes=size_bytes,
+                codec="flac",
+                duration_sec=None,
+                sample_rate=None,
+                bit_depth=None,
+                channels=None,
+                title=path.stem,
+                artist="Artist",
+                album_artist="Artist",
+                album="Album",
+                release_id=ids.release_id("Artist", "Album"),
+                is_synthetic=False,
+                disc_number=None,
+                track_number=None,
+                year=None,
+                genre=None,
+                total_tracks=None,
+                release_type_tag=None,
+            )
+
+        original_insert_track = LibraryScanner._insert_track
+
+        def failing_insert_track(
+            connection,
+            parsed: _ParsedTrack,
+            file_id: int,
+        ) -> None:
+            if parsed.path.endswith("bad.flac"):
+                raise RuntimeError("database write failed")
+            original_insert_track(connection, parsed, file_id)
+
+        with (
+            patch("tunes_player.core.library.scanner._parse_file", side_effect=fake_parse),
+            patch.object(LibraryScanner, "_insert_track", side_effect=failing_insert_track),
+            patch("tunes_player.core.library.scanner.index_album_art_for_file"),
+            patch("tunes_player.core.library.scanner.backfill_missing_album_art", return_value=0),
+            patch("tunes_player.core.library.scanner.prune_orphan_album_art"),
+        ):
+            result = self._scanner.scan(scan_folders=[str(scan_root.resolve())])
+
+        self.assertEqual(result.errors, 1)
+        self.assertEqual(result.indexed, 1)
+        self.assertEqual(len(result.file_errors), 1)
+        self.assertIn("bad.flac", result.file_errors[0].path)
+        self.assertEqual(result.file_errors[0].reason, "database write failed")
+
 
 if __name__ == "__main__":
     unittest.main()

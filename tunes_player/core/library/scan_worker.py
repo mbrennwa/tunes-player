@@ -36,8 +36,17 @@ def run_library_scan(
         queue.put(("error", str(exc)))
         return
 
+    file_errors = tuple((item.path, item.reason) for item in result.file_errors)
     queue.put(
-        ("done", result.indexed, result.removed, result.skipped, result.errors, result.art_indexed),
+        (
+            "done",
+            result.indexed,
+            result.removed,
+            result.skipped,
+            result.errors,
+            result.art_indexed,
+            file_errors,
+        ),
     )
 
 

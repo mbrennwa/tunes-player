@@ -16,7 +16,12 @@ from tunes_player.core.backends.qobuz import QobuzClient, QobuzUnavailableError
 from tunes_player.core.backends.resolve import resolve_track
 from tunes_player.core.backends.tidal import TidalClient, TidalUnavailableError
 from tunes_player.core.config import ConfigManager
-from tunes_player.core.folder_scan_status import FOLDER_SCAN_FAILED, FOLDER_SCAN_INCOMPLETE
+from tunes_player.core.folder_scan_status import (
+    FOLDER_SCAN_FAILED,
+    FOLDER_SCAN_INCOMPLETE,
+    log_folder_scan_failure,
+)
+from tunes_player.core.logging_config import diagnostics_log_path
 from tunes_player.core.home import (
     NEW_MUSIC_LOCAL_LIMIT,
     NEW_MUSIC_MERGE_LIMIT,
@@ -26,6 +31,7 @@ from tunes_player.core.home import (
     suggestion_added_ns,
 )
 from tunes_player.core.library import LibraryScanner, LibraryStore, ScanResult
+from tunes_player.core.library.scanner import ScanFileError
 from tunes_player.core.library.scan_worker import create_scan_process
 from tunes_player.core.models import Album, Release, Source, Track
 from tunes_player.core.playback.engine import EngineEvent, PlaybackEngine
@@ -629,17 +635,29 @@ class PlayerService:
                 self._scan_progress = (message[1], message[2], message[3])
                 self._emit("scan_progress")
             elif kind == "done":
+                file_errors = tuple(
+                    ScanFileError(path, reason)
+                    for path, reason in (message[6] if len(message) > 6 else ())
+                )
                 result = ScanResult(
                     indexed=message[1],
                     removed=message[2],
                     skipped=message[3],
                     errors=message[4],
                     art_indexed=message[5] if len(message) > 5 else 0,
+                    file_errors=file_errors,
                 )
                 finished_folder = self._scanning_folder
                 self._scan_last_result = result
                 self._scan_finished_folder = finished_folder
                 if finished_folder is not None:
+                    if result.errors > 0 or file_errors:
+                        log_folder_scan_failure(
+                            finished_folder,
+                            errors=result.errors,
+                            log_path=diagnostics_log_path(self._config_manager.data_dir),
+                            file_errors=file_errors,
+                        )
                     self._config_manager.record_folder_scan(
                         finished_folder,
                         errors=result.errors,
@@ -653,7 +671,16 @@ class PlayerService:
                 self._scan_last_error = message[1]
                 self._scan_finished_folder = finished_folder
                 if finished_folder is not None:
-                    self._config_manager.record_folder_scan(finished_folder, errors=-1)
+                    log_folder_scan_failure(
+                        finished_folder,
+                        errors=FOLDER_SCAN_FAILED,
+                        log_path=diagnostics_log_path(self._config_manager.data_dir),
+                        fatal_error=message[1],
+                    )
+                    self._config_manager.record_folder_scan(
+                        finished_folder,
+                        errors=FOLDER_SCAN_FAILED,
+                    )
                 self._cleanup_scan()
                 self._emit("scan_error")
                 return False
@@ -668,6 +695,12 @@ class PlayerService:
                 self._scan_last_error = f"Scan process exited with code {code}"
                 self._scan_finished_folder = finished_folder
                 if finished_folder is not None:
+                    log_folder_scan_failure(
+                        finished_folder,
+                        errors=FOLDER_SCAN_FAILED,
+                        log_path=diagnostics_log_path(self._config_manager.data_dir),
+                        fatal_error=self._scan_last_error,
+                    )
                     self._config_manager.record_folder_scan(
                         finished_folder,
                         errors=FOLDER_SCAN_FAILED,

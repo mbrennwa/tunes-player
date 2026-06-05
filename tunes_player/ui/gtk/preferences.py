@@ -14,7 +14,11 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.audio_labels import endpoint_dropdown_label
-from tunes_player.core.folder_scan_status import format_folder_last_scan_line
+from tunes_player.core.folder_scan_status import (
+    FOLDER_SCAN_INCOMPLETE,
+    format_folder_last_scan_line,
+)
+from tunes_player.core.logging_config import diagnostics_log_path
 from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.util import escape_markup, open_external_uri, read_clipboard_text
 
@@ -44,16 +48,25 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._add_row.set_activatable_widget(add_button)
         self._folders_group.add(self._add_row)
 
-        log_path = service.config.data_dir / "tunes-player.log"
-        self._log_row = Adw.ActionRow(title="Log file", subtitle=str(log_path))
+        self._diagnostics_log_path = diagnostics_log_path(service.config.data_dir)
+        self._log_row = Adw.ActionRow(
+            title="Log file",
+            subtitle=str(self._diagnostics_log_path),
+        )
         copy_log_btn = Gtk.Button(label="Copy path")
         copy_log_btn.set_valign(Gtk.Align.CENTER)
-        copy_log_btn.connect("clicked", lambda *_: self._copy_log_path(log_path))
+        copy_log_btn.connect(
+            "clicked",
+            lambda *_: self._copy_log_path(self._diagnostics_log_path),
+        )
         self._log_row.add_suffix(copy_log_btn)
         self._log_row.set_activatable_widget(copy_log_btn)
         diagnostics_group = Adw.PreferencesGroup(
             title="Diagnostics",
-            description="Errors and warnings are appended to this file while Tunes runs.",
+            description=(
+                "Errors, warnings, and library scan failures are appended to this "
+                "file while Tunes runs."
+            ),
         )
         diagnostics_group.add(self._log_row)
 
@@ -256,6 +269,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
                 )
                 row.add_css_class("music-folder-row")
                 row.set_subtitle_lines(1)
+                row.set_tooltip_text(self._folder_scan_error_tooltip(folder_key))
                 monitor_switch = Gtk.Switch()
                 monitor_switch.set_valign(Gtk.Align.CENTER)
                 monitor_switch.set_tooltip_text(
@@ -334,6 +348,15 @@ class PreferencesWindow(Adw.PreferencesWindow):
         return format_folder_last_scan_line(
             scanned_at=config.folder_last_scan_at(folder),
             errors=config.folder_last_scan_errors(folder),
+        )
+
+    def _folder_scan_error_tooltip(self, folder: str) -> str | None:
+        errors = self._service.config.folder_last_scan_errors(folder)
+        if errors is None or errors == 0 or errors == FOLDER_SCAN_INCOMPLETE:
+            return None
+        return (
+            f"Scan error details are in the diagnostics log:\n"
+            f"{self._diagnostics_log_path}"
         )
 
     def _format_scan_progress(self, current: int, total: int, path: str) -> str:
@@ -510,7 +533,15 @@ class PreferencesWindow(Adw.PreferencesWindow):
                 )
             finally:
                 self._updating_monitor_switches = False
-            row.set_subtitle(self._folder_row_subtitle(folder_key))
+            subtitle = self._folder_row_subtitle(folder_key)
+            row.set_subtitle(subtitle)
+            if (
+                self._service.is_scanning()
+                and self._service.scanning_folder == folder_key
+            ):
+                row.set_tooltip_text(None)
+            else:
+                row.set_tooltip_text(self._folder_scan_error_tooltip(folder_key))
 
     def _copy_text(self, text: str) -> None:
         display = Gdk.Display.get_default()

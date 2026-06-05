@@ -121,11 +121,16 @@ def _release_grid_playable(release: Release) -> bool:
     return release.source != Source.LOCAL
 
 
+def _track_count_label(count: int) -> str:
+    noun = "track" if count == 1 else "tracks"
+    return f"{count} {noun}"
+
+
 def _format_release_track_count(release: Release) -> str | None:
     if release.expected_track_count and release.track_count < release.expected_track_count:
         return f"{release.track_count} / {release.expected_track_count} tracks"
     if release.track_count:
-        return f"{release.track_count} tracks"
+        return _track_count_label(release.track_count)
     return None
 
 

@@ -9,12 +9,17 @@ from pathlib import Path
 
 _LOG = logging.getLogger(__name__)
 _APP_LOGGER = "tunes_player"
+LOG_FILE_NAME = "tunes-player.log"
+
+
+def diagnostics_log_path(data_dir: Path) -> Path:
+    return data_dir / LOG_FILE_NAME
 
 
 def configure_logging(data_dir: Path) -> Path:
     """Configure file logging and optional stderr output. Returns the log file path."""
     data_dir.mkdir(parents=True, exist_ok=True)
-    log_path = data_dir / "tunes-player.log"
+    log_path = diagnostics_log_path(data_dir)
 
     level_name = os.environ.get("TUNES_LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)

@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from tunes_player.core.config import AppConfig
 from tunes_player.core.library import ids
@@ -20,6 +21,16 @@ from tunes_player.core.library.db import connect
 from tunes_player.core.library.formats import codec_for_path, has_tier1_extension, is_tier1_path
 
 ProgressCallback = Callable[[int, int, str], None]
+_CandidateOutcome = Literal["indexed", "skipped", "error"]
+
+
+_MAX_RECORDED_FILE_ERRORS = 20
+
+
+@dataclass(frozen=True, slots=True)
+class ScanFileError:
+    path: str
+    reason: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +40,7 @@ class ScanResult:
     skipped: int
     errors: int
     art_indexed: int = 0
+    file_errors: tuple[ScanFileError, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +99,7 @@ class LibraryScanner:
         indexed = 0
         skipped = 0
         errors = 0
+        file_errors: list[ScanFileError] = []
         total = len(candidates)
         last_progress_at = 0.0
 
@@ -107,62 +120,21 @@ class LibraryScanner:
                         progress(index, total, str(path))
                         last_progress_at = now
 
-                if not is_tier1_path(path):
-                    skipped += 1
-                    continue
-
-                try:
-                    stat = path.stat()
-                except OSError:
-                    errors += 1
-                    continue
-
-                path_str = str(path.resolve())
-                seen_paths.add(path_str)
-
-                existing = connection.execute(
-                    "SELECT id, mtime_ns, size_bytes, indexed_at_ns FROM files WHERE path = ?",
-                    (path_str,),
-                ).fetchone()
-                if (
-                    existing is not None
-                    and int(existing["mtime_ns"]) == stat.st_mtime_ns
-                    and int(existing["size_bytes"]) == stat.st_size
-                ):
-                    if self._should_bump_indexed_at(
-                        path_str=path_str,
-                        indexed_at_ns=int(existing["indexed_at_ns"]),
-                        mtime_ns=int(existing["mtime_ns"]),
-                        file_mtime_ns=stat.st_mtime_ns,
-                    ):
-                        connection.execute(
-                            "UPDATE files SET indexed_at_ns = ? WHERE id = ?",
-                            (time.time_ns(), int(existing["id"])),
-                        )
-                    skipped += 1
-                    continue
-
-                try:
-                    parsed = _parse_file(path, stat.st_mtime_ns, stat.st_size)
-                except Exception:
-                    errors += 1
-                    continue
-
-                track_pk = ids.track_id(path_str)
-                connection.execute("DELETE FROM tracks WHERE id = ?", (track_pk,))
-                connection.execute("DELETE FROM files WHERE path = ?", (path_str,))
-
-                file_id = self._insert_file(connection, parsed, indexed_at_ns=time.time_ns())
-                self._insert_track(connection, parsed, file_id)
-                index_album_art_for_file(
+                outcome, path_str = self._process_candidate(
                     connection,
-                    data_dir=self._data_dir,
-                    path=Path(parsed.path),
-                    album_artist=parsed.album_artist,
-                    album=parsed.album,
+                    path,
+                    file_errors=file_errors,
                 )
-                indexed += 1
+                if outcome == "skipped":
+                    skipped += 1
+                    continue
+                if path_str is not None:
+                    seen_paths.add(path_str)
+                if outcome == "error":
+                    errors += 1
+                    continue
 
+                indexed += 1
                 if indexed % self._BATCH_SIZE == 0:
                     connection.commit()
                     connection.execute("BEGIN")
@@ -183,7 +155,91 @@ class LibraryScanner:
             skipped=skipped,
             errors=errors,
             art_indexed=art_indexed,
+            file_errors=tuple(file_errors),
         )
+
+    @staticmethod
+    def _record_file_error(
+        file_errors: list[ScanFileError],
+        path_str: str,
+        reason: str,
+    ) -> None:
+        if len(file_errors) >= _MAX_RECORDED_FILE_ERRORS:
+            return
+        text = reason.strip() or "unknown error"
+        file_errors.append(ScanFileError(path_str, text))
+
+    def _process_candidate(
+        self,
+        connection: sqlite3.Connection,
+        path: Path,
+        *,
+        file_errors: list[ScanFileError],
+    ) -> tuple[_CandidateOutcome, str | None]:
+        if not is_tier1_path(path):
+            return "skipped", None
+
+        path_str = str(path.resolve())
+        try:
+            stat = path.stat()
+        except OSError as exc:
+            self._record_file_error(
+                file_errors,
+                path_str,
+                f"could not read file ({exc})",
+            )
+            return "error", path_str
+
+        existing = connection.execute(
+            "SELECT id, mtime_ns, size_bytes, indexed_at_ns FROM files WHERE path = ?",
+            (path_str,),
+        ).fetchone()
+        if (
+            existing is not None
+            and int(existing["mtime_ns"]) == stat.st_mtime_ns
+            and int(existing["size_bytes"]) == stat.st_size
+        ):
+            if self._should_bump_indexed_at(
+                path_str=path_str,
+                indexed_at_ns=int(existing["indexed_at_ns"]),
+                mtime_ns=int(existing["mtime_ns"]),
+                file_mtime_ns=stat.st_mtime_ns,
+            ):
+                connection.execute(
+                    "UPDATE files SET indexed_at_ns = ? WHERE id = ?",
+                    (time.time_ns(), int(existing["id"])),
+                )
+            return "skipped", path_str
+
+        try:
+            parsed = _parse_file(path, stat.st_mtime_ns, stat.st_size)
+        except Exception as exc:
+            reason = str(exc).strip() or type(exc).__name__
+            self._record_file_error(file_errors, path_str, reason)
+            return "error", path_str
+
+        connection.execute("SAVEPOINT index_file")
+        try:
+            track_pk = ids.track_id(path_str)
+            connection.execute("DELETE FROM tracks WHERE id = ?", (track_pk,))
+            connection.execute("DELETE FROM files WHERE path = ?", (path_str,))
+            file_id = self._insert_file(connection, parsed, indexed_at_ns=time.time_ns())
+            self._insert_track(connection, parsed, file_id)
+            index_album_art_for_file(
+                connection,
+                data_dir=self._data_dir,
+                path=Path(parsed.path),
+                album_artist=parsed.album_artist,
+                album=parsed.album,
+            )
+            connection.execute("RELEASE SAVEPOINT index_file")
+        except Exception as exc:
+            connection.execute("ROLLBACK TO SAVEPOINT index_file")
+            reason = str(exc).strip() or type(exc).__name__
+            self._record_file_error(file_errors, path_str, reason)
+            return "error", path_str
+
+        return "indexed", path_str
 
     def purge_folder(self, folder: str) -> int:
         """Remove all indexed files under *folder* from the library database."""

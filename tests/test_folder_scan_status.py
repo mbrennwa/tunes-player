@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 import unittest
 from pathlib import Path
 
 from tunes_player.core.config import ConfigManager
 from tunes_player.core.folder_scan_status import (
+    DIAGNOSTICS_SCAN_HINT,
+    FOLDER_SCAN_FAILED,
     FOLDER_SCAN_INCOMPLETE,
     format_folder_last_scan_line,
+    log_folder_scan_failure,
 )
+from tunes_player.core.library.scanner import ScanFileError
 
 
 class FolderScanStatusFormatTests(unittest.TestCase):
@@ -21,22 +26,72 @@ class FolderScanStatusFormatTests(unittest.TestCase):
             "Last scan: never",
         )
 
-    def test_successful_scan_with_errors(self) -> None:
+    def test_successful_scan_with_errors_refers_to_diagnostics(self) -> None:
         line = format_folder_last_scan_line(scanned_at=1_700_000_000.0, errors=3)
         self.assertIn("Last scan:", line)
         self.assertIn("3 errors", line)
+        self.assertIn(DIAGNOSTICS_SCAN_HINT, line)
 
-    def test_failed_scan(self) -> None:
+    def test_failed_scan_refers_to_diagnostics(self) -> None:
         line = format_folder_last_scan_line(scanned_at=1_700_000_000.0, errors=-1)
         self.assertIn("scan failed", line)
+        self.assertIn(DIAGNOSTICS_SCAN_HINT, line)
 
-    def test_incomplete_scan(self) -> None:
+    def test_incomplete_scan_does_not_refer_to_diagnostics(self) -> None:
         line = format_folder_last_scan_line(
             scanned_at=1_700_000_000.0,
             errors=FOLDER_SCAN_INCOMPLETE,
         )
         self.assertIn("incomplete", line)
-        self.assertNotIn("scan failed", line)
+        self.assertNotIn(DIAGNOSTICS_SCAN_HINT, line)
+
+    def test_clean_scan_has_no_diagnostics_hint(self) -> None:
+        line = format_folder_last_scan_line(scanned_at=1_700_000_000.0, errors=0)
+        self.assertIn("no errors", line)
+        self.assertNotIn(DIAGNOSTICS_SCAN_HINT, line)
+
+
+class FolderScanStatusLoggingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._records: list[str] = []
+        self._handler = logging.Handler()
+        self._handler.emit = lambda record: self._records.append(record.getMessage())
+        self._logger = logging.getLogger("tunes_player.scan")
+        self._logger.addHandler(self._handler)
+        self._logger.setLevel(logging.ERROR)
+
+    def tearDown(self) -> None:
+        self._logger.removeHandler(self._handler)
+
+    def test_logs_fatal_scan_failure(self) -> None:
+        log_path = Path("/tmp/tunes-player.log")
+        log_folder_scan_failure(
+            "/music",
+            errors=FOLDER_SCAN_FAILED,
+            log_path=log_path,
+            fatal_error="database locked",
+        )
+        joined = "\n".join(self._records)
+        self.assertIn("/music", joined)
+        self.assertIn("database locked", joined)
+        self.assertIn(str(log_path), joined)
+
+    def test_logs_per_file_errors(self) -> None:
+        log_path = Path("/tmp/tunes-player.log")
+        log_folder_scan_failure(
+            "/music",
+            errors=2,
+            log_path=log_path,
+            file_errors=(
+                ScanFileError("/music/a.flac", "invalid FLAC"),
+                ScanFileError("/music/b.flac", "permission denied"),
+            ),
+        )
+        joined = "\n".join(self._records)
+        self.assertIn("2 file error(s)", joined)
+        self.assertIn("/music/a.flac: invalid FLAC", joined)
+        self.assertIn("/music/b.flac: permission denied", joined)
+        self.assertIn(str(log_path), joined)
 
 
 class FolderScanStatusConfigTests(unittest.TestCase):
