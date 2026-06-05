@@ -20,6 +20,7 @@ from tunes_player.ui.gtk.album_grid import (
     album_grid_layout,
     album_grid_min_content_width,
     album_grid_resolve_inner_width,
+    album_grid_visible_card_indices,
 )
 from tunes_player.ui.gtk.art import ArtLoader
 from tunes_player.ui.gtk.util import (
@@ -176,6 +177,9 @@ class ReleaseGridView(Gtk.ScrolledWindow):
         self._last_viewport_inner = 0
         self._last_window_inner = 0
         self._root_width_notify_id = 0
+        self._art_loader = art_loader
+        self._art_sync_pending = False
+        self._vadjustment_notify_id = 0
 
         if not releases:
             label = Gtk.Label(
@@ -206,6 +210,9 @@ class ReleaseGridView(Gtk.ScrolledWindow):
         shell.append(grid)
         self.set_child(shell)
         self._tile_grid = grid
+        grid._on_layout_changed = self._schedule_visible_art_sync
+        if art_loader is not None:
+            grid._art_loader = art_loader
         self.connect("notify::width", self._on_viewport_width_changed)
         self.connect("map", self._on_view_map)
         self.connect("unmap", self._on_view_unmap)
@@ -223,6 +230,39 @@ class ReleaseGridView(Gtk.ScrolledWindow):
         grid = getattr(self, "_tile_grid", None)
         if grid is not None:
             grid.sync_layout()
+        self._schedule_visible_art_sync()
+
+    def _schedule_visible_art_sync(self) -> None:
+        if self._art_sync_pending:
+            return
+        self._art_sync_pending = True
+        GLib.idle_add(self._sync_visible_art_idle)
+
+    def _sync_visible_art_idle(self) -> bool:
+        self._art_sync_pending = False
+        self._sync_visible_art_now()
+        return False
+
+    def _sync_visible_art_now(self) -> None:
+        grid = getattr(self, "_tile_grid", None)
+        if grid is None:
+            return
+        vadj = self.get_vadjustment()
+        if vadj is None:
+            return
+        grid.sync_visible_art(vadj.get_value(), vadj.get_page_size())
+
+    def _bind_scroll_adjustment(self) -> None:
+        vadj = self.get_vadjustment()
+        if vadj is None or self._vadjustment_notify_id:
+            return
+        self._vadjustment_notify_id = vadj.connect(
+            "value-changed",
+            self._on_scroll_changed,
+        )
+
+    def _on_scroll_changed(self, *_args: object) -> None:
+        self._schedule_visible_art_sync()
 
     @staticmethod
     def _populate_releases(
@@ -261,9 +301,9 @@ class ReleaseGridView(Gtk.ScrolledWindow):
                 batch_size,
                 small,
             )
-            GLib.idle_add(grid._sync_layout_idle)
+            GLib.idle_add(grid._sync_layout_and_notify_idle)
         else:
-            GLib.idle_add(grid._sync_layout_idle)
+            GLib.idle_add(grid._sync_layout_and_notify_idle)
 
     def _viewport_inner_width(self) -> int:
         width = self.get_width()
@@ -295,6 +335,8 @@ class ReleaseGridView(Gtk.ScrolledWindow):
                 "notify::width",
                 self._on_viewport_width_changed,
             )
+        self._bind_scroll_adjustment()
+        self._schedule_visible_art_sync()
 
     def _on_view_unmap(self, *_args: object) -> None:
         if self._root_width_notify_id:
@@ -302,9 +344,16 @@ class ReleaseGridView(Gtk.ScrolledWindow):
             if root is not None:
                 root.disconnect(self._root_width_notify_id)
             self._root_width_notify_id = 0
+        if self._vadjustment_notify_id:
+            vadj = self.get_vadjustment()
+            if vadj is not None:
+                vadj.disconnect(self._vadjustment_notify_id)
+            self._vadjustment_notify_id = 0
 
     def _on_viewport_width_changed(self, *_args: object) -> None:
-        GLib.idle_add(self._tile_grid._sync_layout_idle)
+        grid = getattr(self, "_tile_grid", None)
+        if grid is not None:
+            GLib.idle_add(grid._sync_layout_and_notify_idle)
 
 
 class QueueSheet(Adw.Dialog):
@@ -679,6 +728,7 @@ class ReleaseTileGrid(Gtk.Box):
             self.connect("destroy", self._on_destroy)
         self._cards: list[Gtk.Widget] = []
         self._art_loader: ArtLoader | None = None
+        self._on_layout_changed: Callable[[], None] | None = None
         self._tile_edge = _ALBUM_TILE_DEFAULT_EDGE
         self._layout_key: tuple[int, int, int, int] | None = None
         self._in_relayout = False
@@ -699,6 +749,12 @@ class ReleaseTileGrid(Gtk.Box):
 
     def _sync_layout_idle(self) -> bool:
         self.sync_layout()
+        return False
+
+    def _sync_layout_and_notify_idle(self) -> bool:
+        self.sync_layout()
+        if self._on_layout_changed is not None:
+            self._on_layout_changed()
         return False
 
     def sync_layout(self) -> None:
@@ -755,7 +811,9 @@ class ReleaseTileGrid(Gtk.Box):
             art_loader=art_loader,
             small=small,
             edge=self._tile_edge,
+            load_art=False,
         )
+        setattr(card, "_tunes_art_small", small)
         _attach_album_card_activate(card, on_activate)
         self._cards.append(card)
         if self._service is not None:
@@ -830,11 +888,61 @@ class ReleaseTileGrid(Gtk.Box):
                 row.set_hexpand(False)
                 row.set_hexpand_set(True)
                 for card in self._cards[start : start + columns]:
-                    _apply_album_tile_size(card, edge, art_loader=self._art_loader)
+                    _apply_album_tile_size(card, edge)
                     row.append(card)
                 self.append(row)
         finally:
             self._in_relayout = False
+            if self._on_layout_changed is not None:
+                self._on_layout_changed()
+
+    def _layout_columns_edge(self) -> tuple[int, int]:
+        if self._layout_key is not None:
+            _inner_width, columns, edge, _count = self._layout_key
+            return columns, edge
+        inner = self._available_inner_width()
+        if inner > 0:
+            return album_grid_layout(inner)
+        return 1, self._tile_edge
+
+    def sync_visible_art(self, scroll_y: float, viewport_height: float) -> None:
+        if not self._cards or self._art_loader is None or viewport_height <= 0:
+            return
+
+        columns, edge = self._layout_columns_edge()
+        if columns < 1 or edge < 1:
+            return
+
+        start, end = album_grid_visible_card_indices(
+            card_count=len(self._cards),
+            columns=columns,
+            tile_edge=edge,
+            scroll_y=scroll_y,
+            viewport_height=viewport_height,
+            margin_top=ALBUM_GRID_VIEW_MARGIN,
+        )
+        for index in range(start, end):
+            self._load_card_art(self._cards[index], edge)
+
+    def _load_card_art(self, card: Gtk.Widget, edge: int) -> None:
+        art_loader = self._art_loader
+        if art_loader is None:
+            return
+
+        raw_uri = getattr(card, "_tunes_art_uri", None)
+        art_uri = raw_uri if isinstance(raw_uri, str) else None
+        small = bool(getattr(card, "_tunes_art_small", False))
+        load_pixels = edge if not small else min(edge, _ALBUM_TILE_ART_PIXELS_SMALL)
+        desired_key = (art_uri, load_pixels)
+        if getattr(card, "_tunes_art_loaded_key", None) == desired_key:
+            return
+
+        picture = _find_art_picture(card)
+        if picture is None:
+            return
+
+        setattr(card, "_tunes_art_loaded_key", desired_key)
+        art_loader.set_picture(picture, art_uri, pixel_size=load_pixels)
 
     def _detach_cards(self) -> None:
         for card in self._cards:
@@ -944,12 +1052,7 @@ def _apply_release_art_play_button_metrics(btn: Gtk.Button, art_size: int) -> No
     btn.set_margin_top(inset)
 
 
-def _apply_album_tile_size(
-    card: Gtk.Widget,
-    edge: int,
-    *,
-    art_loader: ArtLoader | None = None,
-) -> None:
+def _apply_album_tile_size(card: Gtk.Widget, edge: int) -> None:
     if edge < 1:
         return
     card.set_size_request(edge, edge)
@@ -962,9 +1065,6 @@ def _apply_album_tile_size(
         picture.set_size_request(0, 0)
         picture.set_hexpand(False)
         picture.set_vexpand(False)
-        art_uri = getattr(card, "_tunes_art_uri", None)
-        if art_loader is not None and isinstance(art_uri, str):
-            art_loader.set_picture(picture, art_uri, pixel_size=edge)
     play_btn = _find_release_art_play_button(card)
     if play_btn is not None:
         _apply_release_art_play_button_metrics(play_btn, edge)
@@ -1193,6 +1293,7 @@ def _release_card(
     small: bool = False,
     art_loader: ArtLoader | None = None,
     edge: int = _ALBUM_TILE_DEFAULT_EDGE,
+    load_art: bool = False,
 ) -> Gtk.Widget:
     """Square tile: cover fills the cell; title/artist/source overlaid at the bottom."""
     shell = Gtk.Box()
@@ -1231,7 +1332,7 @@ def _release_card(
     overlay.set_child(picture)
 
     load_pixels = edge if not small else min(edge, _ALBUM_TILE_ART_PIXELS_SMALL)
-    if art_loader is not None:
+    if art_loader is not None and load_art:
         art_loader.set_picture(picture, release.art_uri, pixel_size=load_pixels)
 
     _attach_release_art_play(
