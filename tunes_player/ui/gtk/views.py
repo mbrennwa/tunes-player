@@ -638,20 +638,26 @@ class _FixedMinWidthShell(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self._min_width = min_width
         self.set_hexpand(True)
-        self.set_halign(Gtk.Align.FILL)
+        self.set_halign(Gtk.Align.START)
 
     def do_measure(  # noqa: N802 — GTK vfunc
         self,
         orientation: Gtk.Orientation,
         for_size: int,
     ) -> tuple[int, int, int, int]:
+        min_w, nat_w, min_b, nat_b = Gtk.Box.do_measure(self, orientation, for_size)
         if orientation == Gtk.Orientation.HORIZONTAL:
-            return self._min_width, self._min_width, -1, -1
-        return Gtk.Box.do_measure(self, orientation, for_size)
+            return (
+                max(self._min_width, min_w),
+                max(self._min_width, nat_w),
+                min_b,
+                nat_b,
+            )
+        return min_w, nat_w, min_b, nat_b
 
 
-class ReleaseTileGrid(Gtk.Grid):
-    """Square release tiles; column count follows this widget's allocated width."""
+class ReleaseTileGrid(Gtk.Box):
+    """Square release tiles; column count follows the viewport width."""
 
     def __init__(
         self,
@@ -659,16 +665,13 @@ class ReleaseTileGrid(Gtk.Grid):
         inner_width_fn: Callable[[], int] | None = None,
         service: PlayerService | None = None,
     ) -> None:
-        super().__init__()
-        self.set_column_spacing(ALBUM_GRID_SPACING)
-        self.set_row_spacing(ALBUM_GRID_SPACING)
-        self.set_column_homogeneous(False)
-        self.set_row_homogeneous(False)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=ALBUM_GRID_SPACING)
         self.add_css_class("album-tile-grid")
         self.set_halign(Gtk.Align.START)
         self.set_valign(Gtk.Align.START)
-        self.set_hexpand(True)
+        self.set_hexpand(False)
         self.set_vexpand(False)
+        self.set_hexpand_set(True)
         self._inner_width_fn = inner_width_fn
         self._service = service
         self._playback_unsubscribe: Callable[[], None] | None = None
@@ -677,6 +680,7 @@ class ReleaseTileGrid(Gtk.Grid):
             self._playback_unsubscribe = service.subscribe(self._on_playback_event)
             self.connect("destroy", self._on_destroy)
         self._cards: list[Gtk.Widget] = []
+        self._art_loader: ArtLoader | None = None
         self._tile_edge = _ALBUM_TILE_DEFAULT_EDGE
         self._layout_key: tuple[int, int, int, int] | None = None
         self._in_relayout = False
@@ -744,6 +748,8 @@ class ReleaseTileGrid(Gtk.Grid):
         art_loader: ArtLoader | None,
         small: bool = False,
     ) -> None:
+        if art_loader is not None:
+            self._art_loader = art_loader
         card = _release_card(
             release,
             on_play=on_play,
@@ -820,11 +826,18 @@ class ReleaseTileGrid(Gtk.Grid):
             for card in self._cards:
                 _reset_album_tile_size(card)
 
-            for index, card in enumerate(self._cards):
-                _apply_album_tile_size(card, edge)
-                row = index // columns
-                column = index % columns
-                self.attach(card, column, row, 1, 1)
+            for start in range(0, len(self._cards), columns):
+                row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=ALBUM_GRID_SPACING)
+                row.set_halign(Gtk.Align.START)
+                row.set_valign(Gtk.Align.START)
+                row.set_hexpand(False)
+                row.set_vexpand(False)
+                row.set_hexpand_set(True)
+                row.set_vexpand_set(True)
+                for card in self._cards[start : start + columns]:
+                    _apply_album_tile_size(card, edge, art_loader=self._art_loader)
+                    row.append(card)
+                self.append(row)
         finally:
             self._in_relayout = False
 
@@ -936,10 +949,27 @@ def _apply_release_art_play_button_metrics(btn: Gtk.Button, art_size: int) -> No
     btn.set_margin_top(inset)
 
 
-def _apply_album_tile_size(card: Gtk.Widget, edge: int) -> None:
+def _apply_album_tile_size(
+    card: Gtk.Widget,
+    edge: int,
+    *,
+    art_loader: ArtLoader | None = None,
+) -> None:
     if edge < 1:
         return
     card.set_size_request(edge, edge)
+    card.set_hexpand(False)
+    card.set_vexpand(False)
+    card.set_hexpand_set(True)
+    card.set_vexpand_set(True)
+    picture = _find_art_picture(card)
+    if picture is not None:
+        picture.set_size_request(0, 0)
+        picture.set_hexpand(False)
+        picture.set_vexpand(False)
+        art_uri = getattr(card, "_tunes_art_uri", None)
+        if art_loader is not None and isinstance(art_uri, str):
+            art_loader.set_picture(picture, art_uri, pixel_size=edge)
     play_btn = _find_release_art_play_button(card)
     if play_btn is not None:
         _apply_release_art_play_button_metrics(play_btn, edge)
@@ -1175,24 +1205,21 @@ def _release_card(
     shell.set_size_request(edge, edge)
     shell.set_hexpand(False)
     shell.set_vexpand(False)
+    shell.set_hexpand_set(True)
+    shell.set_vexpand_set(True)
     shell.set_halign(Gtk.Align.START)
     shell.set_valign(Gtk.Align.START)
     setattr(shell, "_tunes_release_id", release.id)
-
-    frame = Gtk.AspectFrame()
-    frame.set_ratio(1.0)
-    frame.set_obey_child(False)
-    frame.add_css_class("album-card-frame")
-    frame.set_hexpand(False)
-    frame.set_vexpand(False)
-    frame.set_halign(Gtk.Align.FILL)
-    frame.set_valign(Gtk.Align.FILL)
-    shell.append(frame)
+    setattr(shell, "_tunes_art_uri", release.art_uri)
 
     tile = Gtk.Box()
     tile.add_css_class("card")
     tile.add_css_class("album-card")
-    frame.set_child(tile)
+    tile.set_hexpand(True)
+    tile.set_vexpand(True)
+    tile.set_halign(Gtk.Align.FILL)
+    tile.set_valign(Gtk.Align.FILL)
+    shell.append(tile)
 
     overlay = Gtk.Overlay()
     overlay.set_hexpand(True)
@@ -1203,11 +1230,12 @@ def _release_card(
     picture.add_css_class("album-card-art")
     picture.set_content_fit(Gtk.ContentFit.COVER)
     picture.set_can_shrink(True)
-    picture.set_hexpand(True)
-    picture.set_vexpand(True)
+    picture.set_size_request(0, 0)
+    picture.set_hexpand(False)
+    picture.set_vexpand(False)
     overlay.set_child(picture)
 
-    load_pixels = _ALBUM_TILE_ART_PIXELS_SMALL if small else _ALBUM_TILE_ART_PIXELS
+    load_pixels = edge if not small else min(edge, _ALBUM_TILE_ART_PIXELS_SMALL)
     if art_loader is not None:
         art_loader.set_picture(picture, release.art_uri, pixel_size=load_pixels)
 
