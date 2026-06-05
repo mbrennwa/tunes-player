@@ -30,7 +30,6 @@ from tunes_player.ui.gtk.util import (
     source_label,
 )
 
-_ALBUM_TILE_ART_PIXELS = 512
 _ALBUM_TILE_ART_PIXELS_SMALL = 384
 _ALBUM_DETAIL_ART_MIN = 220
 _ALBUM_TILE_DEFAULT_EDGE = 200
@@ -668,7 +667,6 @@ class ReleaseTileGrid(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=ALBUM_GRID_SPACING)
         self.add_css_class("album-tile-grid")
         self.set_halign(Gtk.Align.START)
-        self.set_valign(Gtk.Align.START)
         self.set_hexpand(False)
         self.set_vexpand(False)
         self.set_hexpand_set(True)
@@ -829,11 +827,8 @@ class ReleaseTileGrid(Gtk.Box):
             for start in range(0, len(self._cards), columns):
                 row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=ALBUM_GRID_SPACING)
                 row.set_halign(Gtk.Align.START)
-                row.set_valign(Gtk.Align.START)
                 row.set_hexpand(False)
-                row.set_vexpand(False)
                 row.set_hexpand_set(True)
-                row.set_vexpand_set(True)
                 for card in self._cards[start : start + columns]:
                     _apply_album_tile_size(card, edge, art_loader=self._art_loader)
                     row.append(card)
@@ -1203,12 +1198,12 @@ def _release_card(
     shell = Gtk.Box()
     shell.add_css_class("album-card-shell")
     shell.set_size_request(edge, edge)
+    # Overlay children hexpand; without hexpand-set the shell grows to fill the row.
     shell.set_hexpand(False)
     shell.set_vexpand(False)
     shell.set_hexpand_set(True)
     shell.set_vexpand_set(True)
     shell.set_halign(Gtk.Align.START)
-    shell.set_valign(Gtk.Align.START)
     setattr(shell, "_tunes_release_id", release.id)
     setattr(shell, "_tunes_art_uri", release.art_uri)
 
