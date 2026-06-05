@@ -588,12 +588,18 @@ class PlayerService:
             for attempt in range(LOCK_RETRY_ATTEMPTS):
                 connection = connect(db_path)
                 try:
-                    return maintain_album_art(connection, data_dir=data_dir)
+                    result = maintain_album_art(connection, data_dir=data_dir)
+                    connection.commit()
+                    return result
                 except sqlite3.OperationalError as exc:
+                    connection.rollback()
                     if not is_locked_error(exc) or attempt == LOCK_RETRY_ATTEMPTS - 1:
                         raise
                     last_error = exc
                     time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
+                except Exception:
+                    connection.rollback()
+                    raise
                 finally:
                     connection.close()
             if last_error is not None:

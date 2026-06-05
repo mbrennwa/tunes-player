@@ -294,6 +294,61 @@ class LibraryScannerScopedTests(unittest.TestCase):
         self.assertIn("broken.flac", result.file_errors[0].path)
         self.assertEqual(result.file_errors[0].reason, "invalid FLAC header")
 
+    def test_scan_survives_embedded_album_art_during_indexing(self) -> None:
+        scan_root = self._folder_a / "art_case"
+        scan_root.mkdir()
+        track = scan_root / "with_art.flac"
+        track.write_bytes(b"")
+
+        def fake_parse(path: Path, mtime_ns: int, size_bytes: int) -> _ParsedTrack:
+            path_str = str(path.resolve())
+            return _ParsedTrack(
+                path=path_str,
+                mtime_ns=mtime_ns,
+                size_bytes=size_bytes,
+                codec="flac",
+                duration_sec=None,
+                sample_rate=None,
+                bit_depth=None,
+                channels=None,
+                title=path.stem,
+                artist="Artist",
+                album_artist="Artist",
+                album="Album",
+                release_id=ids.release_id("Artist", "Album"),
+                is_synthetic=False,
+                disc_number=None,
+                track_number=None,
+                year=None,
+                genre=None,
+                total_tracks=None,
+                release_type_tag=None,
+            )
+
+        with (
+            patch("tunes_player.core.library.scanner._parse_file", side_effect=fake_parse),
+            patch("tunes_player.core.library.scanner.maintain_album_art", return_value=(0, 0)),
+            patch(
+                "tunes_player.core.library.art_cache.extract_embedded_art",
+                return_value=(b"jpeg-bytes", "image/jpeg"),
+            ),
+        ):
+            result = self._scanner.scan(scan_folders=[str(scan_root.resolve())])
+
+        self.assertEqual(result.errors, 0)
+        self.assertEqual(result.indexed, 1)
+
+        connection = connect(self._db_path)
+        try:
+            album_id = ids.release_id("Artist", "Album")
+            row = connection.execute(
+                "SELECT 1 FROM album_art WHERE album_id = ?",
+                (album_id,),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertIsNotNone(row)
+
     def test_scan_continues_after_indexing_failure(self) -> None:
         scan_root = self._folder_a / "index_error_case"
         scan_root.mkdir()

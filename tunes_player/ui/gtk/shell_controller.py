@@ -128,6 +128,15 @@ def empty_grid_message(
     return filter_empty_message(state)
 
 
+def grid_load_is_sync(state: ShellState, *, has_valid_cache: bool) -> bool:
+    """Return True when the browse grid can be built synchronously on the UI thread."""
+    if state.base == ShellBase.NONE:
+        return True
+    if has_valid_cache:
+        return True
+    return state.base == ShellBase.ALL_LOCAL
+
+
 def fetch_base_releases(
     service: PlayerService,
     base: ShellBase,

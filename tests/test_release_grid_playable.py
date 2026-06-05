@@ -9,7 +9,7 @@ from tunes_player.ui.gtk.views import _release_art_play_layout, _release_grid_pl
 
 
 class ReleaseGridPlayableTests(unittest.TestCase):
-    def test_local_requires_tracks(self) -> None:
+    def test_local_sparse_metadata_still_playable(self) -> None:
         release = Release(
             id="local:1",
             title="Empty",
@@ -17,7 +17,7 @@ class ReleaseGridPlayableTests(unittest.TestCase):
             source=Source.LOCAL,
             track_count=0,
         )
-        self.assertFalse(_release_grid_playable(release))
+        self.assertTrue(_release_grid_playable(release))
 
     def test_local_with_tracks(self) -> None:
         release = Release(

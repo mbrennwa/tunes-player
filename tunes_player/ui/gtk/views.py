@@ -113,10 +113,11 @@ def _release_art_play_layout(art_size: int) -> tuple[int, int]:
 def _release_grid_playable(release: Release) -> bool:
     """Whether the grid overlay play button should be sensitive.
 
-    Detail view loads tracks and uses ``bool(tracks)``. Grid tiles only have
-    catalog metadata; streaming providers often leave ``track_count`` at 0 on
-    sparse album objects even when ``get_release_tracks`` succeeds later.
+    Local albums and sparse streaming metadata are playable; ``play_release``
+    loads tracks on demand and reports errors when none exist.
     """
+    if release.source == Source.LOCAL:
+        return True
     if release.track_count > 0:
         return True
     return release.source != Source.LOCAL
@@ -170,6 +171,7 @@ class ReleaseGridView(Gtk.ScrolledWindow):
         art_loader: ArtLoader | None = None,
         window_inner_width_fn: Callable[[], int] | None = None,
         service: PlayerService | None = None,
+        sync_populate: bool = False,
     ) -> None:
         super().__init__(vexpand=True, hscrollbar_policy=Gtk.PolicyType.AUTOMATIC)
         self.set_propagate_natural_width(False)
@@ -225,6 +227,7 @@ class ReleaseGridView(Gtk.ScrolledWindow):
             on_release_play,
             on_artist_search,
             art_loader=art_loader,
+            populate_sync=sync_populate,
         )
 
     def sync_tile_layout(self) -> None:
@@ -291,7 +294,21 @@ class ReleaseGridView(Gtk.ScrolledWindow):
         start: int = 0,
         batch_size: int = 24,
         small: bool = False,
+        populate_sync: bool = False,
     ) -> None:
+        if populate_sync:
+            for release in releases:
+                grid.append_release(
+                    release,
+                    on_activate=lambda release_id=release.id: on_release_activated(release_id),
+                    on_play=lambda release_id=release.id: on_release_play(release_id),
+                    on_artist_search=on_artist_search,
+                    art_loader=art_loader,
+                    small=small,
+                )
+            grid.sync_layout()
+            return
+
         end = min(start + batch_size, len(releases))
         for release in releases[start:end]:
             grid.append_release(

@@ -134,6 +134,18 @@ button.artist-link:hover label {
   opacity: 1;
 }
 
+.album-card-shell .release-art-play:disabled,
+.release-art-shell .release-art-play:disabled {
+  opacity: 0;
+}
+
+.album-card-shell:hover .release-art-play:disabled,
+.album-card-shell:focus-within .release-art-play:disabled,
+.release-art-shell:hover .release-art-play:disabled,
+.release-art-shell:focus-within .release-art-play:disabled {
+  opacity: 0;
+}
+
 /* Shell controls: search primary, filters secondary */
 .shell-controls .shell-search-row.linked {
   min-height: 0;

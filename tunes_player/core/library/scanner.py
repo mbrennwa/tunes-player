@@ -374,7 +374,11 @@ class LibraryScanner:
             )
             connection.execute("RELEASE SAVEPOINT index_file")
         except Exception as exc:
-            connection.execute("ROLLBACK TO SAVEPOINT index_file")
+            try:
+                connection.execute("ROLLBACK TO SAVEPOINT index_file")
+                connection.execute("RELEASE SAVEPOINT index_file")
+            except sqlite3.OperationalError:
+                pass
             reason = str(exc).strip() or type(exc).__name__
             self._record_file_error(file_errors, path_str, reason)
             return "error", path_str

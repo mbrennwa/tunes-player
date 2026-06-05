@@ -414,6 +414,7 @@ class TunesWindow(Adw.ApplicationWindow):
             releases=releases,
             empty_message=self._empty_message(state, releases),
             title=self._grid_title(state),
+            sync_populate=True,
         )
 
     def _set_shell_state(
@@ -824,6 +825,33 @@ class TunesWindow(Adw.ApplicationWindow):
             search_scope=state.search_scope,
         )
 
+    def _show_grid_for_state(self, state: ShellState, releases: list[Release]) -> None:
+        self._store_selection_cache(state, releases)
+        filtered = self._filtered_from_cache(self._shell_state)
+        self._show_grid(
+            releases=filtered,
+            empty_message=self._empty_message(self._shell_state, filtered),
+            title=self._grid_title(self._shell_state),
+            sync_populate=True,
+        )
+        self._schedule_persist()
+
+    def _try_show_grid_sync(self, state: ShellState) -> bool:
+        restored = self._restore_persisted_releases(state)
+        if restored is not None:
+            self._show_grid_for_state(state, restored)
+            return True
+        if state.base == ShellBase.ALL_LOCAL:
+            releases = fetch_base_releases(
+                self._service,
+                state.base,
+                search_query=state.search_query,
+                search_scope=state.search_scope,
+            )
+            self._show_grid_for_state(state, releases)
+            return True
+        return False
+
     def _reload_grid(self) -> bool:
         state = self._effective_shell_state()
 
@@ -833,7 +861,11 @@ class TunesWindow(Adw.ApplicationWindow):
                 releases=[],
                 empty_message=self._empty_message(state, []),
                 title=self._grid_title(state),
+                sync_populate=True,
             )
+            return False
+
+        if self._try_show_grid_sync(state):
             return False
 
         self._start_async_load(state)
@@ -965,6 +997,7 @@ class TunesWindow(Adw.ApplicationWindow):
         releases: list,
         empty_message: str | None,
         title: str,
+        sync_populate: bool = False,
     ) -> None:
         view = ReleaseGridView(
             releases=releases,
@@ -977,6 +1010,7 @@ class TunesWindow(Adw.ApplicationWindow):
             art_loader=self._art_loader,
             window_inner_width_fn=self._album_grid_inner_width,
             service=self._service,
+            sync_populate=sync_populate,
         )
         self._replace_root_page(title=title, child=view)
         catalog_count = (
@@ -1127,7 +1161,7 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _on_service_event(self, event: str) -> bool:
         if event == "library_updated":
-            GLib.idle_add(self._on_sources_or_library_changed)
+            GLib.idle_add(self._on_library_updated)
         elif event == "sources_changed":
             GLib.idle_add(self._on_sources_or_library_changed)
         elif event == "art_updated":
@@ -1162,6 +1196,34 @@ class TunesWindow(Adw.ApplicationWindow):
         self._sync_shell_controls()
         self._invalidate_selection_cache(clear_persisted=True)
         self._reload_grid()
+        return False
+
+    def _on_library_updated(self) -> bool:
+        if not self._nav_at_root():
+            return False
+
+        state = self._effective_shell_state()
+        if state.base == ShellBase.ALL_LOCAL:
+            releases = fetch_base_releases(
+                self._service,
+                state.base,
+                search_query=state.search_query,
+                search_scope=state.search_scope,
+            )
+            self._store_selection_cache(state, releases)
+            if self._cache_matches(state):
+                self._display_cached_selection(state)
+                self._schedule_persist()
+            return False
+
+        if self._cached_releases and any(
+            release.source == Source.LOCAL for release in self._cached_releases
+        ):
+            refreshed = self._refresh_cached_release_quality(list(self._cached_releases))
+            self._store_selection_cache(state, refreshed)
+            if self._cache_matches(state):
+                self._display_cached_selection(state)
+                self._schedule_persist()
         return False
 
     def _open_queue_sheet(self, *_args: object) -> None:
