@@ -8,7 +8,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import GLib, Gtk  # noqa: E402
+from gi.repository import Gtk  # noqa: E402
 
 EnabledGenresChanged = Callable[[frozenset[str]], None]
 
@@ -17,13 +17,14 @@ _POPOVER_LIST_HEIGHT_FALLBACK = 320
 _POPOVER_MIN_LIST_HEIGHT = 120
 _POPOVER_BOTTOM_MARGIN = 16
 _POPOVER_TOP_MARGIN = 8
-_NOW_PLAYING_HEIGHT_FALLBACK = 72
 _POPOVER_BOX_MARGIN_VERTICAL = 8
 _POPOVER_CSS_PADDING_VERTICAL = 8
 _SEARCH_ENTRY_HEIGHT = 38
 _CLEAR_BTN_HEIGHT = 38
 _GENRE_ROW_HEIGHT = 32
+_MENU_BTN_HEIGHT = 18
 _LIST_WIDTH = 240
+_WINDOW_HEIGHT_FRACTION = 0.65
 
 
 def genre_filter_list_max_height(
@@ -40,21 +41,6 @@ def genre_filter_list_max_height(
     if natural_list_height > target:
         return max(min_list_height, target)
     return target
-
-
-def _find_descendant_by_css_class(
-    widget: Gtk.Widget,
-    css_class: str,
-) -> Gtk.Widget | None:
-    if widget.has_css_class(css_class):
-        return widget
-    child = widget.get_first_child()
-    while child is not None:
-        found = _find_descendant_by_css_class(child, css_class)
-        if found is not None:
-            return found
-        child = child.get_next_sibling()
-    return None
 
 
 class GenreFilterMenu(Gtk.Box):
@@ -217,60 +203,64 @@ class GenreFilterMenu(Gtk.Box):
         return chrome
 
     def _anchor_bounds_in_root(self, root: Gtk.Widget) -> tuple[int, int] | None:
+        ok, bounds = self._menu_btn.compute_bounds(root)
+        if ok and bounds is not None:
+            top = int(bounds.origin.y)
+            height = int(bounds.size.height)
+            return top, top + max(height, _MENU_BTN_HEIGHT)
+
         top_coords = self._menu_btn.translate_coordinates(root, 0, 0)
-        bottom_coords = self._menu_btn.translate_coordinates(
-            root,
-            0,
-            self._menu_btn.get_allocated_height(),
-        )
-        if top_coords is None or bottom_coords is None:
+        if top_coords is None:
             return None
         _left, anchor_top_y = top_coords
-        _left, anchor_bottom_y = bottom_coords
-        return int(anchor_top_y), int(anchor_bottom_y)
+        top = int(anchor_top_y)
+        return top, top + _MENU_BTN_HEIGHT
 
     def _available_list_height(self, root: Gtk.Widget, anchor_top_y: int, anchor_bottom_y: int) -> int:
         window_height = root.get_height()
-        bottom_inset = self._bottom_inset(root)
-        space_below = window_height - anchor_bottom_y - bottom_inset
+        # Popover overlays the grid and now-playing bar; do not reserve bottom chrome.
+        space_below = window_height - anchor_bottom_y - _POPOVER_BOTTOM_MARGIN
         space_above = anchor_top_y - _POPOVER_TOP_MARGIN
-        # Popover may open in either direction; size for the side with more room.
-        return max(space_below, space_above) - self._popover_chrome_height()
+        directional = max(space_below, space_above) - self._popover_chrome_height()
+        window_budget = int(window_height * _WINDOW_HEIGHT_FRACTION) - self._popover_chrome_height()
+        return max(directional, window_budget)
 
-    def _bottom_inset(self, root: Gtk.Widget) -> int:
-        now_playing = _find_descendant_by_css_class(root, "now-playing-bar")
-        if now_playing is not None:
-            return now_playing.get_allocated_height() + _POPOVER_BOTTOM_MARGIN
-        return _NOW_PLAYING_HEIGHT_FALLBACK + _POPOVER_BOTTOM_MARGIN
-
-    def _sync_list_max_height(self) -> None:
+    def _compute_list_viewport_height(self) -> int:
         root = self.get_root()
-        if root is None or not self._menu_btn.get_mapped():
-            self._scrolled.set_max_content_height(_POPOVER_LIST_HEIGHT_FALLBACK)
-            return
-
-        bounds = self._anchor_bounds_in_root(root)
-        if bounds is None:
-            self._scrolled.set_max_content_height(_POPOVER_LIST_HEIGHT_FALLBACK)
-            return
-        anchor_top_y, anchor_bottom_y = bounds
-
-        window_height = root.get_height()
-        if window_height <= 0:
-            self._scrolled.set_max_content_height(_POPOVER_LIST_HEIGHT_FALLBACK)
-            return
-
-        list_max = genre_filter_list_max_height(
-            natural_list_height=self._list_natural_height(),
-            available_height=self._available_list_height(
-                root,
-                anchor_top_y,
-                anchor_bottom_y,
-            ),
-        )
+        natural = self._list_natural_height()
+        if root is None or not self._menu_btn.get_mapped() or root.get_height() <= 0:
+            list_max = _POPOVER_LIST_HEIGHT_FALLBACK
+        else:
+            bounds = self._anchor_bounds_in_root(root)
+            if bounds is None:
+                list_max = _POPOVER_LIST_HEIGHT_FALLBACK
+            else:
+                anchor_top_y, anchor_bottom_y = bounds
+                list_max = genre_filter_list_max_height(
+                    natural_list_height=natural,
+                    available_height=self._available_list_height(
+                        root,
+                        anchor_top_y,
+                        anchor_bottom_y,
+                    ),
+                )
         if list_max <= 0:
             list_max = _POPOVER_LIST_HEIGHT_FALLBACK
+        return list_max
+
+    def _apply_list_viewport_height(self, list_max: int) -> None:
+        natural = self._list_natural_height()
+        if natural > list_max:
+            viewport = list_max
+        elif natural > 0:
+            viewport = natural
+        else:
+            viewport = list_max
         self._scrolled.set_max_content_height(list_max)
+        self._scrolled.set_size_request(_LIST_WIDTH, viewport)
+
+    def _sync_list_max_height(self) -> None:
+        self._apply_list_viewport_height(self._compute_list_viewport_height())
 
     def _on_check_toggled(self, *_args: object) -> None:
         if self._updating:
@@ -284,12 +274,6 @@ class GenreFilterMenu(Gtk.Box):
         self._update_search_visibility()
         self._sync_list_max_height()
         self._popover.popup()
-        GLib.idle_add(self._resync_list_max_height_after_popup)
-
-    def _resync_list_max_height_after_popup(self) -> bool:
-        if self._popover.get_visible():
-            self._sync_list_max_height()
-        return False
 
     def _on_clear_clicked(self, *_args: object) -> None:
         if not self.get_enabled_genres():
