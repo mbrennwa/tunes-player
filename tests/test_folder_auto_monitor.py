@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from tunes_player.core.config import ConfigManager
+from tunes_player.core.folder_scan_status import FOLDER_SCAN_INCOMPLETE
 from tunes_player.core.services import PlayerService
 
 
@@ -35,6 +36,17 @@ class FolderAutoMonitorConfigTests(unittest.TestCase):
         self._config.remove_music_folder(folder)
         self._config.load()
         self.assertFalse(self._config.folder_auto_monitor_enabled(folder))
+
+    def test_set_folder_auto_monitor_accepts_path_alias(self) -> None:
+        real = Path(self._tmpdir.name) / "music"
+        real.mkdir()
+        link = Path(self._tmpdir.name) / "link"
+        link.symlink_to(real, target_is_directory=True)
+        self._config.add_music_folder(str(real), auto_monitor=True)
+
+        self._config.set_folder_auto_monitor(str(link), enabled=False)
+
+        self.assertFalse(self._config.folder_auto_monitor_enabled(str(real)))
 
     def test_config_roundtrip_omits_disabled_monitor_entries(self) -> None:
         folder = str(Path(self._tmpdir.name) / "music")
@@ -132,11 +144,15 @@ class FolderAutoMonitorServiceTests(unittest.TestCase):
         self._service._scan_queue = object()
         self._service._scanning_folder = resolved
 
-        with patch.object(self._service, "_emit") as emit:
-            self._service.set_folder_auto_monitor(self._folder, enabled=False)
+        with patch.object(self._service._config_manager, "record_folder_scan") as record:
+            with patch.object(self._service, "notify_library_updated") as notify:
+                with patch.object(self._service, "_emit") as emit:
+                    self._service.set_folder_auto_monitor(self._folder, enabled=False)
 
         process.terminate.assert_called_once_with()
         self.assertIsNone(self._service._scanning_folder)
+        record.assert_called_once_with(resolved, errors=FOLDER_SCAN_INCOMPLETE)
+        notify.assert_called_once_with()
         emit.assert_any_call("scan_finished")
 
     def test_disable_auto_monitor_drops_queued_scan(self) -> None:

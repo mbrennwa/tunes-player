@@ -16,6 +16,7 @@ from tunes_player.core.backends.qobuz import QobuzClient, QobuzUnavailableError
 from tunes_player.core.backends.resolve import resolve_track
 from tunes_player.core.backends.tidal import TidalClient, TidalUnavailableError
 from tunes_player.core.config import ConfigManager
+from tunes_player.core.folder_scan_status import FOLDER_SCAN_FAILED, FOLDER_SCAN_INCOMPLETE
 from tunes_player.core.home import (
     NEW_MUSIC_LOCAL_LIMIT,
     NEW_MUSIC_MERGE_LIMIT,
@@ -528,7 +529,9 @@ class PlayerService:
         if self._scanning_folder != resolved or not self.is_scanning():
             return
         self._terminate_active_scan()
+        self._config_manager.record_folder_scan(resolved, errors=FOLDER_SCAN_INCOMPLETE)
         self._emit("scan_finished")
+        self.notify_library_updated()
         self._try_start_scan()
 
     @property
@@ -654,7 +657,10 @@ class PlayerService:
                 self._scan_last_error = f"Scan process exited with code {code}"
                 self._scan_finished_folder = finished_folder
                 if finished_folder is not None:
-                    self._config_manager.record_folder_scan(finished_folder, errors=-1)
+                    self._config_manager.record_folder_scan(
+                        finished_folder,
+                        errors=FOLDER_SCAN_FAILED,
+                    )
                 self._cleanup_scan()
                 self._emit("scan_error")
         else:

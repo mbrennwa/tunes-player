@@ -41,6 +41,7 @@ from tunes_player.ui.gtk.shell_controller import (
     available_sources,
     empty_grid_message,
     fetch_base_releases,
+    format_release_count_label,
 )
 from tunes_player.ui.gtk.genre_filter_menu import GenreFilterMenu
 from tunes_player.ui.gtk.quality_multi_switch import QualityMultiSwitch
@@ -249,6 +250,16 @@ class TunesWindow(Adw.ApplicationWindow):
         self._sort_slot.set_halign(Gtk.Align.START)
         self._sort_slot.set_margin_start(24)
         filter_row.append(self._sort_slot)
+
+        self._release_count_label = Gtk.Label(label="", xalign=1)
+        self._release_count_label.add_css_class("shell-source-heading")
+        self._release_count_label.add_css_class("shell-release-count")
+        self._release_count_label.set_hexpand(True)
+        self._release_count_label.set_halign(Gtk.Align.END)
+        self._release_count_label.set_valign(Gtk.Align.CENTER)
+        self._release_count_label.set_visible(False)
+        filter_row.append(self._release_count_label)
+
         controls.append(filter_row)
 
         self._shell_controls = controls
@@ -779,6 +790,7 @@ class TunesWindow(Adw.ApplicationWindow):
                 message=f"Could not load {label}. Try again in a moment.",
             )
             self._replace_root_page(title=label, child=view)
+            self._hide_release_count_label()
             return False
 
         loaded = releases or []
@@ -799,6 +811,34 @@ class TunesWindow(Adw.ApplicationWindow):
             title=title,
             child=LoadingDiscoverView(message=message),
         )
+        self._sync_release_count_loading()
+
+    def _sync_release_count_label(
+        self,
+        *,
+        filtered_count: int,
+        catalog_count: int | None = None,
+    ) -> None:
+        if self._shell_state.base == ShellBase.NONE:
+            self._release_count_label.set_visible(False)
+            return
+        self._release_count_label.set_visible(True)
+        self._release_count_label.set_label(
+            format_release_count_label(
+                filtered_count=filtered_count,
+                catalog_count=catalog_count,
+            )
+        )
+
+    def _sync_release_count_loading(self) -> None:
+        if self._shell_state.base == ShellBase.NONE:
+            self._release_count_label.set_visible(False)
+            return
+        self._release_count_label.set_visible(True)
+        self._release_count_label.set_label("Loading…")
+
+    def _hide_release_count_label(self) -> None:
+        self._release_count_label.set_visible(False)
 
     def _show_grid(
         self,
@@ -820,6 +860,15 @@ class TunesWindow(Adw.ApplicationWindow):
             service=self._service,
         )
         self._replace_root_page(title=title, child=view)
+        catalog_count = (
+            len(self._cached_releases)
+            if self._cache_matches(self._shell_state)
+            else None
+        )
+        self._sync_release_count_label(
+            filtered_count=len(releases),
+            catalog_count=catalog_count,
+        )
 
     def _catalog_releases_for_message(self, state: ShellState) -> list[Release]:
         if self._cache_matches(state) and self._cached_releases:

@@ -13,6 +13,7 @@ from tunes_player.ui.gtk.shell_controller import (
     empty_grid_message,
     fetch_base_releases,
     filter_empty_message,
+    format_release_count_label,
 )
 
 
@@ -25,6 +26,32 @@ def _release(release_id: str) -> Release:
         track_count=1,
         release_type=ReleaseType.ALBUM,
     )
+
+
+class TestFormatReleaseCountLabel(unittest.TestCase):
+    def test_single_release(self) -> None:
+        self.assertEqual(
+            format_release_count_label(filtered_count=1),
+            "1",
+        )
+
+    def test_multiple_releases(self) -> None:
+        self.assertEqual(
+            format_release_count_label(filtered_count=248),
+            "248",
+        )
+
+    def test_filtered_subset(self) -> None:
+        self.assertEqual(
+            format_release_count_label(filtered_count=12, catalog_count=248),
+            "12 of 248",
+        )
+
+    def test_matching_counts_omit_total(self) -> None:
+        self.assertEqual(
+            format_release_count_label(filtered_count=248, catalog_count=248),
+            "248",
+        )
 
 
 class TestAllLocalEmptyMessage(unittest.TestCase):

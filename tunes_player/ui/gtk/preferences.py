@@ -252,7 +252,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
                 folder_key = self._folder_key(folder)
                 row = Adw.ActionRow(
                     title=escape_markup(folder),
-                    subtitle=self._folder_row_subtitle(folder),
+                    subtitle=self._folder_row_subtitle(folder_key),
                 )
                 row.add_css_class("music-folder-row")
                 row.set_subtitle_lines(1)
@@ -261,11 +261,11 @@ class PreferencesWindow(Adw.PreferencesWindow):
                 monitor_switch.set_tooltip_text(
                     "Scan this folder and keep it updated in the background",
                 )
-                monitor_switch.set_active(self._service.folder_auto_monitor_enabled(folder))
+                monitor_switch.set_active(self._service.folder_auto_monitor_enabled(folder_key))
                 monitor_switch.connect(
                     "notify::active",
                     self._on_monitor_toggled,
-                    folder,
+                    folder_key,
                 )
                 monitor_label = Gtk.Label(label=_FOLDER_WATCH_LABEL)
                 monitor_label.add_css_class("dim-label")
@@ -277,7 +277,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
                 remove_button = Gtk.Button(icon_name="user-trash-symbolic")
                 remove_button.set_valign(Gtk.Align.CENTER)
                 remove_button.set_tooltip_text("Remove folder")
-                remove_button.connect("clicked", lambda _btn, path=folder: self._remove_folder(path))
+                remove_button.connect("clicked", lambda _btn, path=folder_key: self._remove_folder(path))
                 controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
                 controls.set_valign(Gtk.Align.CENTER)
                 controls.append(monitor_box)
@@ -359,11 +359,20 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self,
         switch: Gtk.Switch,
         _pspec: object,
-        folder: str,
+        folder_key: str,
     ) -> None:
         if self._updating_monitor_switches:
             return
-        self._service.set_folder_auto_monitor(folder, switch.get_active())
+        enabled = switch.get_active()
+        self._service.set_folder_auto_monitor(folder_key, enabled)
+        if self._service.folder_auto_monitor_enabled(folder_key) != enabled:
+            self._updating_monitor_switches = True
+            try:
+                switch.set_active(not enabled)
+            finally:
+                self._updating_monitor_switches = False
+            return
+        self._sync_scan_ui()
 
     def _remove_folder(self, folder: str) -> None:
         self._service.remove_music_folder(folder)

@@ -34,8 +34,8 @@ _CHIP_LABELS: dict[str, str] = {
 }
 
 _BTN_HEIGHT = 18
-_LABEL_DESC = "↓"
-_LABEL_ASC = "↑"
+_ICON_DESC = "go-down-symbolic"
+_ICON_ASC = "go-up-symbolic"
 
 
 class ReleaseSortSwitch(Gtk.Box):
@@ -77,9 +77,7 @@ class ReleaseSortSwitch(Gtk.Box):
         self._direction_btn.set_margin_start(0)
         self._direction_btn.set_margin_end(0)
         self._direction_btn.set_size_request(-1, _BTN_HEIGHT)
-        self._direction_label = Gtk.Label(label=_LABEL_DESC)
-        self._direction_label.add_css_class("shell-source-btn-label")
-        self._direction_btn.set_child(self._direction_label)
+        self._direction_btn.set_icon_name(_ICON_DESC)
         self._direction_btn.connect("clicked", self._on_direction_clicked)
         controls.append(self._direction_btn)
 
@@ -131,8 +129,8 @@ class ReleaseSortSwitch(Gtk.Box):
         return button
 
     def _update_direction_icon(self) -> None:
-        self._direction_label.set_text(
-            _LABEL_DESC if self._sort_descending else _LABEL_ASC,
+        self._direction_btn.set_icon_name(
+            _ICON_DESC if self._sort_descending else _ICON_ASC,
         )
         tooltip = self._direction_tooltip()
         if tooltip:

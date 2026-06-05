@@ -43,6 +43,20 @@ def _load_folder_float_map(raw: object, folder_set: set[str]) -> dict[str, float
     return values
 
 
+def _load_music_folders(raw: object) -> list[str]:
+    folders: list[str] = []
+    seen: set[str] = set()
+    if not isinstance(raw, list):
+        return folders
+    for item in raw:
+        path = _normalize_folder_path(item)
+        if path is None or path in seen:
+            continue
+        seen.add(path)
+        folders.append(path)
+    return folders
+
+
 def _load_folder_int_map(raw: object, folder_set: set[str]) -> dict[str, int]:
     values: dict[str, int] = {}
     if not isinstance(raw, dict):
@@ -109,7 +123,7 @@ class ConfigManager:
             return self._config
 
         raw = json.loads(self._path.read_text(encoding="utf-8"))
-        folders = [str(item) for item in raw.get("music_folders", []) if item]
+        folders = _load_music_folders(raw.get("music_folders", []))
         added_raw = raw.get("music_folder_added_at", {})
         added_at: dict[str, float] = {}
         if isinstance(added_raw, dict):
@@ -198,16 +212,33 @@ class ConfigManager:
     def config(self) -> AppConfig:
         return self._config
 
+    def _canonical_folder_path(self, folder: str) -> str | None:
+        target = _normalize_folder_path(folder)
+        if target is None:
+            return None
+        for item in self._config.music_folders:
+            item_path = _normalize_folder_path(item)
+            if item_path == target:
+                return item_path
+        return None
+
     def add_music_folder(self, folder: str, *, auto_monitor: bool = False) -> None:
-        path = str(Path(folder).expanduser().resolve())
-        if path not in self._config.music_folders:
+        path = _normalize_folder_path(folder)
+        if path is None:
+            return
+        canonical = self._canonical_folder_path(path)
+        if canonical is not None:
+            path = canonical
+        elif path not in self._config.music_folders:
             self._config.music_folders.append(path)
         self._config.music_folder_added_at[path] = time.time()
         self._config.music_folder_auto_monitor[path] = auto_monitor
         self.save()
 
     def remove_music_folder(self, folder: str) -> None:
-        path = str(Path(folder).expanduser().resolve())
+        path = self._canonical_folder_path(folder)
+        if path is None:
+            return
         self._config.music_folders = [item for item in self._config.music_folders if item != path]
         self._config.music_folder_added_at.pop(path, None)
         self._config.music_folder_auto_monitor.pop(path, None)
@@ -216,30 +247,36 @@ class ConfigManager:
         self.save()
 
     def record_folder_scan(self, folder: str, *, errors: int, scanned_at: float | None = None) -> None:
-        path = str(Path(folder).expanduser().resolve())
-        if path not in self._config.music_folders:
+        path = self._canonical_folder_path(folder)
+        if path is None:
             return
         self._config.music_folder_last_scan_at[path] = scanned_at if scanned_at is not None else time.time()
         self._config.music_folder_last_scan_errors[path] = int(errors)
         self.save()
 
     def folder_last_scan_at(self, folder: str) -> float | None:
-        path = str(Path(folder).expanduser().resolve())
+        path = self._canonical_folder_path(folder)
+        if path is None:
+            return None
         return self._config.music_folder_last_scan_at.get(path)
 
     def folder_last_scan_errors(self, folder: str) -> int | None:
-        path = str(Path(folder).expanduser().resolve())
+        path = self._canonical_folder_path(folder)
+        if path is None:
+            return None
         return self._config.music_folder_last_scan_errors.get(path)
 
     def set_folder_auto_monitor(self, folder: str, enabled: bool) -> None:
-        path = str(Path(folder).expanduser().resolve())
-        if path not in self._config.music_folders:
+        path = self._canonical_folder_path(folder)
+        if path is None:
             return
         self._config.music_folder_auto_monitor[path] = enabled
         self.save()
 
     def folder_auto_monitor_enabled(self, folder: str) -> bool:
-        path = str(Path(folder).expanduser().resolve())
+        path = self._canonical_folder_path(folder)
+        if path is None:
+            return False
         return bool(self._config.music_folder_auto_monitor.get(path, False))
 
     def set_new_music_within_days(self, days: int) -> None:

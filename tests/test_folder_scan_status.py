@@ -8,7 +8,10 @@ import unittest
 from pathlib import Path
 
 from tunes_player.core.config import ConfigManager
-from tunes_player.core.folder_scan_status import format_folder_last_scan_line
+from tunes_player.core.folder_scan_status import (
+    FOLDER_SCAN_INCOMPLETE,
+    format_folder_last_scan_line,
+)
 
 
 class FolderScanStatusFormatTests(unittest.TestCase):
@@ -26,6 +29,14 @@ class FolderScanStatusFormatTests(unittest.TestCase):
     def test_failed_scan(self) -> None:
         line = format_folder_last_scan_line(scanned_at=1_700_000_000.0, errors=-1)
         self.assertIn("scan failed", line)
+
+    def test_incomplete_scan(self) -> None:
+        line = format_folder_last_scan_line(
+            scanned_at=1_700_000_000.0,
+            errors=FOLDER_SCAN_INCOMPLETE,
+        )
+        self.assertIn("incomplete", line)
+        self.assertNotIn("scan failed", line)
 
 
 class FolderScanStatusConfigTests(unittest.TestCase):

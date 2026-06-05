@@ -29,6 +29,21 @@ _SOURCE_FILTER_LABELS = {
 }
 
 
+def format_release_count_label(
+    *,
+    filtered_count: int,
+    catalog_count: int | None = None,
+) -> str:
+    """Compact grid status for the shell filter row."""
+    if (
+        catalog_count is not None
+        and catalog_count > 0
+        and filtered_count != catalog_count
+    ):
+        return f"{filtered_count} of {catalog_count}"
+    return str(filtered_count)
+
+
 def available_sources(service: PlayerService) -> set[Source]:
     sources: set[Source] = set()
     if service.config.config.music_folders:
