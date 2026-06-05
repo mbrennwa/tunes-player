@@ -10,6 +10,7 @@ from tunes_player.core.release_quality import (
 )
 from tunes_player.core.services import PlayerService
 from tunes_player.core.shell_state import (
+    SearchScope,
     ShellBase,
     ShellState,
     apply_shell_view_filters,
@@ -132,6 +133,7 @@ def fetch_base_releases(
     base: ShellBase,
     *,
     search_query: str = "",
+    search_scope: SearchScope = SearchScope.ALL,
 ) -> list[Release]:
     if base == ShellBase.NONE:
         return []
@@ -139,7 +141,8 @@ def fetch_base_releases(
         needle = search_query.strip()
         if not needle:
             return []
-        return list(service.search(needle).releases)
+        artists_only = search_scope == SearchScope.ARTIST
+        return list(service.search(needle, artists_only=artists_only).releases)
     if base == ShellBase.NEW_MUSIC:
         return releases_from_recently_added(service.list_recently_added_items())
     if base == ShellBase.SUGGESTION:
@@ -156,6 +159,7 @@ def fetch_filtered_releases(
     base: ShellBase,
     *,
     search_query: str = "",
+    search_scope: SearchScope = SearchScope.ALL,
     enabled_sources: frozenset[Source] | None = None,
     enabled_genres: frozenset[str] | None = None,
     enabled_release_types: frozenset[str] | None = None,
@@ -163,7 +167,12 @@ def fetch_filtered_releases(
     sort_key: str | None = None,
     sort_descending: bool = True,
 ) -> list[Release]:
-    releases = fetch_base_releases(service, base, search_query=search_query)
+    releases = fetch_base_releases(
+        service,
+        base,
+        search_query=search_query,
+        search_scope=search_scope,
+    )
     return apply_shell_view_filters(
         releases,
         enabled_sources=enabled_sources or frozenset(),

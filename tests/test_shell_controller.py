@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 from tunes_player.core.models import Release, ReleaseType, Source
 from tunes_player.core.release_quality import QUALITY_FILTER_HI_RES
-from tunes_player.core.shell_state import ShellBase, ShellState
+from tunes_player.core.shell_state import SearchScope, ShellBase, ShellState
 from tunes_player.ui.gtk.shell_controller import (
     all_local_empty_message,
     empty_grid_message,
@@ -142,6 +142,34 @@ class TestFetchBaseReleases(unittest.TestCase):
 
         service.list_releases.assert_not_called()
         self.assertEqual(result, [])
+
+    def test_search_artist_scope_uses_artists_only(self) -> None:
+        service = MagicMock()
+        expected = [_release("local:1")]
+        service.search.return_value = MagicMock(releases=expected)
+
+        result = fetch_base_releases(
+            service,
+            ShellBase.SEARCH,
+            search_query="Queen",
+            search_scope=SearchScope.ARTIST,
+        )
+
+        service.search.assert_called_once_with("Queen", artists_only=True)
+        self.assertEqual(result, expected)
+
+    def test_search_all_scope_uses_broad_search(self) -> None:
+        service = MagicMock()
+        service.search.return_value = MagicMock(releases=[])
+
+        fetch_base_releases(
+            service,
+            ShellBase.SEARCH,
+            search_query="Queen",
+            search_scope=SearchScope.ALL,
+        )
+
+        service.search.assert_called_once_with("Queen", artists_only=False)
 
 
 if __name__ == "__main__":

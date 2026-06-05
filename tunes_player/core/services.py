@@ -43,6 +43,13 @@ Unsubscribe = Callable[[], None]
 log = logging.getLogger(__name__)
 
 
+def _artist_name_matches_query(query: str, artist_name: str) -> bool:
+    needle = query.strip().casefold()
+    if not needle:
+        return False
+    return needle in artist_name.casefold()
+
+
 @dataclass(frozen=True, slots=True)
 class SearchResults:
     releases: list[Release]
@@ -376,15 +383,17 @@ class PlayerService:
     def get_album_tracks(self, album_id: str) -> list[Track]:
         return self.get_release_tracks(album_id)
 
-    def search(self, query: str) -> SearchResults:
+    def search(self, query: str, *, artists_only: bool = False) -> SearchResults:
         needle = query.strip()
         if not needle:
             return SearchResults(releases=[])
-        releases = self._store.search_releases(needle)
+        releases = self._store.search_releases(needle, artists_only=artists_only)
         seen = {release.id for release in releases}
         if self._tidal.is_logged_in():
             try:
                 for release in self._tidal.search_releases(needle):
+                    if artists_only and not _artist_name_matches_query(needle, release.artist_name):
+                        continue
                     if release.id not in seen:
                         seen.add(release.id)
                         releases.append(release)
@@ -393,6 +402,8 @@ class PlayerService:
         if self._qobuz.is_logged_in():
             try:
                 for release in self._qobuz.search_releases(needle):
+                    if artists_only and not _artist_name_matches_query(needle, release.artist_name):
+                        continue
                     if release.id not in seen:
                         seen.add(release.id)
                         releases.append(release)

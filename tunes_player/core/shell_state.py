@@ -29,7 +29,13 @@ class ShellBase(str, Enum):
     ALL_LOCAL = "all_local"
 
 
+class SearchScope(str, Enum):
+    ALL = "all"
+    ARTIST = "artist"
+
+
 _VALID_BASES = frozenset(item.value for item in ShellBase)
+_VALID_SEARCH_SCOPES = frozenset(item.value for item in SearchScope)
 _VALID_SOURCES = frozenset(item.value for item in Source)
 _VALID_COMPLETENESS = frozenset(item.value for item in ReleaseCompleteness)
 _VALID_RELEASE_TYPES = frozenset(item.value for item in ReleaseType)
@@ -75,6 +81,7 @@ _VALID_SORT_KEYS = frozenset(
 class ShellState:
     base: ShellBase = ShellBase.NONE
     search_query: str = ""
+    search_scope: SearchScope = SearchScope.ALL
     # Empty set = all configured sources enabled. Non-empty = only those sources.
     enabled_sources: frozenset[Source] = field(default_factory=frozenset)
     # Empty set = no genre filter. Non-empty = OR match on release genre buckets.
@@ -94,6 +101,8 @@ class ShellState:
             "base": self.base.value,
             "search_query": self.search_query,
         }
+        if self.base == ShellBase.SEARCH and self.search_scope != SearchScope.ALL:
+            payload["search_scope"] = self.search_scope.value
         if self.enabled_sources:
             payload["enabled_sources"] = sorted(
                 source.value for source in self.enabled_sources
@@ -122,8 +131,13 @@ class ShellState:
             base = ShellBase(base_raw)
         query = raw.get("search_query", "")
         search_query = query.strip() if isinstance(query, str) else ""
+        search_scope = SearchScope.ALL
         if base != ShellBase.SEARCH:
             search_query = ""
+        else:
+            scope_raw = raw.get("search_scope")
+            if isinstance(scope_raw, str) and scope_raw in _VALID_SEARCH_SCOPES:
+                search_scope = SearchScope(scope_raw)
         enabled_sources = _parse_enabled_sources(raw)
         enabled_genres = _parse_enabled_genres(raw)
         enabled_release_types = _parse_enabled_release_types(raw)
@@ -133,6 +147,7 @@ class ShellState:
         return cls(
             base=base,
             search_query=search_query,
+            search_scope=search_scope,
             enabled_sources=enabled_sources,
             enabled_genres=enabled_genres,
             enabled_release_types=enabled_release_types,

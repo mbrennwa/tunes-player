@@ -18,6 +18,7 @@ from tunes_player.core.logging_config import configure_logging
 from tunes_player.core.models import Release, Source
 from tunes_player.core.services import PlayerService
 from tunes_player.core.shell_state import (
+    SearchScope,
     ShellBase,
     ShellState,
     apply_shell_view_filters,
@@ -346,15 +347,23 @@ class TunesWindow(Adw.ApplicationWindow):
             return ShellState()
         return self._shell_state
 
-    def _selection_cache_key(self, state: ShellState) -> tuple[str, str]:
-        query = state.search_query.strip() if state.base == ShellBase.SEARCH else ""
-        return (state.base.value, query)
+    def _selection_cache_key(self, state: ShellState) -> tuple[str, str, str]:
+        if state.base == ShellBase.SEARCH:
+            return (
+                state.base.value,
+                state.search_query.strip(),
+                state.search_scope.value,
+            )
+        return (state.base.value, "", SearchScope.ALL.value)
 
     def _selection_identity_changed(self, previous: ShellState, current: ShellState) -> bool:
         if previous.base != current.base:
             return True
-        if current.base == ShellBase.SEARCH and previous.search_query != current.search_query:
-            return True
+        if current.base == ShellBase.SEARCH:
+            if previous.search_query != current.search_query:
+                return True
+            if previous.search_scope != current.search_scope:
+                return True
         return False
 
     def _cache_matches(self, state: ShellState) -> bool:
@@ -676,6 +685,7 @@ class TunesWindow(Adw.ApplicationWindow):
                 self._shell_state,
                 base=base,
                 search_query="",
+                search_scope=SearchScope.ALL,
                 enabled_sources=enabled_sources,
                 cached_releases=(),
             ),
@@ -684,7 +694,12 @@ class TunesWindow(Adw.ApplicationWindow):
     def _on_search_activate(self, entry: Gtk.SearchEntry) -> None:
         self._navigate_to_search(entry.get_text())
 
-    def _navigate_to_search(self, query: str) -> None:
+    def _navigate_to_search(
+        self,
+        query: str,
+        *,
+        search_scope: SearchScope = SearchScope.ALL,
+    ) -> None:
         """Run a search query, keeping prior results on the selection Back stack."""
         text = query.strip()
         if not text:
@@ -693,11 +708,13 @@ class TunesWindow(Adw.ApplicationWindow):
             self._shell_state,
             base=ShellBase.SEARCH,
             search_query=text,
+            search_scope=search_scope,
             cached_releases=(),
         )
         same_query = (
             self._shell_state.base == ShellBase.SEARCH
             and self._shell_state.search_query.strip() == text
+            and self._shell_state.search_scope == search_scope
         )
         if not same_query and self._selection_identity_changed(self._shell_state, next_state):
             self._push_selection_history()
@@ -790,6 +807,7 @@ class TunesWindow(Adw.ApplicationWindow):
             self._service,
             state.base,
             search_query=state.search_query,
+            search_scope=state.search_scope,
         )
         self._store_selection_cache(state, releases)
         view_state = self._shell_state
@@ -927,6 +945,7 @@ class TunesWindow(Adw.ApplicationWindow):
             self._service,
             state.base,
             search_query=state.search_query,
+            search_scope=state.search_scope,
         )
 
     def _empty_message(self, state: ShellState, releases: list) -> str | None:
@@ -1044,7 +1063,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._sync_header_with_nav()
 
     def _search_for_artist(self, artist_name: str) -> None:
-        self._navigate_to_search(artist_name)
+        self._navigate_to_search(artist_name, search_scope=SearchScope.ARTIST)
 
     def _open_preferences(self, *_args: object) -> None:
         if self._preferences is None:

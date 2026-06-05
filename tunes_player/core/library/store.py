@@ -198,7 +198,13 @@ class LibraryStore:
             channels=row["channels"],
         )
 
-    def search_releases(self, query: str, *, limit: int = 50) -> list[Release]:
+    def search_releases(
+        self,
+        query: str,
+        *,
+        limit: int = 50,
+        artists_only: bool = False,
+    ) -> list[Release]:
         needle = f"%{query.strip()}%"
         release_ids: list[str] = []
         seen: set[str] = set()
@@ -210,30 +216,43 @@ class LibraryStore:
                     seen.add(release_id)
                     release_ids.append(release_id)
 
-        add_ids(
-            self._connection.execute(
-                f"""
-                SELECT DISTINCT t.album_id AS release_id
-                FROM tracks t
-                WHERE t.album LIKE ? COLLATE NOCASE
-                   OR t.album_artist LIKE ? COLLATE NOCASE
-                LIMIT ?
-                """,
-                (needle, needle, limit),
-            ).fetchall(),
-        )
-        add_ids(
-            self._connection.execute(
-                """
-                SELECT DISTINCT t.album_id AS release_id
-                FROM tracks t
-                WHERE t.title LIKE ? COLLATE NOCASE
-                   OR t.artist LIKE ? COLLATE NOCASE
-                LIMIT ?
-                """,
-                (needle, needle, limit),
-            ).fetchall(),
-        )
+        if artists_only:
+            add_ids(
+                self._connection.execute(
+                    """
+                    SELECT DISTINCT t.album_id AS release_id
+                    FROM tracks t
+                    WHERE t.album_artist LIKE ? COLLATE NOCASE
+                    LIMIT ?
+                    """,
+                    (needle, limit),
+                ).fetchall(),
+            )
+        else:
+            add_ids(
+                self._connection.execute(
+                    f"""
+                    SELECT DISTINCT t.album_id AS release_id
+                    FROM tracks t
+                    WHERE t.album LIKE ? COLLATE NOCASE
+                       OR t.album_artist LIKE ? COLLATE NOCASE
+                    LIMIT ?
+                    """,
+                    (needle, needle, limit),
+                ).fetchall(),
+            )
+            add_ids(
+                self._connection.execute(
+                    """
+                    SELECT DISTINCT t.album_id AS release_id
+                    FROM tracks t
+                    WHERE t.title LIKE ? COLLATE NOCASE
+                       OR t.artist LIKE ? COLLATE NOCASE
+                    LIMIT ?
+                    """,
+                    (needle, needle, limit),
+                ).fetchall(),
+            )
 
         if not release_ids:
             return []

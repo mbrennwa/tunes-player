@@ -11,6 +11,7 @@ from tunes_player.core.config import ConfigManager
 from tunes_player.core.models import Release, ReleaseType, Source
 from tunes_player.core.release_quality import QUALITY_FILTER_CD
 from tunes_player.core.shell_state import (
+    SearchScope,
     NO_GENRE_LABEL,
     QUALITY_FILTER_COMPRESSED,
     QUALITY_FILTER_HI_RES,
@@ -75,6 +76,7 @@ class TestShellStateParsing(unittest.TestCase):
         state = parse_shell_state(None)
         self.assertEqual(state.base, ShellBase.NONE)
         self.assertEqual(state.search_query, "")
+        self.assertEqual(state.search_scope, SearchScope.ALL)
         self.assertEqual(state.enabled_sources, frozenset())
         self.assertEqual(state.enabled_genres, frozenset())
         self.assertEqual(state.enabled_release_types, frozenset())
@@ -99,6 +101,16 @@ class TestShellStateParsing(unittest.TestCase):
         )
         self.assertEqual(restored.base, ShellBase.NEW_MUSIC)
         self.assertEqual(restored.search_query, "")
+        self.assertEqual(restored.search_scope, SearchScope.ALL)
+
+    def test_artist_search_scope_roundtrip(self) -> None:
+        state = ShellState(
+            base=ShellBase.SEARCH,
+            search_query="Björk",
+            search_scope=SearchScope.ARTIST,
+        )
+        restored = ShellState.from_dict(state.to_dict())
+        self.assertEqual(restored.search_scope, SearchScope.ARTIST)
 
     def test_all_local_roundtrip(self) -> None:
         state = ShellState(base=ShellBase.ALL_LOCAL)
