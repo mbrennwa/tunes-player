@@ -148,8 +148,9 @@ class LibraryScanner:
                     errors += 1
                     continue
 
-                if existing is not None:
-                    connection.execute("DELETE FROM files WHERE id = ?", (existing["id"],))
+                track_pk = ids.track_id(path_str)
+                connection.execute("DELETE FROM tracks WHERE id = ?", (track_pk,))
+                connection.execute("DELETE FROM files WHERE path = ?", (path_str,))
 
                 file_id = self._insert_file(connection, parsed, indexed_at_ns=time.time_ns())
                 self._insert_track(connection, parsed, file_id)
