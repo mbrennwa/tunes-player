@@ -121,6 +121,9 @@ class NowPlayingBar(Gtk.Box):
         controls.set_valign(Gtk.Align.CENTER)
         row.append(controls)
 
+        self._controls_leading = Gtk.Box()
+        controls.append(self._controls_leading)
+
         prev_btn = Gtk.Button()
         prev_btn.add_css_class("circular")
         prev_btn.set_icon_name("media-skip-backward-symbolic")
@@ -436,6 +439,7 @@ class NowPlayingBar(Gtk.Box):
 
         volume_visible = state.volume_mode != "fixed"
         self._volume_box.set_visible(volume_visible)
+        self._controls_leading.set_hexpand(not volume_visible)
         if volume_visible and not self._volume_dragging and event in (
             None,
             "volume_changed",

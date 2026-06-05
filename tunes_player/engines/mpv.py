@@ -79,6 +79,7 @@ class MpvEngine:
         self._unity_gain = unity_gain
         self._volume = volume
         self._output_profile = output_profile
+        self._use_device_output = use_device_output
         self._software_volume = not unity_gain and not use_device_output
         self._on_event = on_event
         self._loaded_uri: str | None = None
@@ -166,7 +167,10 @@ class MpvEngine:
             return
         log = logging.getLogger(__name__)
         self._player.replaygain = "no"
-        self._player.volume = 100
+        if self._unity_gain:
+            self._player.volume = 100
+        else:
+            self._apply_software_volume()
         if profile.allow_resample:
             self._player.audio_resample = "yes"
         else:
@@ -237,6 +241,7 @@ class MpvEngine:
     def set_bit_perfect(self, enabled: bool) -> None:
         """Unity gain in mpv (no soft volume)."""
         self._unity_gain = enabled
+        self._software_volume = not enabled and not self._use_device_output
         self._player.replaygain = "no"
         if enabled or not self._software_volume:
             self._player.volume = 100
