@@ -1508,8 +1508,6 @@ class PlayerService:
     def _ensure_engine(self) -> PlaybackEngine | None:
         if self._engine is not None:
             return self._engine
-        if self._engine_error is not None:
-            return None
         try:
             from tunes_player.engines.mpv import create_mpv_engine
 
@@ -1530,6 +1528,7 @@ class PlayerService:
         return self._engine
 
     def _start_queue_track(self, track: Track, *, resume: bool = True) -> None:
+        self._engine_error = None
         try:
             source = resolve_track(
                 self._store, track.id, tidal=self._tidal, qobuz=self._qobuz
@@ -1729,10 +1728,7 @@ class PlayerService:
                 return
             self._sync_duration_from_engine()
             self._sync_playback_position_from_engine()
-            if self._engine_error is None:
-                self._report_error("Playback failed.")
-            else:
-                self._emit("playback_error", "playback_changed")
+            self._report_error("Playback failed.")
             return
         if event == "position_changed":
             self._sync_playback_position_from_engine()

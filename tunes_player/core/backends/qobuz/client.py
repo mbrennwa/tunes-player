@@ -39,6 +39,16 @@ class QobuzUnavailableError(RuntimeError):
     """Raised when Qobuz is not configured, login failed, or stream unavailable."""
 
 
+_QOBUZ_NO_RESULT_API_MESSAGE = "No result matching given argument"
+_TRACK_UNAVAILABLE_MESSAGE = "This track isn't available for streaming on Qobuz."
+
+
+def _user_facing_api_error(message: str, *, endpoint: str) -> str:
+    if message == _QOBUZ_NO_RESULT_API_MESSAGE and endpoint.startswith("track/"):
+        return _TRACK_UNAVAILABLE_MESSAGE
+    return message
+
+
 def sign_get_file_url(
     *,
     track_id: str,
@@ -500,7 +510,10 @@ class QobuzClient:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 body = resp.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
-            message = self._error_message_from_http(exc)
+            raw_message = self._error_message_from_http(exc)
+            message = _user_facing_api_error(raw_message, endpoint=endpoint)
+            if message != raw_message:
+                log.debug("Qobuz API error on %s: %s", endpoint, raw_message)
             if exc.code in (401, 400) and endpoint == "user/login":
                 raise QobuzUnavailableError(message) from exc
             raise QobuzUnavailableError(message) from exc
@@ -512,8 +525,12 @@ class QobuzClient:
             raise QobuzUnavailableError("Invalid response from Qobuz.") from exc
         if not isinstance(data, dict):
             raise QobuzUnavailableError("Unexpected Qobuz response.")
-        if data.get("status") == "error" or "message" in data and data.get("code"):
-            raise QobuzUnavailableError(str(data.get("message") or "Qobuz API error."))
+        if data.get("status") == "error":
+            raw_message = str(data.get("message") or "Qobuz API error.")
+            message = _user_facing_api_error(raw_message, endpoint=endpoint)
+            if message != raw_message:
+                log.debug("Qobuz API error on %s: %s", endpoint, raw_message)
+            raise QobuzUnavailableError(message)
         return data
 
     @staticmethod

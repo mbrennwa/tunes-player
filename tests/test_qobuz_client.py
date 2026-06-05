@@ -7,7 +7,9 @@ import unittest
 from tunes_player.core.backends.qobuz import ids as qobuz_ids
 from tunes_player.core.backends.qobuz.client import (
     _SUGGESTION_FEATURE_TYPES,
+    _TRACK_UNAVAILABLE_MESSAGE,
     _album_added_ns,
+    _user_facing_api_error,
     sign_get_file_url,
 )
 from tunes_player.core.backends.qobuz.client import QobuzClient
@@ -247,6 +249,40 @@ class TestReleaseFromQobuz(unittest.TestCase):
         }
         release = release_from_qobuz(album)
         self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_HI_RES)
+
+
+class TestUserFacingApiError(unittest.TestCase):
+    def test_track_endpoint_maps_no_result_message(self) -> None:
+        self.assertEqual(
+            _user_facing_api_error(
+                "No result matching given argument",
+                endpoint="track/getFileUrl",
+            ),
+            _TRACK_UNAVAILABLE_MESSAGE,
+        )
+
+    def test_track_get_endpoint_maps_no_result_message(self) -> None:
+        self.assertEqual(
+            _user_facing_api_error(
+                "No result matching given argument",
+                endpoint="track/get",
+            ),
+            _TRACK_UNAVAILABLE_MESSAGE,
+        )
+
+    def test_album_endpoint_keeps_raw_message(self) -> None:
+        raw = "No result matching given argument"
+        self.assertEqual(
+            _user_facing_api_error(raw, endpoint="album/get"),
+            raw,
+        )
+
+    def test_other_messages_unchanged(self) -> None:
+        message = "Qobuz request failed (HTTP 500)."
+        self.assertEqual(
+            _user_facing_api_error(message, endpoint="track/get"),
+            message,
+        )
 
 
 if __name__ == "__main__":
