@@ -20,6 +20,7 @@ from tunes_player.core.shell_state import (
     ShellBase,
     ShellState,
     apply_shell_view_filters,
+    ensure_source_enabled,
     genres_in_selection,
     prune_enabled_genres,
     release_to_cache_payload,
@@ -55,6 +56,7 @@ _ONBOARDING_MESSAGE = (
 _PRESET_LABELS = {
     ShellBase.NEW_MUSIC: "New Releases",
     ShellBase.SUGGESTION: "Suggest Music",
+    ShellBase.ALL_LOCAL: "All Local",
 }
 _LOADING_MESSAGES = {
     ShellBase.NEW_MUSIC: "Loading new releases…",
@@ -122,6 +124,15 @@ class TunesWindow(Adw.ApplicationWindow):
                 state,
                 enabled_sources=state.enabled_sources & sources,
             )
+        if state.base == ShellBase.ALL_LOCAL:
+            state = replace(
+                state,
+                enabled_sources=ensure_source_enabled(
+                    state.enabled_sources,
+                    Source.LOCAL,
+                    available=sources,
+                ),
+            )
         return state
 
     def _build_shell(self) -> None:
@@ -176,6 +187,11 @@ class TunesWindow(Adw.ApplicationWindow):
         self._suggestion_btn.add_css_class("shell-preset-btn")
         self._suggestion_btn.connect("toggled", self._on_suggestion_toggled)
         search_row.append(self._suggestion_btn)
+
+        self._all_local_btn = Gtk.ToggleButton(label="All Local")
+        self._all_local_btn.add_css_class("shell-preset-btn")
+        self._all_local_btn.connect("toggled", self._on_all_local_toggled)
+        search_row.append(self._all_local_btn)
 
         controls.append(search_row)
 
@@ -332,6 +348,7 @@ class TunesWindow(Adw.ApplicationWindow):
         try:
             self._new_music_btn.set_active(state.base == ShellBase.NEW_MUSIC)
             self._suggestion_btn.set_active(state.base == ShellBase.SUGGESTION)
+            self._all_local_btn.set_active(state.base == ShellBase.ALL_LOCAL)
         finally:
             self._updating_preset = False
 
@@ -339,10 +356,11 @@ class TunesWindow(Adw.ApplicationWindow):
             current = self._search_entry.get_text()
             if current != state.search_query:
                 self._search_entry.set_text(state.search_query)
-        elif state.base in (ShellBase.NEW_MUSIC, ShellBase.SUGGESTION):
+        elif state.base in (ShellBase.NEW_MUSIC, ShellBase.SUGGESTION, ShellBase.ALL_LOCAL):
             if self._search_entry.get_text():
                 self._search_entry.set_text("")
 
+        self._all_local_btn.set_visible(Source.LOCAL in available_sources(self._service))
         self._sync_source_multi()
         self._sync_release_type_multi()
         self._sync_genre_filter()
@@ -507,12 +525,28 @@ class TunesWindow(Adw.ApplicationWindow):
         elif self._shell_state.base == ShellBase.SUGGESTION:
             button.set_active(True)
 
+    def _on_all_local_toggled(self, button: Gtk.ToggleButton) -> None:
+        if getattr(self, "_updating_preset", False):
+            return
+        if button.get_active():
+            self._activate_preset(ShellBase.ALL_LOCAL)
+        elif self._shell_state.base == ShellBase.ALL_LOCAL:
+            button.set_active(True)
+
     def _activate_preset(self, base: ShellBase) -> None:
+        enabled_sources = self._shell_state.enabled_sources
+        if base == ShellBase.ALL_LOCAL:
+            enabled_sources = ensure_source_enabled(
+                enabled_sources,
+                Source.LOCAL,
+                available=available_sources(self._service),
+            )
         self._set_shell_state(
             replace(
                 self._shell_state,
                 base=base,
                 search_query="",
+                enabled_sources=enabled_sources,
                 cached_releases=(),
             ),
         )
@@ -716,6 +750,11 @@ class TunesWindow(Adw.ApplicationWindow):
             return (
                 "Play music to build suggestions from your library, or sign in to "
                 "TIDAL or Qobuz in Settings → Sources."
+            )
+        if state.base == ShellBase.ALL_LOCAL:
+            return (
+                "No local releases.\n"
+                "Add music folders in Settings → Sources and scan your library."
             )
         if state.enabled_genres:
             return "No releases match the selected genres."

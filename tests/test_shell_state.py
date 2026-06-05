@@ -25,6 +25,7 @@ from tunes_player.core.shell_state import (
     apply_release_type_filter,
     apply_shell_sort,
     apply_source_filter,
+    ensure_source_enabled,
     genres_in_selection,
     parse_shell_state,
     prune_enabled_genres,
@@ -83,6 +84,12 @@ class TestShellStateParsing(unittest.TestCase):
             {"base": "new_music", "search_query": "leftover"},
         )
         self.assertEqual(restored.base, ShellBase.NEW_MUSIC)
+        self.assertEqual(restored.search_query, "")
+
+    def test_all_local_roundtrip(self) -> None:
+        state = ShellState(base=ShellBase.ALL_LOCAL)
+        restored = ShellState.from_dict(state.to_dict())
+        self.assertEqual(restored.base, ShellBase.ALL_LOCAL)
         self.assertEqual(restored.search_query, "")
 
     def test_legacy_source_filter(self) -> None:
@@ -300,6 +307,41 @@ class TestGenreSelectionHelpers(unittest.TestCase):
             ("Rock", "Jazz"),
         )
         self.assertEqual(pruned, frozenset({"Rock"}))
+
+
+class TestEnsureSourceEnabled(unittest.TestCase):
+    def test_all_sources_unchanged(self) -> None:
+        available = {Source.LOCAL, Source.TIDAL}
+        self.assertEqual(
+            ensure_source_enabled(frozenset(), Source.LOCAL, available=available),
+            frozenset(),
+        )
+
+    def test_adds_missing_source(self) -> None:
+        available = {Source.LOCAL, Source.TIDAL, Source.QOBUZ}
+        self.assertEqual(
+            ensure_source_enabled(
+                frozenset({Source.TIDAL}),
+                Source.LOCAL,
+                available=available,
+            ),
+            frozenset({Source.TIDAL, Source.LOCAL}),
+        )
+
+    def test_already_enabled_unchanged(self) -> None:
+        available = {Source.LOCAL, Source.TIDAL}
+        enabled = frozenset({Source.LOCAL, Source.TIDAL})
+        self.assertEqual(
+            ensure_source_enabled(enabled, Source.LOCAL, available=available),
+            enabled,
+        )
+
+    def test_unavailable_source_unchanged(self) -> None:
+        enabled = frozenset({Source.TIDAL})
+        self.assertEqual(
+            ensure_source_enabled(enabled, Source.LOCAL, available={Source.TIDAL}),
+            enabled,
+        )
 
 
 class TestApplySourceFilter(unittest.TestCase):

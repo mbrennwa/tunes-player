@@ -20,6 +20,7 @@ class ShellBase(str, Enum):
     SEARCH = "search"
     NEW_MUSIC = "new_music"
     SUGGESTION = "suggestion"
+    ALL_LOCAL = "all_local"
 
 
 _VALID_BASES = frozenset(item.value for item in ShellBase)
@@ -266,6 +267,20 @@ def _parse_enabled_sources(raw: dict[str, Any]) -> frozenset[Source]:
 
 def parse_shell_state(raw: object) -> ShellState:
     return ShellState.from_dict(raw)
+
+
+def ensure_source_enabled(
+    enabled_sources: frozenset[Source],
+    source: Source,
+    *,
+    available: set[Source] | frozenset[Source],
+) -> frozenset[Source]:
+    """Ensure *source* is enabled without changing other explicit source toggles."""
+    if source not in available:
+        return enabled_sources
+    if not enabled_sources or source in enabled_sources:
+        return enabled_sources
+    return enabled_sources | frozenset({source})
 
 
 def apply_source_filter(

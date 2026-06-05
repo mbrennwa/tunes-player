@@ -39,6 +39,10 @@ def fetch_base_releases(
         return releases_from_recently_added(service.list_recently_added_items())
     if base == ShellBase.SUGGESTION:
         return releases_from_recently_added(service.list_suggestion_items())
+    if base == ShellBase.ALL_LOCAL:
+        if not service.config.config.music_folders:
+            return []
+        return service.list_releases()
     return []
 
 
