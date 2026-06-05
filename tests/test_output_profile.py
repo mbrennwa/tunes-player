@@ -16,7 +16,7 @@ from tunes_player.core.volume import pipewire_endpoint_id
 class OutputProfileTests(unittest.TestCase):
     def test_bit_depth_to_mpv_format_uses_mpv_names(self) -> None:
         self.assertEqual(bit_depth_to_mpv_format(16), "s16")
-        self.assertEqual(bit_depth_to_mpv_format(24), "s24")
+        self.assertEqual(bit_depth_to_mpv_format(24), "s32")
         self.assertEqual(bit_depth_to_mpv_format(32), "s32")
 
     def test_direct_alsa_profile_audio_format(self) -> None:

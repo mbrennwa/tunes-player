@@ -9,9 +9,10 @@ from dataclasses import dataclass, replace
 import gi
 
 gi.require_version("Adw", "1")
+gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Adw, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.logging_config import configure_logging
 from tunes_player.core.models import Release, Source
@@ -105,6 +106,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._cached_selection_key: tuple[str, str] | None = None
         self._cached_releases: list[Release] = []
         self._selection_stack: list[_SelectionSnapshot] = []
+        self._prepared_for_first_show = False
         self.set_default_size(*_DEFAULT_SIZE)
         self.set_icon_name("tunes-player")
 
@@ -125,8 +127,56 @@ class TunesWindow(Adw.ApplicationWindow):
         attach_error_toasts(self._toast_overlay, service)
         service.subscribe(lambda event: GLib.idle_add(self._on_service_event, event))
         self.connect("close-request", self._on_close_request)
-        GLib.idle_add(self._startup_playback_probe)
-        GLib.idle_add(self._reload_grid)
+
+    def prepare_for_first_show(self) -> None:
+        """Build the initial browse view before the window is first shown."""
+        if self._prepared_for_first_show:
+            return
+        self._prepared_for_first_show = True
+        if self.get_realized() and not self.get_mapped():
+            self._apply_startup_window_size(*_DEFAULT_SIZE)
+        self._reload_grid()
+        self._ensure_startup_window_size()
+        self._sync_visible_grid_layout()
+        self._startup_playback_probe()
+
+    def _apply_startup_window_size(self, width: int, height: int) -> None:
+        """GTK 4 has no resize(); set default size and allocate before first map."""
+        self.set_default_size(width, height)
+        if not self.get_realized() or self.get_mapped():
+            return
+        allocation = Gdk.Rectangle()
+        allocation.width = width
+        allocation.height = height
+        self.size_allocate(allocation, -1)
+
+    def _ensure_startup_window_size(self) -> None:
+        """Set the first mapped size from realized chrome, before present()."""
+        if not self.get_realized():
+            return
+        default_w, default_h = _DEFAULT_SIZE
+        width = default_w
+        height = default_h
+        for widget in (self._shell_controls, self._now_playing, self._header):
+            _min_w, natural_w, _min_b, _nat_b = widget.measure(
+                Gtk.Orientation.HORIZONTAL,
+                height,
+            )
+            width = max(width, natural_w)
+            _min_h, natural_h, _min_b, _nat_b = widget.measure(
+                Gtk.Orientation.VERTICAL,
+                width,
+            )
+            height = max(height, natural_h)
+        self._apply_startup_window_size(width, height)
+
+    def _sync_visible_grid_layout(self) -> None:
+        page = self._main_nav.get_visible_page()
+        if page is None:
+            return
+        child = page.get_child()
+        if isinstance(child, ReleaseGridView):
+            child.sync_tile_layout()
 
     def _load_initial_shell_state(self) -> ShellState:
         state = self._service.config.config.shell_state
@@ -1080,6 +1130,9 @@ def run() -> int:
             window = self.get_active_window()
             if window is None:
                 window = TunesWindow(application=self, service=service)
+                if not window.get_realized():
+                    window.realize()
+                window.prepare_for_first_show()
             window.present()
 
         def do_shutdown(self) -> None:  # noqa: N802 — GTK vfunc
