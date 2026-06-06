@@ -97,6 +97,7 @@ class MpvPlaybackClient:
         output_profile: PlaybackOutputProfile | None = None,
         on_event: EngineCallback | None = None,
         ipc_socket_path: Path | None = None,
+        endpoint_id: str | None = None,
         bit_perfect: bool | None = None,
     ) -> None:
         if bit_perfect is not None:
