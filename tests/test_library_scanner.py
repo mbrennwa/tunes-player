@@ -186,6 +186,40 @@ class LibraryScannerScopedTests(unittest.TestCase):
         self.assertNotIn(ids.track_id(path_a), track_ids)
         self.assertIn(ids.track_id(path_b), track_ids)
 
+    def test_purge_unconfigured_folders_removes_orphaned_roots(self) -> None:
+        path_a = str((self._folder_a / "track_a.flac").resolve())
+        path_b = str((self._folder_b / "track_b.flac").resolve())
+        connection = connect(self._db_path)
+        try:
+            for path in (path_a, path_b):
+                connection.execute(
+                    "INSERT INTO files(path, mtime_ns, size_bytes, indexed_at_ns) VALUES (?, ?, ?, ?)",
+                    (path, 1, 1, 1),
+                )
+            connection.commit()
+        finally:
+            connection.close()
+
+        config = AppConfig(
+            music_folders=[str(self._folder_a.resolve())],
+            music_folder_added_at={str(self._folder_a.resolve()): 1.0},
+        )
+        scanner = LibraryScanner(db_path=self._db_path, config=config)
+        removed = scanner.purge_unconfigured_folders()
+
+        connection = connect(self._db_path)
+        try:
+            paths = {
+                row["path"]
+                for row in connection.execute("SELECT path FROM files").fetchall()
+            }
+        finally:
+            connection.close()
+
+        self.assertEqual(removed, 1)
+        self.assertIn(path_a, paths)
+        self.assertNotIn(path_b, paths)
+
     def test_scan_indexes_paths_that_old_casefold_ids_would_collide(self) -> None:
         collision_root = self._root / "collision"
         dir_a = collision_root / "Music"

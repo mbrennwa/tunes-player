@@ -200,6 +200,11 @@ class LibraryScanner:
             connection.commit()
             connection.execute("BEGIN")
             removed = self._remove_missing_files(connection, seen_paths, roots)
+            configured_roots = [
+                str(Path(folder).resolve())
+                for folder in self._config.music_folders
+            ]
+            removed += self._purge_files_outside_roots(connection, configured_roots)
             art_added, art_repaired = maintain_album_art(connection, data_dir=self._data_dir)
             art_indexed = art_added + art_repaired
             connection.commit()
@@ -359,31 +364,49 @@ class LibraryScanner:
             self._record_file_error(file_errors, path_str, reason)
             return "error", path_str
 
-        connection.execute("SAVEPOINT index_file")
-        try:
-            track_pk = ids.track_id(path_str)
-            connection.execute("DELETE FROM tracks WHERE id = ?", (track_pk,))
-            connection.execute("DELETE FROM files WHERE path = ?", (path_str,))
-            file_id = self._insert_file(connection, parsed, indexed_at_ns=time.time_ns())
-            self._insert_track(connection, parsed, file_id)
-            index_album_art_for_file(
-                connection,
-                data_dir=self._data_dir,
-                path=Path(parsed.path),
-                album_id=parsed.release_id,
-            )
-            connection.execute("RELEASE SAVEPOINT index_file")
-        except Exception as exc:
+        last_error: sqlite3.OperationalError | None = None
+        for attempt in range(_LOCK_RETRY_ATTEMPTS):
+            connection.execute("SAVEPOINT index_file")
             try:
-                connection.execute("ROLLBACK TO SAVEPOINT index_file")
+                track_pk = ids.track_id(path_str)
+                connection.execute("DELETE FROM tracks WHERE id = ?", (track_pk,))
+                connection.execute("DELETE FROM files WHERE path = ?", (path_str,))
+                file_id = self._insert_file(connection, parsed, indexed_at_ns=time.time_ns())
+                self._insert_track(connection, parsed, file_id)
+                index_album_art_for_file(
+                    connection,
+                    data_dir=self._data_dir,
+                    path=Path(parsed.path),
+                    album_id=parsed.release_id,
+                )
                 connection.execute("RELEASE SAVEPOINT index_file")
-            except sqlite3.OperationalError:
-                pass
-            reason = str(exc).strip() or type(exc).__name__
-            self._record_file_error(file_errors, path_str, reason)
-            return "error", path_str
+                return "indexed", path_str
+            except sqlite3.OperationalError as exc:
+                try:
+                    connection.execute("ROLLBACK TO SAVEPOINT index_file")
+                    connection.execute("RELEASE SAVEPOINT index_file")
+                except sqlite3.OperationalError:
+                    pass
+                if _is_locked_error(exc) and attempt < _LOCK_RETRY_ATTEMPTS - 1:
+                    last_error = exc
+                    time.sleep(_LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
+                    continue
+                reason = str(exc).strip() or type(exc).__name__
+                self._record_file_error(file_errors, path_str, reason)
+                return "error", path_str
+            except Exception as exc:
+                try:
+                    connection.execute("ROLLBACK TO SAVEPOINT index_file")
+                    connection.execute("RELEASE SAVEPOINT index_file")
+                except sqlite3.OperationalError:
+                    pass
+                reason = str(exc).strip() or type(exc).__name__
+                self._record_file_error(file_errors, path_str, reason)
+                return "error", path_str
 
-        return "indexed", path_str
+        if last_error is not None:
+            self._record_file_error(file_errors, path_str, str(last_error))
+        return "error", path_str
 
     def purge_folder(self, folder: str) -> int:
         """Remove all indexed files under *folder* from the library database."""
@@ -394,6 +417,36 @@ class LibraryScanner:
             try:
                 connection.execute("BEGIN")
                 removed = self._purge_files_under_roots(connection, [root])
+                prune_orphan_album_art(connection, data_dir=self._data_dir)
+                connection.commit()
+                return removed
+            except sqlite3.OperationalError as exc:
+                connection.rollback()
+                if not _is_locked_error(exc) or attempt == 5:
+                    raise
+                last_error = exc
+                time.sleep(0.15 * (attempt + 1))
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+        if last_error is not None:
+            raise last_error
+        return 0
+
+    def purge_unconfigured_folders(self) -> int:
+        """Remove indexed files whose path is outside configured music folders."""
+        roots = [
+            str(Path(folder).resolve())
+            for folder in self._config.music_folders
+        ]
+        last_error: sqlite3.OperationalError | None = None
+        for attempt in range(6):
+            connection = connect(self._db_path)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                removed = self._purge_files_outside_roots(connection, roots)
                 prune_orphan_album_art(connection, data_dir=self._data_dir)
                 connection.commit()
                 return removed
@@ -600,6 +653,33 @@ class LibraryScanner:
             connection.execute("DELETE FROM files WHERE id = ?", (row["id"],))
             removed += 1
         return removed
+
+    @staticmethod
+    def purge_files_outside_roots(
+        connection: sqlite3.Connection,
+        roots: list[str],
+    ) -> int:
+        if not roots:
+            cursor = connection.execute("DELETE FROM files")
+            return int(cursor.rowcount)
+        clauses: list[str] = []
+        params: list[str] = []
+        for root in roots:
+            clauses.append("(path = ? OR path LIKE ?)")
+            params.extend((root, root + os.sep + "%"))
+        where_under = " OR ".join(clauses)
+        cursor = connection.execute(
+            f"DELETE FROM files WHERE NOT ({where_under})",
+            params,
+        )
+        return int(cursor.rowcount)
+
+    @staticmethod
+    def _purge_files_outside_roots(
+        connection: sqlite3.Connection,
+        roots: list[str],
+    ) -> int:
+        return LibraryScanner.purge_files_outside_roots(connection, roots)
 
 
 def _parse_file(path: Path, mtime_ns: int, size_bytes: int) -> _ParsedTrack:

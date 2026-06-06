@@ -157,6 +157,26 @@ class OutputProfileTests(unittest.TestCase):
         assert path.playback_note is not None
         self.assertIn("resampling", path.playback_note)
 
+    def test_direct_alsa_bit_perfect_with_fixed_output_dac(self) -> None:
+        caps = HwAudioCaps(sample_rates=(44100, 48000, 96000, 192000), bit_depths=(16, 24))
+        _profile, path = compute_output_profile(
+            file_meta=FileMetadata(
+                path="/a.flac",
+                codec="flac",
+                duration_sec=1.0,
+                sample_rate=192000,
+                bit_depth=24,
+                channels=2,
+            ),
+            hw_caps=caps,
+            endpoint_id="alsa:hw:1:0",
+            exclusive_enabled=False,
+            device_volume=False,
+            mpv_soft_volume=False,
+        )
+        self.assertTrue(path.bit_perfect_playback)
+        self.assertEqual(path.playback_note, "ALSA bit-perfect")
+
     def test_pipewire_note_when_streaming(self) -> None:
         _profile, path = compute_output_profile(
             file_meta=None,

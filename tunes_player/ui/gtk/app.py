@@ -1273,7 +1273,14 @@ def run() -> int:
     config.load()
     configure_logging(config.data_dir)
     volume_controller = create_volume_controller(config.config)
-    service = PlayerService(config=config, volume_controller=volume_controller)
+    service = PlayerService(
+        config=config,
+        volume_controller=volume_controller,
+        main_thread_hook=lambda fn: GLib.idle_add(
+            fn,
+            priority=GLib.PRIORITY_DEFAULT_IDLE,
+        ),
+    )
     mpris_service = None
 
     class TunesApplication(Adw.Application):
@@ -1304,6 +1311,11 @@ def run() -> int:
 
     from tunes_player.platform.linux.mpris import create_mpris_service
 
+    from tunes_player.ui.gtk.folder_monitor import FolderMonitorManager
+
+    folder_monitor = FolderMonitorManager(service)
+    folder_monitor.start()
+
     mpris_service = create_mpris_service(
         service,
         on_raise=_raise_app,
@@ -1311,13 +1323,12 @@ def run() -> int:
     )
     mpris_service.start()
 
-    from tunes_player.ui.gtk.folder_monitor import FolderMonitorManager
-
-    folder_monitor = FolderMonitorManager(service)
-    folder_monitor.start()
-
     def _poll_playback() -> bool:
         service.poll_playback()
+        return True
+
+    def _poll_playback_health() -> bool:
+        service.poll_playback_health()
         return True
 
     def _poll_scan() -> bool:
@@ -1325,5 +1336,6 @@ def run() -> int:
         return True
 
     GLib.timeout_add(100, _poll_playback)
-    GLib.timeout_add(200, _poll_scan)
+    GLib.timeout_add(1000, _poll_playback_health)
+    GLib.timeout_add(500, _poll_scan)
     return app.run(None)

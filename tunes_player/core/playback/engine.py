@@ -1,4 +1,4 @@
-"""Playback engine protocol — implemented by engines/mpv.py."""
+"""Playback engine protocol — implemented by engines/playback_client.py."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ EngineEvent = Literal[
     "playing_changed",
     "track_finished",
     "playback_error",
+    "playback_path_changed",
 ]
 
 

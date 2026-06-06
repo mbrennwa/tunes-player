@@ -140,7 +140,7 @@ def compute_output_profile(
             f"ALSA {format_rate_label(file_rate)} → {format_rate_label(rate)} resampling"
         )
 
-    unity_path = not mpv_soft_volume and device_volume
+    unity_path = not mpv_soft_volume
     bit_perfect = (
         unity_path
         and not resampled

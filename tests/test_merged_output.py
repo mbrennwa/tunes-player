@@ -117,7 +117,34 @@ class MergedOutputTests(unittest.TestCase):
                 self.assertFalse(controller.uses_device_volume)
                 self.assertEqual(controller.mpv_audio_device(), "alsa/hw:0,0")
 
-    def test_exclusive_access_supported_for_alsa_hw(self) -> None:
+    def test_exclusive_access_supported_for_usb_alsa(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ConfigManager(Path(tmp) / "config.json")
+            config.load()
+            controller = LinuxOutputController(config.config)
+            with (
+                patch.object(
+                    controller,
+                    "_alsa_volume_endpoints",
+                    return_value=[
+                        VolumeEndpoint(
+                            id="alsa:hw:1:0",
+                            name="hw:1,0",
+                            description="Holo USB",
+                            bit_perfect_potential="direct",
+                        )
+                    ],
+                ),
+                patch.object(controller, "_list_sink_endpoints", return_value=[]),
+                patch(
+                    "tunes_player.platform.linux.alsa_mixer.alsa_card_is_usb",
+                    return_value=True,
+                ),
+            ):
+                controller.set_active_endpoint("alsa:hw:1:0")
+                self.assertTrue(controller.exclusive_access_supported())
+
+    def test_exclusive_access_supported_for_pci_alsa(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = ConfigManager(Path(tmp) / "config.json")
             config.load()
@@ -136,6 +163,10 @@ class MergedOutputTests(unittest.TestCase):
                     ],
                 ),
                 patch.object(controller, "_list_sink_endpoints", return_value=[]),
+                patch(
+                    "tunes_player.platform.linux.alsa_mixer.alsa_card_is_usb",
+                    return_value=False,
+                ),
             ):
                 controller.set_active_endpoint("alsa:hw:0:0")
                 self.assertTrue(controller.exclusive_access_supported())

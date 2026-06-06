@@ -164,12 +164,14 @@ def mpv_playback_options(
     output_profile: object | None = None,
 ) -> dict[str, object]:
     """Build mpv constructor options for the selected output profile."""
+    from tunes_player.core.playback.mpv_cli import base_audio_options
     from tunes_player.core.playback.output_profile import PlaybackOutputProfile
-    from tunes_player.engines.mpv import _base_audio_options
 
     options: dict[str, object] = {}
     profile = output_profile if isinstance(output_profile, PlaybackOutputProfile) else None
-    options.update(_base_audio_options(profile, use_device_output=profile is None or not profile.direct_alsa))
+    options.update(
+        base_audio_options(profile, use_device_output=profile is None or not profile.direct_alsa)
+    )
     if unity_gain:
         options["volume"] = 100
         options["replaygain"] = "no"

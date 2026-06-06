@@ -2,7 +2,7 @@
 
 Requires:
   sudo modprobe snd-aloop pcm_substreams=1
-  mpv/libmpv, arecord, aplay
+  mpv subprocess, arecord, aplay
 
 Run (quit Tunes Player first — exclusive ALSA blocks loopback capture):
   source .venv/bin/activate
