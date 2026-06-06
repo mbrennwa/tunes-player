@@ -9,9 +9,15 @@ from typing import TYPE_CHECKING
 
 from tunes_player.core.playback.engine import EngineEvent
 from tunes_player.core.playback.output_profile import PlaybackOutputProfile
+from tunes_player.core.playback.playback_path import (
+    PlaybackPathContext,
+    derive_playback_path_info,
+    read_negotiated_playback_state,
+)
 
 if TYPE_CHECKING:
     from mpv import MPV
+    from tunes_player.core.playback.output_profile import PlaybackPathInfo
 
 EngineCallback = Callable[[EngineEvent], None]
 
@@ -85,6 +91,8 @@ class MpvEngine:
         self._playing = False
         self._last_position_emit = 0.0
         self._track_end_signaled = False
+        self._path_context: PlaybackPathContext | None = None
+        self._path_info: PlaybackPathInfo | None = None
 
         options: dict[str, object] = {
             "video": False,
@@ -133,6 +141,36 @@ class MpvEngine:
         else:
             self._player.audio_exclusive = "no"
 
+    def set_playback_path_context(self, context: PlaybackPathContext | None) -> None:
+        self._path_context = context
+
+    def get_playback_path_info(self) -> PlaybackPathInfo | None:
+        return self._path_info
+
+    def _refresh_playback_path_info(self) -> None:
+        profile = self._output_profile
+        context = self._path_context
+        if profile is None or context is None:
+            return
+        previous = self._path_info
+        self._path_info = derive_playback_path_info(
+            file_meta=context.file_meta,
+            profile=profile,
+            negotiated=read_negotiated_playback_state(self._get_mpv_property),
+            endpoint_id=context.endpoint_id,
+            device_volume=context.device_volume,
+            mpv_soft_volume=context.mpv_soft_volume,
+        )
+        if self._path_info != previous:
+            self._emit("playback_path_changed")
+
+    def _get_mpv_property(self, name: str) -> object:
+        attr = name.replace("-", "_")
+        try:
+            return getattr(self._player, attr)
+        except AttributeError:
+            return None
+
     def set_event_callback(self, callback: EngineCallback | None) -> None:
         self._on_event = callback
 
@@ -156,6 +194,7 @@ class MpvEngine:
             self._player.time_pos = start_sec
         self._player.pause = False
         self._playing = True
+        self._refresh_playback_path_info()
         self._emit("duration_changed")
         self._emit("playing_changed")
 
@@ -318,6 +357,7 @@ class MpvEngine:
                 return
             self._duration_sec = float(value)
             self._emit("duration_changed")
+            self._refresh_playback_path_info()
 
         @player.property_observer("pause")
         def _on_pause(_name: str, value: bool | None) -> None:

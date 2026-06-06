@@ -1453,6 +1453,38 @@ class PlayerService:
         self._playback_note = path_info.playback_note
         self._refresh_quality_hint()
 
+    def _configure_engine_playback_path(
+        self,
+        engine: PlaybackEngine,
+        track: Track,
+        *,
+        source: PlayableSource | None = None,
+    ) -> None:
+        setter = getattr(engine, "set_playback_path_context", None)
+        if not callable(setter):
+            return
+        from tunes_player.core.playback.playback_path import PlaybackPathContext
+
+        setter(
+            PlaybackPathContext(
+                endpoint_id=self._active_endpoint_id(),
+                device_volume=self._device_volume,
+                mpv_soft_volume=self._mpv_soft_volume(),
+                file_meta=self._file_meta_for_playback_profile(track, source=source),
+            )
+        )
+
+    def _sync_playback_path_from_engine(self) -> None:
+        engine = self._engine
+        if engine is None:
+            return
+        getter = getattr(engine, "get_playback_path_info", None)
+        if not callable(getter):
+            return
+        path_info = getter()
+        if path_info is not None:
+            self._apply_path_info(path_info)
+
     def _refresh_quality_hint(self) -> None:
         """Rebuild now-playing format line including the active audio layer."""
         track = self._current_track
@@ -1557,6 +1589,7 @@ class PlayerService:
         )
         if hasattr(engine, "set_output_profile"):
             engine.set_output_profile(profile)
+        self._configure_engine_playback_path(engine, track, source=source)
         engine.load(
             source.playback_target,
             start_sec=pos,
@@ -1623,6 +1656,7 @@ class PlayerService:
             format_label=source.format_label,
             playback_note=path_info.playback_note,
         )
+        self._configure_engine_playback_path(engine, track, source=source)
         engine.load(source.playback_target, start_sec=pos, output_profile=profile)
         if not playing:
             engine.pause()
@@ -1743,6 +1777,7 @@ class PlayerService:
         self._acquire_exclusive_session_if_needed(profile)
         if self._engine is not None and hasattr(self._engine, "set_output_profile"):
             self._engine.set_output_profile(profile)
+        self._configure_engine_playback_path(engine, track, source=source)
         engine.load(
             source.playback_target,
             start_sec=source.start_sec,
@@ -1914,6 +1949,9 @@ class PlayerService:
         elif event == "playing_changed":
             self._sync_duration_from_engine()
             self._sync_playback_position_from_engine()
+            self._emit("playback_changed")
+        elif event == "playback_path_changed":
+            self._sync_playback_path_from_engine()
             self._emit("playback_changed")
 
     def _report_error(self, message: str, *, exc: BaseException | None = None) -> None:

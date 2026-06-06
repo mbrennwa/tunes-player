@@ -17,13 +17,19 @@ from typing import TYPE_CHECKING, Any
 
 from tunes_player.core.playback.engine import EngineEvent
 from tunes_player.core.playback.mpv_cli import mpv_cli_args_from_options
+from tunes_player.core.playback.playback_path import (
+    PlaybackPathContext,
+    derive_playback_path_info,
+    read_negotiated_playback_state,
+)
 from tunes_player.engines.playback_ipc import (
     end_file_triggers_playback_error,
     end_file_triggers_track_finished,
 )
 
 if TYPE_CHECKING:
-    from tunes_player.core.playback.output_profile import PlaybackOutputProfile
+    from tunes_player.core.playback.output_profile import PlaybackOutputProfile, PlaybackPathInfo
+    from tunes_player.core.playback.playback_path import PlaybackPathContext
 
 EngineCallback = Callable[[EngineEvent], None]
 
@@ -99,6 +105,8 @@ class MpvPlaybackClient:
         self._track_end_signaled = False
         self._last_position_emit = 0.0
         self._shutdown = False
+        self._path_context: PlaybackPathContext | None = None
+        self._path_info: PlaybackPathInfo | None = None
 
         self._start_process()
         self._configure_stream_demuxer()
@@ -258,6 +266,7 @@ class MpvPlaybackClient:
                 return
             self._duration_sec = duration
             self._emit("duration_changed")
+            self._refresh_playback_path_info()
         elif name == "pause":
             paused = data is True or data == "yes"
             self._playing = not paused and self._loaded_uri is not None
@@ -318,6 +327,29 @@ class MpvPlaybackClient:
         self.set_property("ao", "alsa")
         self.set_property("audio-exclusive", "yes" if profile.use_exclusive else "no")
 
+    def set_playback_path_context(self, context: PlaybackPathContext | None) -> None:
+        self._path_context = context
+
+    def get_playback_path_info(self) -> PlaybackPathInfo | None:
+        return self._path_info
+
+    def _refresh_playback_path_info(self) -> None:
+        profile = self._output_profile
+        context = self._path_context
+        if profile is None or context is None:
+            return
+        previous = self._path_info
+        self._path_info = derive_playback_path_info(
+            file_meta=context.file_meta,
+            profile=profile,
+            negotiated=read_negotiated_playback_state(self.get_property),
+            endpoint_id=context.endpoint_id,
+            device_volume=context.device_volume,
+            mpv_soft_volume=context.mpv_soft_volume,
+        )
+        if self._path_info != previous:
+            self._emit("playback_path_changed")
+
     def set_event_callback(self, callback: EngineCallback | None) -> None:
         self._on_event = callback
 
@@ -343,6 +375,7 @@ class MpvPlaybackClient:
             self.command("seek", start_sec, "absolute")
         self.set_property("pause", False)
         self._playing = True
+        self._refresh_playback_path_info()
         self._emit("duration_changed")
         self._emit("playing_changed")
 
