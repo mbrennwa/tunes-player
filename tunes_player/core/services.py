@@ -1478,6 +1478,9 @@ class PlayerService:
         engine = self._engine
         if engine is None:
             return
+        refresher = getattr(engine, "refresh_playback_path_info", None)
+        if callable(refresher):
+            refresher()
         getter = getattr(engine, "get_playback_path_info", None)
         if not callable(getter):
             return
@@ -1947,7 +1950,9 @@ class PlayerService:
             self._sync_duration_from_engine()
             self._emit("playback_changed")
         elif event == "playing_changed":
-            self._sync_duration_from_engine()
+            engine = self._engine
+            if engine is not None:
+                self._is_playing = engine.is_playing()
             self._sync_playback_position_from_engine()
             self._emit("playback_changed")
         elif event == "playback_path_changed":

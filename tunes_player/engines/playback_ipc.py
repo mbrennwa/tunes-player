@@ -32,3 +32,19 @@ def end_file_triggers_track_finished(reason: object) -> bool:
     except (TypeError, ValueError):
         return False
     return code == END_FILE_EOF
+
+
+def end_file_applies_to_playlist_entry(
+    *,
+    active_entry_id: int | None,
+    event_entry_id: object,
+) -> bool:
+    """Ignore end-file events from a replaced or not-yet-active playlist entry."""
+    if active_entry_id is None:
+        return False
+    if event_entry_id is None:
+        return True
+    try:
+        return int(event_entry_id) == active_entry_id
+    except (TypeError, ValueError):
+        return True

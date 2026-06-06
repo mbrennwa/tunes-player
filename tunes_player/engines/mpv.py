@@ -147,12 +147,11 @@ class MpvEngine:
     def get_playback_path_info(self) -> PlaybackPathInfo | None:
         return self._path_info
 
-    def _refresh_playback_path_info(self) -> None:
+    def refresh_playback_path_info(self) -> None:
         profile = self._output_profile
         context = self._path_context
         if profile is None or context is None:
             return
-        previous = self._path_info
         self._path_info = derive_playback_path_info(
             file_meta=context.file_meta,
             profile=profile,
@@ -161,6 +160,10 @@ class MpvEngine:
             device_volume=context.device_volume,
             mpv_soft_volume=context.mpv_soft_volume,
         )
+
+    def _refresh_playback_path_info(self) -> None:
+        previous = self._path_info
+        self.refresh_playback_path_info()
         if self._path_info != previous:
             self._emit("playback_path_changed")
 

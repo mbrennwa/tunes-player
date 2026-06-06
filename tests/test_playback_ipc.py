@@ -9,6 +9,7 @@ from tunes_player.engines.playback_ipc import (
     END_FILE_EOF,
     END_FILE_ERROR,
     END_FILE_STOP,
+    end_file_applies_to_playlist_entry,
     end_file_triggers_playback_error,
     end_file_triggers_track_finished,
 )
@@ -49,6 +50,32 @@ class EndFileReasonTests(unittest.TestCase):
 
     def test_eof_string_reason(self) -> None:
         self.assertTrue(end_file_triggers_track_finished("eof"))
+
+
+class PlaylistEntryEndFileTests(unittest.TestCase):
+    def test_ignores_events_while_no_active_entry(self) -> None:
+        self.assertFalse(
+            end_file_applies_to_playlist_entry(
+                active_entry_id=None,
+                event_entry_id=1,
+            )
+        )
+
+    def test_ignores_stale_entry(self) -> None:
+        self.assertFalse(
+            end_file_applies_to_playlist_entry(
+                active_entry_id=2,
+                event_entry_id=1,
+            )
+        )
+
+    def test_accepts_current_entry(self) -> None:
+        self.assertTrue(
+            end_file_applies_to_playlist_entry(
+                active_entry_id=2,
+                event_entry_id=2,
+            )
+        )
 
     def test_invalid_reason_is_ignored(self) -> None:
         self.assertFalse(end_file_triggers_playback_error(None))

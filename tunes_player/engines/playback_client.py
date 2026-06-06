@@ -11,6 +11,8 @@ import socket
 import subprocess
 import threading
 import time
+import atexit
+import weakref
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -23,6 +25,7 @@ from tunes_player.core.playback.playback_path import (
     read_negotiated_playback_state,
 )
 from tunes_player.engines.playback_ipc import (
+    end_file_applies_to_playlist_entry,
     end_file_triggers_playback_error,
     end_file_triggers_track_finished,
 )
@@ -37,6 +40,28 @@ _LOG = logging.getLogger(__name__)
 _CONNECT_TIMEOUT_SEC = 5.0
 _COMMAND_TIMEOUT_SEC = 30.0
 _POSITION_INTERVAL_SEC = 0.1
+_LIVE_CLIENTS: weakref.WeakSet = weakref.WeakSet()
+
+
+def _configure_mpv_child_process() -> None:
+    """Send SIGTERM to mpv when the Tunes parent process exits."""
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        if libc.prctl(1, signal.SIGTERM) != 0:  # PR_SET_PDEATHSIG
+            return
+    except (AttributeError, OSError):
+        return
+
+
+@atexit.register
+def _quit_live_mpv_clients() -> None:
+    for client in list(_LIVE_CLIENTS):
+        try:
+            client.quit()
+        except Exception:
+            _LOG.exception("Failed to quit mpv playback client during process exit")
 
 
 def _base_audio_options(
@@ -107,7 +132,10 @@ class MpvPlaybackClient:
         self._shutdown = False
         self._path_context: PlaybackPathContext | None = None
         self._path_info: PlaybackPathInfo | None = None
+        self._active_playlist_entry_id: int | None = None
+        self._load_in_progress = False
 
+        _LIVE_CLIENTS.add(self)
         self._start_process()
         self._configure_stream_demuxer()
         self._observe_properties()
@@ -146,13 +174,14 @@ class MpvPlaybackClient:
 
         cmd = [self._mpv_bin, *self._build_startup_args()]
         _LOG.info("Starting subprocess mpv: %s", " ".join(cmd))
-        self._proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        popen_kwargs: dict[str, object] = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if os.name == "posix":
+            popen_kwargs["preexec_fn"] = _configure_mpv_child_process
+        self._proc = subprocess.Popen(cmd, **popen_kwargs)  # type: ignore[arg-type]
         self._connect_socket()
         self._running = True
         self._reader = threading.Thread(
@@ -196,27 +225,34 @@ class MpvPlaybackClient:
     def _read_loop(self) -> None:
         assert self._sock_file is not None
         while self._running:
-            line = self._sock_file.readline()
+            try:
+                line = self._sock_file.readline()
+            except OSError:
+                break
             if not line:
                 break
             try:
                 message = json.loads(line.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
-            request_id = message.get("request_id")
-            if request_id is not None:
-                with self._response_ready:
-                    self._responses[int(request_id)] = message
-                    self._response_ready.notify_all()
-                continue
-            event = message.get("event")
-            if event == "property-change":
-                self._handle_property_change(message.get("name"), message.get("data"))
-            elif event == "end-file":
-                self._handle_end_file(
-                    message.get("reason"),
-                    file_error=message.get("file_error"),
-                )
+            try:
+                request_id = message.get("request_id")
+                if request_id is not None:
+                    with self._response_ready:
+                        self._responses[int(request_id)] = message
+                        self._response_ready.notify_all()
+                    continue
+                event = message.get("event")
+                if event == "property-change":
+                    self._handle_property_change(message.get("name"), message.get("data"))
+                elif event == "end-file":
+                    self._handle_end_file(
+                        message.get("reason"),
+                        file_error=message.get("file_error"),
+                        playlist_entry_id=message.get("playlist_entry_id"),
+                    )
+            except Exception:
+                _LOG.exception("Unhandled mpv IPC event")
 
     def _terminate_stale_mpv_instances(self) -> None:
         pattern = f"input-ipc-server={self._socket_path}"
@@ -266,13 +302,26 @@ class MpvPlaybackClient:
                 return
             self._duration_sec = duration
             self._emit("duration_changed")
-            self._refresh_playback_path_info()
+            self._emit("playback_path_changed")
         elif name == "pause":
+            if self._load_in_progress:
+                return
             paused = data is True or data == "yes"
             self._playing = not paused and self._loaded_uri is not None
             self._emit("playing_changed")
 
-    def _handle_end_file(self, reason: object, *, file_error: object = None) -> None:
+    def _handle_end_file(
+        self,
+        reason: object,
+        *,
+        file_error: object = None,
+        playlist_entry_id: object = None,
+    ) -> None:
+        if not end_file_applies_to_playlist_entry(
+            active_entry_id=self._active_playlist_entry_id,
+            event_entry_id=playlist_entry_id,
+        ):
+            return
         if end_file_triggers_track_finished(reason):
             self._signal_track_finished()
         elif end_file_triggers_playback_error(reason):
@@ -333,12 +382,12 @@ class MpvPlaybackClient:
     def get_playback_path_info(self) -> PlaybackPathInfo | None:
         return self._path_info
 
-    def _refresh_playback_path_info(self) -> None:
+    def refresh_playback_path_info(self) -> None:
+        """Update cached path info from mpv. Must run on the main thread, not the IPC reader."""
         profile = self._output_profile
         context = self._path_context
         if profile is None or context is None:
             return
-        previous = self._path_info
         self._path_info = derive_playback_path_info(
             file_meta=context.file_meta,
             profile=profile,
@@ -347,8 +396,6 @@ class MpvPlaybackClient:
             device_volume=context.device_volume,
             mpv_soft_volume=context.mpv_soft_volume,
         )
-        if self._path_info != previous:
-            self._emit("playback_path_changed")
 
     def set_event_callback(self, callback: EngineCallback | None) -> None:
         self._on_event = callback
@@ -361,21 +408,31 @@ class MpvPlaybackClient:
         output_profile: PlaybackOutputProfile | None = None,
     ) -> None:
         profile = output_profile if output_profile is not None else self._output_profile
-        if profile is not None:
-            self._apply_track_format(profile)
-        self._loaded_uri = uri
-        self._track_end_signaled = False
-        self._position_sec = max(0.0, start_sec)
-        self._duration_sec = None
-        self._last_position_emit = 0.0
-        response = self.command("loadfile", uri, "replace")
-        if response.get("error") != "success":
-            raise RuntimeError(f"mpv loadfile failed: {response.get('error')}")
-        if start_sec > 0:
-            self.command("seek", start_sec, "absolute")
-        self.set_property("pause", False)
-        self._playing = True
-        self._refresh_playback_path_info()
+        self._load_in_progress = True
+        self._active_playlist_entry_id = None
+        try:
+            if profile is not None:
+                self._apply_track_format(profile)
+            self._loaded_uri = uri
+            self._track_end_signaled = False
+            self._position_sec = max(0.0, start_sec)
+            self._duration_sec = None
+            self._last_position_emit = 0.0
+            response = self.command("loadfile", uri, "replace")
+            if response.get("error") != "success":
+                raise RuntimeError(f"mpv loadfile failed: {response.get('error')}")
+            data = response.get("data")
+            if isinstance(data, dict):
+                entry_id = data.get("playlist_entry_id")
+                if entry_id is not None:
+                    self._active_playlist_entry_id = int(entry_id)
+            if start_sec > 0:
+                self.command("seek", start_sec, "absolute")
+            self.set_property("pause", False)
+            self._playing = True
+        finally:
+            self._load_in_progress = False
+        self._emit("playback_path_changed")
         self._emit("duration_changed")
         self._emit("playing_changed")
 
@@ -433,6 +490,7 @@ class MpvPlaybackClient:
         self.command("stop")
         self._track_end_signaled = False
         self._loaded_uri = None
+        self._active_playlist_entry_id = None
         self._playing = False
         self._position_sec = 0.0
         self._duration_sec = None
@@ -500,15 +558,9 @@ class MpvPlaybackClient:
         return self._duration_sec
 
     def is_playing(self) -> bool:
-        if self._loaded_uri is None or self._shutdown or self._sock_file is None:
+        if self._loaded_uri is None or self._shutdown:
             return False
-        try:
-            paused = self.get_property("pause")
-        except OSError:
-            return self._playing
-        if paused is None:
-            return self._playing
-        return paused is not True and paused != "yes"
+        return self._playing
 
     def quit(self) -> None:
         if self._shutdown:
