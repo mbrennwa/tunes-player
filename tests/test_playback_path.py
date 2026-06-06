@@ -144,5 +144,38 @@ class DerivePlaybackPathTests(unittest.TestCase):
         self.assertEqual(path.playback_note, "ALSA bit-perfect")
 
 
+class PlaybackPathNoteMergeTests(unittest.TestCase):
+    def test_apply_path_info_keeps_network_buffer_note(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from tunes_player.core.config import ConfigManager
+        from tunes_player.core.models import Source, Track
+        from tunes_player.core.playback.buffer_policy import InputClass
+        from tunes_player.core.playback.output_profile import PlaybackPathInfo
+        from tunes_player.core.services import PlayerService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ConfigManager(Path(tmp) / "config.toml")
+            config.load()
+            service = PlayerService(config=config, prewarm_engine=False)
+            service._current_track = Track(
+                id="local:file:test",
+                title="Test",
+                artist_name="Artist",
+                album_title="Album",
+                source=Source.LOCAL,
+            )
+            service._playback_input_class = InputClass.NETWORK_FILE
+            service._apply_path_info(
+                PlaybackPathInfo(
+                    bit_perfect_playback=True,
+                    playback_note="ALSA bit-perfect",
+                )
+            )
+            self.assertIn("Network library (buffered)", service._playback_note or "")
+            self.assertIn("Network library (buffered)", service._quality_hint)
+
+
 if __name__ == "__main__":
     unittest.main()

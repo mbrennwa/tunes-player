@@ -415,7 +415,7 @@ class LibraryScanner:
         for attempt in range(6):
             connection = connect(self._db_path)
             try:
-                connection.execute("BEGIN")
+                connection.execute("BEGIN IMMEDIATE")
                 removed = self._purge_files_under_roots(connection, [root])
                 prune_orphan_album_art(connection, data_dir=self._data_dir)
                 connection.commit()
@@ -642,13 +642,23 @@ class LibraryScanner:
         *,
         exclude_paths: set[str] | None = None,
     ) -> int:
+        if exclude_paths is None:
+            removed = 0
+            for root in roots:
+                cursor = connection.execute(
+                    "DELETE FROM files WHERE path = ? OR path LIKE ?",
+                    (root, root + os.sep + "%"),
+                )
+                removed += int(cursor.rowcount)
+            return removed
+
         rows = connection.execute("SELECT id, path FROM files").fetchall()
         removed = 0
         for row in rows:
             path_str = row["path"]
             if not LibraryScanner._path_under_roots(path_str, roots):
                 continue
-            if exclude_paths is not None and path_str in exclude_paths:
+            if path_str in exclude_paths:
                 continue
             connection.execute("DELETE FROM files WHERE id = ?", (row["id"],))
             removed += 1

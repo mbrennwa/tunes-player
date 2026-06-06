@@ -188,6 +188,7 @@ class PlayerService:
         self._qobuz_playback_format_track_id: str | None = None
         self._current_stream_metadata = None
         self._playback_note: str | None = None
+        self._playback_input_class: object | None = None
         self._bit_perfect_playback = False
         self._output_profile: PlaybackOutputProfile | None = None
         self._exclusive_session: object | None = None
@@ -760,6 +761,8 @@ class PlayerService:
         self._incremental_coalesce.pop(resolved, None)
         if self.is_scanning():
             self._terminate_active_scan()
+        terminate_orphan_library_scans(db_path=self._config_manager.database_path)
+        time.sleep(0.1)
 
         scanner = LibraryScanner(
             db_path=self._config_manager.database_path,
@@ -1840,6 +1843,33 @@ class PlayerService:
             schedule_playback_cache_warmup(path, cache_dir=cache_dir)
         return target
 
+    def _set_playback_input_class_for_source(self, source: PlayableSource | None) -> None:
+        from tunes_player.core.playback.buffer_policy import InputClass, classify_playback_uri
+
+        if source is None:
+            self._playback_input_class = None
+            return
+        self._playback_input_class = classify_playback_uri(source.playback_target)
+
+    def _merge_path_info_playback_note(
+        self,
+        path_info: PlaybackPathInfo,
+    ) -> PlaybackPathInfo:
+        from dataclasses import replace
+
+        from tunes_player.core.playback.buffer_policy import (
+            InputClass,
+            merge_playback_note,
+        )
+
+        input_class = self._playback_input_class
+        if not isinstance(input_class, InputClass):
+            return path_info
+        note = merge_playback_note(path_info.playback_note, input_class)
+        if note == path_info.playback_note:
+            return path_info
+        return replace(path_info, playback_note=note)
+
     def _playback_note_for_source(
         self,
         path_info: PlaybackPathInfo,
@@ -1955,6 +1985,7 @@ class PlayerService:
         return "Unknown format"
 
     def _apply_path_info(self, path_info: PlaybackPathInfo) -> None:
+        path_info = self._merge_path_info_playback_note(path_info)
         self._bit_perfect_playback = path_info.bit_perfect_playback
         self._playback_note = path_info.playback_note
         self._refresh_quality_hint()
@@ -2528,6 +2559,7 @@ class PlayerService:
         self._playback_load_active = False
         self._engine_error = None
         self._output_profile = profile
+        self._set_playback_input_class_for_source(source)
         self._apply_path_info(path_info)
         self._set_current_track(
             track,
@@ -2556,6 +2588,7 @@ class PlayerService:
         self._load_generation += 1
         generation = self._load_generation
         self._playback_load_active = True
+        self._playback_input_class = None
         self._engine_error = None
         self._current_track = track
         self._current_release_id = release_id or self._release_id_for_playback(track)
