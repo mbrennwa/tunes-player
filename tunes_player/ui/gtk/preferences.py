@@ -371,9 +371,11 @@ class PreferencesWindow(Adw.PreferencesWindow):
     def _format_scan_progress(self, current: int, total: int, path: str) -> str:
         if total == 0:
             text = path or "Discovering files…"
+        elif current == 0:
+            text = path or f"Preparing to scan {total:,} files…"
         else:
             name = path.rsplit("/", 1)[-1]
-            text = f"Scanning {current}/{total}: {name}"
+            text = f"Scanning {current:,}/{total:,}: {name}"
         return escape_markup(text)
 
     def _folder_row_subtitle(self, folder: str) -> str:

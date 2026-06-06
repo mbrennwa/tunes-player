@@ -19,6 +19,10 @@ from tunes_player.core.shell_state import ShellState, parse_shell_state
 
 APP_NAME = "tunes-player"
 
+# Keep in sync with tunes_player.core.folder_scan_status.
+_SCAN_STATUS_FAILED = -1
+_SCAN_STATUS_INCOMPLETE = -2
+
 
 def _normalize_folder_path(key: object) -> str | None:
     if not key:
@@ -114,6 +118,8 @@ class AppConfig:
     # Tier-1 file count from the most recent completed full scan.
     music_folder_catalog_total: dict[str, int] = field(default_factory=dict)
     music_folder_last_scan_kind: dict[str, str] = field(default_factory=dict)
+    # Last fully processed file path from an interrupted full scan (sorted order).
+    music_folder_scan_checkpoint: dict[str, str] = field(default_factory=dict)
     output_sink_id: str | None = None
     allow_software_volume_fallback: bool = True
     # None = auto (hardware when available); software/fixed override user choice.
@@ -197,6 +203,10 @@ class ConfigManager:
             folder_set,
             allowed={"full", "incremental"},
         )
+        scan_checkpoint = _load_folder_str_map(
+            raw.get("music_folder_scan_checkpoint", {}),
+            folder_set,
+        )
         app_id = raw.get("qobuz_app_id")
         app_secret = raw.get("qobuz_app_secret")
         self._config = AppConfig(
@@ -207,6 +217,7 @@ class ConfigManager:
             music_folder_last_scan_errors=last_scan_errors,
             music_folder_catalog_total=catalog_total,
             music_folder_last_scan_kind=last_scan_kind,
+            music_folder_scan_checkpoint=scan_checkpoint,
             output_sink_id=raw.get("output_sink_id") or None,
             allow_software_volume_fallback=bool(
                 raw.get("allow_software_volume_fallback", True)
@@ -236,6 +247,7 @@ class ConfigManager:
             "music_folder_last_scan_errors": dict(self._config.music_folder_last_scan_errors),
             "music_folder_catalog_total": dict(self._config.music_folder_catalog_total),
             "music_folder_last_scan_kind": dict(self._config.music_folder_last_scan_kind),
+            "music_folder_scan_checkpoint": dict(self._config.music_folder_scan_checkpoint),
             "output_sink_id": self._config.output_sink_id,
             "allow_software_volume_fallback": self._config.allow_software_volume_fallback,
             "volume_control_mode": self._config.volume_control_mode,
@@ -286,6 +298,7 @@ class ConfigManager:
         self._config.music_folder_last_scan_errors.pop(path, None)
         self._config.music_folder_catalog_total.pop(path, None)
         self._config.music_folder_last_scan_kind.pop(path, None)
+        self._config.music_folder_scan_checkpoint.pop(path, None)
         self.save()
 
     def record_folder_scan(
@@ -296,6 +309,7 @@ class ConfigManager:
         scanned_at: float | None = None,
         scan_kind: Literal["full", "incremental"] = "full",
         catalog_total: int | None = None,
+        checkpoint: str | Literal["clear"] | None = None,
     ) -> None:
         path = self._canonical_folder_path(folder)
         if path is None:
@@ -305,6 +319,32 @@ class ConfigManager:
         self._config.music_folder_last_scan_kind[path] = scan_kind
         if scan_kind == "full" and catalog_total is not None and catalog_total > 0:
             self._config.music_folder_catalog_total[path] = int(catalog_total)
+        if scan_kind == "full":
+            if checkpoint == "clear":
+                self._config.music_folder_scan_checkpoint.pop(path, None)
+            elif errors == _SCAN_STATUS_INCOMPLETE:
+                if isinstance(checkpoint, str) and checkpoint.strip():
+                    self._config.music_folder_scan_checkpoint[path] = checkpoint.strip()
+            elif errors != _SCAN_STATUS_FAILED:
+                self._config.music_folder_scan_checkpoint.pop(path, None)
+            elif isinstance(checkpoint, str) and checkpoint.strip():
+                self._config.music_folder_scan_checkpoint[path] = checkpoint.strip()
+        self.save()
+
+    def folder_scan_checkpoint(self, folder: str) -> str | None:
+        path = self._canonical_folder_path(folder)
+        if path is None:
+            return None
+        return self._config.music_folder_scan_checkpoint.get(path)
+
+    def set_folder_scan_checkpoint(self, folder: str, checkpoint: str | None) -> None:
+        path = self._canonical_folder_path(folder)
+        if path is None:
+            return
+        if checkpoint is None or not checkpoint.strip():
+            self._config.music_folder_scan_checkpoint.pop(path, None)
+        else:
+            self._config.music_folder_scan_checkpoint[path] = checkpoint.strip()
         self.save()
 
     def folder_last_scan_at(self, folder: str) -> float | None:

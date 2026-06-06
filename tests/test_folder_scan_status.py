@@ -190,12 +190,47 @@ class FolderScanStatusConfigTests(unittest.TestCase):
             scan_kind="full",
             catalog_total=100,
         )
+        self._config.set_folder_scan_checkpoint(
+            self._folder,
+            str(Path(self._folder) / "track.flac"),
+        )
         self._config.remove_music_folder(self._folder)
         raw = json.loads(self._config.path.read_text(encoding="utf-8"))
         self.assertEqual(raw.get("music_folder_last_scan_at", {}), {})
         self.assertEqual(raw.get("music_folder_last_scan_errors", {}), {})
         self.assertEqual(raw.get("music_folder_catalog_total", {}), {})
         self.assertEqual(raw.get("music_folder_last_scan_kind", {}), {})
+        self.assertEqual(raw.get("music_folder_scan_checkpoint", {}), {})
+
+    def test_scan_checkpoint_persists_and_clears_on_success(self) -> None:
+        checkpoint = str(Path(self._folder) / "album" / "track.flac")
+        self._config.record_folder_scan(
+            self._folder,
+            errors=FOLDER_SCAN_INCOMPLETE,
+            scan_kind="full",
+            catalog_total=100,
+            checkpoint=checkpoint,
+        )
+        self._config.load()
+        self.assertEqual(self._config.folder_scan_checkpoint(self._folder), checkpoint)
+
+        self._config.record_folder_scan(
+            self._folder,
+            errors=0,
+            scan_kind="full",
+            catalog_total=100,
+        )
+        self._config.load()
+        self.assertIsNone(self._config.folder_scan_checkpoint(self._folder))
+
+    def test_set_folder_scan_checkpoint_roundtrip(self) -> None:
+        checkpoint = str(Path(self._folder) / "music.flac")
+        self._config.set_folder_scan_checkpoint(self._folder, checkpoint)
+        self._config.load()
+        self.assertEqual(self._config.folder_scan_checkpoint(self._folder), checkpoint)
+        self._config.set_folder_scan_checkpoint(self._folder, None)
+        self._config.load()
+        self.assertIsNone(self._config.folder_scan_checkpoint(self._folder))
 
 
 if __name__ == "__main__":

@@ -208,6 +208,8 @@ class PlayerService:
         self._scan_last_error: str | None = None
         self._current_scan_job: _ScanJob | None = None
         self._pending_scan_jobs: list[_ScanJob] = []
+        self._scan_catalog_total_persisted = False
+        self._scan_last_checkpoint_at = 0
         self._pending_startup_art_maintenance = False
         self._art_maintenance_running = False
         self._incremental_coalesce: dict[str, tuple[set[str], set[str]]] = {}
@@ -629,8 +631,16 @@ class PlayerService:
             name="tunes-library-reconcile",
             daemon=True,
         ).start()
+        enqueued: set[str] = set()
         for folder in self._config_manager.config.music_folders:
             if self.folder_auto_monitor_enabled(folder):
+                self.enqueue_scan(folder=folder)
+                enqueued.add(str(Path(folder).expanduser().resolve()))
+        for folder in self._config_manager.config.music_folders:
+            resolved = str(Path(folder).expanduser().resolve())
+            if resolved in enqueued:
+                continue
+            if self._folder_needs_scan_resume(folder):
                 self.enqueue_scan(folder=folder)
 
     def _run_startup_reconcile(self) -> None:
@@ -794,16 +804,8 @@ class PlayerService:
         self._incremental_coalesce.pop(resolved, None)
         if self._scanning_folder != resolved or not self.is_scanning():
             return
+        self._record_interrupted_scan()
         self._terminate_active_scan()
-        self._config_manager.record_folder_scan(
-            resolved,
-            errors=FOLDER_SCAN_INCOMPLETE,
-            scan_kind=(
-                "incremental"
-                if self._current_scan_job is not None and self._current_scan_job.is_incremental
-                else "full"
-            ),
-        )
         self._emit("scan_finished")
         self.notify_library_updated()
         self._try_start_scan()
@@ -955,6 +957,90 @@ class PlayerService:
     def count_indexed_files(self, folder: str) -> int:
         return self._store.count_files_under_folder(folder)
 
+    def _folder_needs_scan_resume(self, folder: str) -> bool:
+        errors = self._config_manager.folder_last_scan_errors(folder)
+        if errors == FOLDER_SCAN_INCOMPLETE:
+            return True
+        catalog_total = self._config_manager.folder_catalog_total(folder)
+        if catalog_total is None or catalog_total <= 0:
+            return False
+        return self.count_indexed_files(folder) < catalog_total
+
+    def _scan_progress_checkpoint_path(self) -> str | None:
+        if self._scan_progress is None:
+            return None
+        current, total, path = self._scan_progress
+        if total <= 0 or current <= 0 or not path:
+            return None
+        if path.startswith(("Discovering", "Found ", "Finalizing")):
+            return None
+        try:
+            return str(Path(path).expanduser().resolve())
+        except (OSError, ValueError):
+            return None
+
+    def _record_interrupted_scan(self) -> None:
+        folder = self._scanning_folder
+        job = self._current_scan_job
+        if folder is None or job is None or job.is_incremental:
+            return
+        checkpoint = self._scan_progress_checkpoint_path()
+        catalog_total = None
+        if self._scan_progress is not None and self._scan_progress[1] > 0:
+            catalog_total = self._scan_progress[1]
+        self._config_manager.record_folder_scan(
+            folder,
+            errors=FOLDER_SCAN_INCOMPLETE,
+            scan_kind="full",
+            catalog_total=catalog_total,
+            checkpoint=checkpoint,
+        )
+
+    def _maybe_persist_scan_checkpoint(self) -> None:
+        folder = self._scanning_folder
+        job = self._current_scan_job
+        if folder is None or job is None or job.is_incremental:
+            return
+        if self._scan_progress is None:
+            return
+        current, total, _path = self._scan_progress
+        if total <= 0:
+            return
+        if not self._scan_catalog_total_persisted:
+            self._scan_catalog_total_persisted = True
+            self._maybe_invalidate_scan_checkpoint_for_catalog_change(folder, total)
+            stored = self._config_manager.folder_catalog_total(folder)
+            if stored != total:
+                self._config_manager.record_folder_scan(
+                    folder,
+                    errors=FOLDER_SCAN_INCOMPLETE,
+                    scan_kind="full",
+                    catalog_total=total,
+                )
+        checkpoint = self._scan_progress_checkpoint_path()
+        if checkpoint is None:
+            return
+        if current != total and current - self._scan_last_checkpoint_at < 50:
+            return
+        self._scan_last_checkpoint_at = current
+        self._config_manager.set_folder_scan_checkpoint(folder, checkpoint)
+
+    def _maybe_invalidate_scan_checkpoint_for_catalog_change(
+        self,
+        folder: str,
+        catalog_total: int,
+    ) -> None:
+        stored = self._config_manager.folder_catalog_total(folder)
+        checkpoint = self._config_manager.folder_scan_checkpoint(folder)
+        if checkpoint and stored is not None and stored != catalog_total:
+            log.info(
+                "Catalog size changed for %s (%d -> %d); scan checkpoint cleared",
+                folder,
+                stored,
+                catalog_total,
+            )
+            self._config_manager.set_folder_scan_checkpoint(folder, None)
+
     def _start_scan_job(self, job: _ScanJob) -> None:
         self._current_scan_job = job
         self._scanning_folder = job.folder
@@ -962,6 +1048,11 @@ class PlayerService:
         self._scan_finished_folder = None
         self._scan_last_result = None
         self._scan_last_error = None
+        self._scan_catalog_total_persisted = False
+        self._scan_last_checkpoint_at = 0
+        checkpoint_path = None
+        if not job.is_incremental:
+            checkpoint_path = self._config_manager.folder_scan_checkpoint(job.folder)
         terminate_orphan_library_scans(db_path=self._config_manager.database_path)
         self._store.close()
         time.sleep(0.1)
@@ -972,6 +1063,7 @@ class PlayerService:
             scan_folders=[job.folder],
             add_paths=list(job.add_paths) if job.is_incremental else None,
             remove_paths=list(job.remove_paths) if job.is_incremental else None,
+            checkpoint_path=checkpoint_path,
         )
         self._scan_process.start()
         self._emit("scan_started")
@@ -990,6 +1082,7 @@ class PlayerService:
             kind = message[0]
             if kind == "progress":
                 self._scan_progress = (message[1], message[2], message[3])
+                self._maybe_persist_scan_checkpoint()
                 self._emit("scan_progress")
             elif kind == "done":
                 file_errors = tuple(
@@ -1060,27 +1153,39 @@ class PlayerService:
             code = self._scan_process.exitcode
             if code not in (0, None):
                 finished_folder = self._scanning_folder
+                job = self._current_scan_job
                 self._scan_last_error = f"Scan process exited with code {code}"
                 self._scan_finished_folder = finished_folder
+                partial = False
                 if finished_folder is not None:
-                    log_folder_scan_failure(
-                        finished_folder,
-                        errors=FOLDER_SCAN_FAILED,
-                        log_path=diagnostics_log_path(self._config_manager.data_dir),
-                        fatal_error=self._scan_last_error,
+                    progress = self._scan_progress
+                    partial = (
+                        job is not None
+                        and not job.is_incremental
+                        and progress is not None
+                        and progress[1] > 0
+                        and progress[0] > 0
                     )
-                    self._config_manager.record_folder_scan(
-                        finished_folder,
-                        errors=FOLDER_SCAN_FAILED,
-                        scan_kind=(
-                            "incremental"
-                            if self._current_scan_job is not None
-                            and self._current_scan_job.is_incremental
-                            else "full"
-                        ),
-                    )
+                    if partial:
+                        self._record_interrupted_scan()
+                    else:
+                        log_folder_scan_failure(
+                            finished_folder,
+                            errors=FOLDER_SCAN_FAILED,
+                            log_path=diagnostics_log_path(self._config_manager.data_dir),
+                            fatal_error=self._scan_last_error,
+                        )
+                        self._config_manager.record_folder_scan(
+                            finished_folder,
+                            errors=FOLDER_SCAN_FAILED,
+                            scan_kind=(
+                                "incremental"
+                                if job is not None and job.is_incremental
+                                else "full"
+                            ),
+                        )
                 self._cleanup_scan()
-                self._emit("scan_error")
+                self._emit("scan_error" if not partial else "scan_finished")
         else:
             self._cleanup_scan()
         return False
@@ -1673,6 +1778,8 @@ class PlayerService:
     def shutdown(self) -> None:
         self._pending_scan_jobs.clear()
         self._incremental_coalesce.clear()
+        if self.is_scanning():
+            self._record_interrupted_scan()
         self._terminate_active_scan()
         self._current_scan_job = None
         self._release_exclusive_session()

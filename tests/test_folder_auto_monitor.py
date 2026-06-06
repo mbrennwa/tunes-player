@@ -142,6 +142,8 @@ class FolderAutoMonitorServiceTests(unittest.TestCase):
         enqueue.assert_called_once_with(folder=self._folder)
 
     def test_disable_auto_monitor_stops_active_scan(self) -> None:
+        from tunes_player.core.services import _ScanJob
+
         self._config.add_music_folder(self._folder, auto_monitor=True)
         resolved = str(Path(self._folder).expanduser().resolve())
         process = MagicMock()
@@ -149,6 +151,7 @@ class FolderAutoMonitorServiceTests(unittest.TestCase):
         self._service._scan_process = process
         self._service._scan_queue = object()
         self._service._scanning_folder = resolved
+        self._service._current_scan_job = _ScanJob(folder=resolved)
 
         with patch.object(self._service._config_manager, "record_folder_scan") as record:
             with patch.object(self._service, "notify_library_updated") as notify:
@@ -158,7 +161,11 @@ class FolderAutoMonitorServiceTests(unittest.TestCase):
         process.terminate.assert_called_once_with()
         self.assertIsNone(self._service._scanning_folder)
         record.assert_called_once_with(
-            resolved, errors=FOLDER_SCAN_INCOMPLETE, scan_kind="full"
+            resolved,
+            errors=FOLDER_SCAN_INCOMPLETE,
+            scan_kind="full",
+            catalog_total=None,
+            checkpoint=None,
         )
         notify.assert_called_once_with()
         emit.assert_any_call("scan_finished")
@@ -244,6 +251,77 @@ class FolderAutoMonitorServiceTests(unittest.TestCase):
             self.assertEqual(len(self._service._deferred_plays), 1)
             self._service._flush_deferred_plays()
             record_play.assert_called_once()
+
+
+class FolderScanResumeServiceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._config = ConfigManager(Path(self._tmpdir.name) / "config.json")
+        self._config.load()
+        self._service = PlayerService(config=self._config)
+        self._folder = str(Path(self._tmpdir.name) / "music")
+        Path(self._folder).mkdir()
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    def test_shutdown_records_incomplete_scan_with_checkpoint(self) -> None:
+        from tunes_player.core.services import _ScanJob
+
+        self._config.add_music_folder(self._folder)
+        resolved = str(Path(self._folder).resolve())
+        track_path = str((Path(self._folder) / "album.flac").resolve())
+        process = MagicMock()
+        process.is_alive.return_value = True
+        self._service._scan_process = process
+        self._service._scan_queue = object()
+        self._service._scanning_folder = resolved
+        self._service._current_scan_job = _ScanJob(folder=resolved)
+        self._service._scan_progress = (10, 100, track_path)
+
+        self._service.shutdown()
+
+        self.assertEqual(
+            self._config.folder_last_scan_errors(resolved),
+            FOLDER_SCAN_INCOMPLETE,
+        )
+        self.assertEqual(self._config.folder_scan_checkpoint(resolved), track_path)
+
+    def test_enqueue_startup_scans_resumes_incomplete_folder(self) -> None:
+        self._config.add_music_folder(self._folder, auto_monitor=False)
+        self._config.record_folder_scan(
+            self._folder,
+            errors=FOLDER_SCAN_INCOMPLETE,
+            scan_kind="full",
+            catalog_total=100,
+            checkpoint=str((Path(self._folder) / "x.flac").resolve()),
+        )
+
+        with (
+            patch.object(self._service, "_run_startup_reconcile"),
+            patch.object(self._service, "enqueue_scan") as enqueue,
+        ):
+            self._service.enqueue_startup_scans()
+
+        enqueue.assert_called_once_with(folder=self._folder)
+
+    def test_start_scan_passes_checkpoint_to_worker(self) -> None:
+        from tunes_player.core.services import _ScanJob
+
+        self._config.add_music_folder(self._folder)
+        checkpoint = str((Path(self._folder) / "saved.flac").resolve())
+        self._config.set_folder_scan_checkpoint(self._folder, checkpoint)
+        process = MagicMock()
+        with patch(
+            "tunes_player.core.services.create_scan_process",
+            return_value=(process, MagicMock()),
+        ) as create_scan:
+            self._service._start_scan_job(
+                _ScanJob(folder=str(Path(self._folder).resolve())),
+            )
+
+        create_scan.assert_called_once()
+        self.assertEqual(create_scan.call_args.kwargs.get("checkpoint_path"), checkpoint)
 
 
 if __name__ == "__main__":

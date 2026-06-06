@@ -89,6 +89,7 @@ class LibraryScanner:
         *,
         scan_folders: list[str] | None = None,
         progress: ProgressCallback | None = None,
+        checkpoint_path: str | None = None,
     ) -> ScanResult:
         last_error: sqlite3.OperationalError | None = None
         for attempt in range(_LOCK_RETRY_ATTEMPTS):
@@ -96,6 +97,7 @@ class LibraryScanner:
                 return self._scan_once(
                     scan_folders=scan_folders,
                     progress=progress,
+                    checkpoint_path=checkpoint_path,
                 )
             except sqlite3.OperationalError as exc:
                 if not _is_locked_error(exc) or attempt == _LOCK_RETRY_ATTEMPTS - 1:
@@ -138,6 +140,7 @@ class LibraryScanner:
         *,
         scan_folders: list[str] | None = None,
         progress: ProgressCallback | None = None,
+        checkpoint_path: str | None = None,
     ) -> ScanResult:
         if progress is not None:
             progress(0, 0, "Discovering files…")
@@ -150,13 +153,37 @@ class LibraryScanner:
         else:
             roots = [str(Path(folder).resolve()) for folder in scan_folders]
 
-        candidates = self._collect_candidates(roots=roots, progress=progress)
+        all_candidates = self._collect_candidates(roots=roots, progress=progress)
+        catalog_total = len(all_candidates)
+        if checkpoint_path and checkpoint_path.strip():
+            checkpoint = checkpoint_path.strip()
+            candidates = [
+                path
+                for path in all_candidates
+                if str(path) > checkpoint
+            ]
+        else:
+            candidates = all_candidates
+        total = len(candidates)
+        if progress is not None:
+            if total > 0:
+                progress(
+                    0,
+                    catalog_total,
+                    f"Found {catalog_total:,} files, scanning…",
+                )
+            elif catalog_total > 0:
+                progress(
+                    catalog_total,
+                    catalog_total,
+                    "Finalizing library…",
+                )
+        discovered_paths = {str(path) for path in all_candidates}
         seen_paths: set[str] = set()
         indexed = 0
         skipped = 0
         errors = 0
         file_errors: list[ScanFileError] = []
-        total = len(candidates)
         last_progress_at = 0.0
         removed = 0
         art_indexed = 0
@@ -199,7 +226,7 @@ class LibraryScanner:
 
             connection.commit()
             connection.execute("BEGIN")
-            removed = self._remove_missing_files(connection, seen_paths, roots)
+            removed = self._remove_missing_files(connection, discovered_paths, roots)
             configured_roots = [
                 str(Path(folder).resolve())
                 for folder in self._config.music_folders
@@ -221,7 +248,7 @@ class LibraryScanner:
             errors=errors,
             art_indexed=art_indexed,
             file_errors=tuple(file_errors),
-            total_candidates=total,
+            total_candidates=catalog_total,
         )
 
     def _scan_changes_once(
@@ -498,21 +525,49 @@ class LibraryScanner:
     ) -> list[Path]:
         paths: list[Path] = []
         seen = 0
+        last_progress_at = 0.0
         for folder in roots:
             root = Path(folder)
             if not root.is_dir():
                 continue
             for dirpath, _dirnames, filenames in os.walk(root, followlinks=True):
                 for name in filenames:
-                    path = Path(dirpath) / name
-                    if has_tier1_extension(path):
-                        paths.append(path)
+                    candidate = Path(dirpath) / name
+                    if not has_tier1_extension(candidate):
+                        seen += 1
+                        continue
+                    try:
+                        path = candidate.resolve()
+                    except OSError:
+                        seen += 1
+                        continue
+                    paths.append(path)
                     seen += 1
-                    if seen % 5000 == 0:
-                        time.sleep(0)
-                        if progress is not None:
-                            progress(0, 0, f"Discovering files… ({len(paths)} found)")
-        paths.sort()
+                    if progress is not None:
+                        now = time.monotonic()
+                        if (
+                            seen == 1
+                            or seen % 5000 == 0
+                            or now - last_progress_at >= self._PROGRESS_INTERVAL_SEC
+                        ):
+                            time.sleep(0)
+                            progress(
+                                0,
+                                0,
+                                f"Discovering files… ({len(paths):,} found)",
+                            )
+                            last_progress_at = now
+        if progress is not None and paths:
+            progress(0, 0, f"Discovering files… ({len(paths):,} found)")
+        if progress is not None and len(paths) >= 10_000:
+            progress(0, 0, f"Discovering files… ({len(paths):,} found, sorting…)")
+        paths.sort(key=str)
+        if progress is not None and len(paths) >= 10_000:
+            progress(
+                0,
+                0,
+                f"Discovering files… ({len(paths):,} found, preparing scan…)",
+            )
         return paths
 
     @staticmethod
