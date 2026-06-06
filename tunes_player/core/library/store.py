@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import functools
 import os
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +18,12 @@ from tunes_player.core.home import (
     RecentlyAddedItem,
 )
 from tunes_player.core.library import ids
-from tunes_player.core.library.db import connect
+from tunes_player.core.library.db import (
+    LOCK_RETRY_ATTEMPTS,
+    LOCK_RETRY_BASE_DELAY_SEC,
+    connect,
+    is_locked_error,
+)
 from tunes_player.core.library.release_logic import infer_release_metadata
 from tunes_player.core.models import Album, Release, Source, Track
 
@@ -62,15 +69,26 @@ class FileMetadata:
     channels: int | None
 
 
+def _locked_db(method):
+    @functools.wraps(method)
+    def wrapper(self: LibraryStore, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class LibraryStore:
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
+        self._lock = threading.RLock()
         self._write_connection: sqlite3.Connection | None = connect(db_path)
         self._read_connection: sqlite3.Connection | None = None
 
     @property
     def connection(self) -> sqlite3.Connection:
-        return self._db_connection()
+        with self._lock:
+            return self._db_connection()
 
     def _db_connection(self) -> sqlite3.Connection:
         if self._write_connection is not None:
@@ -79,15 +97,64 @@ class LibraryStore:
             self._read_connection = connect(self._db_path)
         return self._read_connection
 
+    @_locked_db
     def close(self) -> None:
         """Release DB connections while a background scan runs."""
         if self._write_connection is not None:
+            try:
+                self._write_connection.commit()
+            except sqlite3.Error:
+                pass
             self._write_connection.close()
             self._write_connection = None
         if self._read_connection is not None:
             self._read_connection.close()
             self._read_connection = None
 
+    @_locked_db
+    def purge_files_outside_roots(
+        self,
+        roots: list[str],
+        *,
+        data_dir: Path,
+    ) -> int:
+        """Remove indexed files not under *roots* using this store's write connection."""
+        from tunes_player.core.library.art_cache import prune_orphan_album_art
+        from tunes_player.core.library.db import (
+            LOCK_RETRY_ATTEMPTS,
+            LOCK_RETRY_BASE_DELAY_SEC,
+            is_locked_error,
+        )
+        from tunes_player.core.library.scanner import LibraryScanner
+
+        if self._write_connection is None:
+            self.reconnect()
+        connection = self._write_connection
+        if connection is None:
+            raise RuntimeError("library store write connection unavailable")
+
+        last_error: sqlite3.OperationalError | None = None
+        for attempt in range(LOCK_RETRY_ATTEMPTS):
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                removed = LibraryScanner.purge_files_outside_roots(connection, roots)
+                prune_orphan_album_art(connection, data_dir=data_dir)
+                connection.commit()
+                return removed
+            except sqlite3.OperationalError as exc:
+                connection.rollback()
+                if not is_locked_error(exc) or attempt == LOCK_RETRY_ATTEMPTS - 1:
+                    raise
+                last_error = exc
+                time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
+            except Exception:
+                connection.rollback()
+                raise
+        if last_error is not None:
+            raise last_error
+        return 0
+
+    @_locked_db
     def reconnect(self) -> None:
         """Reopen the write connection (call after a scan from another connection)."""
         if self._read_connection is not None:
@@ -97,10 +164,12 @@ class LibraryStore:
             self._write_connection.close()
         self._write_connection = connect(self._db_path)
 
+    @_locked_db
     def track_count(self) -> int:
         row = self._db_connection().execute("SELECT COUNT(*) AS count FROM tracks").fetchone()
         return int(row["count"])
 
+    @_locked_db
     def release_count(self) -> int:
         row = self._db_connection().execute(
             """
@@ -113,6 +182,7 @@ class LibraryStore:
         ).fetchone()
         return int(row["count"])
 
+    @_locked_db
     def count_files_under_folder(self, folder: str) -> int:
         root = str(Path(folder).expanduser().resolve())
         row = self._db_connection().execute(
@@ -125,6 +195,7 @@ class LibraryStore:
         ).fetchone()
         return int(row["count"])
 
+    @_locked_db
     def list_releases(self) -> list[Release]:
         rows = self._db_connection().execute(
             f"""
@@ -135,9 +206,11 @@ class LibraryStore:
         ).fetchall()
         return self._rows_to_releases(rows)
 
+    @_locked_db
     def list_albums(self) -> list[Album]:
         return self.list_releases()
 
+    @_locked_db
     def get_release(self, release_id: str) -> Release | None:
         row = self._db_connection().execute(
             f"""
@@ -151,9 +224,11 @@ class LibraryStore:
             return None
         return self._row_to_release(row, art_uri=self._art_uri_for_release(release_id))
 
+    @_locked_db
     def get_album(self, album_id: str) -> Album | None:
         return self.get_release(album_id)
 
+    @_locked_db
     def get_release_tracks(self, release_id: str) -> list[Track]:
         rows = self._db_connection().execute(
             """
@@ -177,9 +252,11 @@ class LibraryStore:
         ).fetchall()
         return [self._row_to_track(row) for row in rows]
 
+    @_locked_db
     def get_album_tracks(self, album_id: str) -> list[Track]:
         return self.get_release_tracks(album_id)
 
+    @_locked_db
     def get_track(self, track_id: str) -> Track | None:
         row = self._db_connection().execute(
             """
@@ -204,6 +281,7 @@ class LibraryStore:
             return None
         return self._row_to_track(row)
 
+    @_locked_db
     def release_id_for_track(self, track_id: str) -> str | None:
         row = self._db_connection().execute(
             "SELECT album_id FROM tracks WHERE id = ?",
@@ -211,9 +289,11 @@ class LibraryStore:
         ).fetchone()
         return None if row is None else str(row["album_id"])
 
+    @_locked_db
     def album_id_for_track(self, track_id: str) -> str | None:
         return self.release_id_for_track(track_id)
 
+    @_locked_db
     def get_file_metadata(self, track_id: str) -> FileMetadata | None:
         row = self._db_connection().execute(
             """
@@ -241,6 +321,7 @@ class LibraryStore:
             channels=row["channels"],
         )
 
+    @_locked_db
     def search_releases(
         self,
         query: str,
@@ -314,10 +395,12 @@ class LibraryStore:
         ordered = [by_id[release_id] for release_id in release_ids if release_id in by_id]
         return self._rows_to_releases(ordered)
 
+    @_locked_db
     def search(self, query: str) -> tuple[list[Album], list[Track]]:
         releases = self.search_releases(query)
         return releases, []
 
+    @_locked_db
     def list_recently_added_items(
         self,
         *,
@@ -354,6 +437,7 @@ class LibraryStore:
             items.append(RecentlyAddedItem(added_ns=added_ns, release=release))
         return items
 
+    @_locked_db
     def record_play(
         self,
         *,
@@ -365,15 +449,32 @@ class LibraryStore:
         if self._write_connection is None:
             raise RuntimeError("library store write connection is closed")
         when = played_at_ns if played_at_ns is not None else time.time_ns()
-        self._write_connection.execute(
-            """
-            INSERT INTO play_history(track_id, release_id, source, played_at_ns)
-            VALUES (?, ?, ?, ?)
-            """,
-            (track_id, release_id, source, when),
-        )
-        self._write_connection.commit()
+        last_error: sqlite3.OperationalError | None = None
+        for attempt in range(LOCK_RETRY_ATTEMPTS):
+            try:
+                self._write_connection.execute(
+                    """
+                    INSERT INTO play_history(track_id, release_id, source, played_at_ns)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (track_id, release_id, source, when),
+                )
+                self._write_connection.commit()
+                return
+            except sqlite3.OperationalError as exc:
+                try:
+                    self._write_connection.rollback()
+                except sqlite3.OperationalError:
+                    pass
+                if not is_locked_error(exc) or attempt == LOCK_RETRY_ATTEMPTS - 1:
+                    raise
+                last_error = exc
+                time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("record_play retry loop exited without result")
 
+    @_locked_db
     def last_play_at_ns(self, track_id: str) -> int | None:
         row = self._db_connection().execute(
             """
@@ -386,6 +487,7 @@ class LibraryStore:
         ).fetchone()
         return None if row is None else int(row["played_at_ns"])
 
+    @_locked_db
     def list_continue_listening_entries(
         self,
         *,
@@ -404,6 +506,7 @@ class LibraryStore:
         ).fetchall()
         return [(str(row["release_id"]), int(row["last_played_ns"])) for row in rows]
 
+    @_locked_db
     def list_rediscover_items(
         self,
         *,
@@ -485,6 +588,7 @@ class LibraryStore:
         ).fetchone()
         return None if row is None else str(row["art_uri"])
 
+    @_locked_db
     def art_uri_map(self, release_ids: list[str]) -> dict[str, str | None]:
         """Return art_uri per release id (missing entries are None)."""
         if not release_ids:

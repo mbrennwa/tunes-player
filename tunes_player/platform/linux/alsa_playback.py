@@ -10,7 +10,7 @@ from tunes_player.platform.linux.alsa_xrun_monitor import parse_card_from_mpv_de
 
 LOG = logging.getLogger(__name__)
 
-_USB_STABLE_NOTE = "USB non-exclusive playback"
+_USB_STABLE_NOTE = "USB direct"
 
 _device_cache: dict[str, str | None] = {}
 _logged_usb_stable: set[str] = set()
@@ -49,7 +49,7 @@ def is_usb_alsa_playback(endpoint_id: str | None, mpv_device: str | None) -> boo
 
 
 def effective_mpv_alsa_device(raw_device: str | None) -> str | None:
-    """Keep hw: for USB; stability comes from non-exclusive mode and IRQ co-location."""
+    """Keep hw: for USB; stability tuning is in subprocess mpv buffers and IRQ co-location."""
     if not raw_device:
         return None
     if raw_device in _device_cache:
@@ -58,7 +58,7 @@ def effective_mpv_alsa_device(raw_device: str | None) -> str | None:
     card = parse_card_from_mpv_device(raw_device)
     if card is not None and alsa_card_is_usb(card) and raw_device not in _logged_usb_stable:
         LOG.info(
-            "USB ALSA card %d: direct hw output (%s), exclusive disabled",
+            "USB ALSA card %d: direct hw output (%s)",
             card,
             raw_device,
         )
@@ -77,18 +77,17 @@ def direct_alsa_use_exclusive(
     endpoint_id: str | None,
     mpv_device: str | None,
 ) -> bool:
-    """Exclusive hw: is fragile on USB under load; keep it for local PCI/internal cards."""
-    if not exclusive_enabled:
-        return False
-    if is_usb_alsa_playback(endpoint_id, mpv_device):
-        return False
-    return True
+    """Return whether mpv should open ALSA in exclusive mode."""
+    del endpoint_id, mpv_device  # reserved for endpoint-specific policy later
+    return exclusive_enabled
 
 
 def portable_usb_playback_note(
     endpoint_id: str | None,
     mpv_device: str | None,
+    *,
+    exclusive_active: bool = False,
 ) -> str | None:
-    if is_usb_alsa_playback(endpoint_id, mpv_device):
-        return _USB_STABLE_NOTE
-    return None
+    if not is_usb_alsa_playback(endpoint_id, mpv_device) or exclusive_active:
+        return None
+    return _USB_STABLE_NOTE

@@ -105,19 +105,18 @@ def derive_playback_path_info(
     output_rate = negotiated.audio_samplerate or profile.target_rate
     output_format = negotiated.audio_format or profile.audio_format
 
-    resampled = profile.allow_resample
-    if negotiated.alsa_resample is True:
-        resampled = True
-    if file_rate and output_rate and file_rate != output_rate:
-        resampled = True
+    rate_mismatch = bool(
+        file_rate and output_rate and file_rate != output_rate
+    )
+    resampled = rate_mismatch
 
     playback_note: str | None = None
-    if resampled and file_rate and output_rate and file_rate != output_rate:
+    if resampled and file_rate and output_rate:
         playback_note = (
             f"ALSA {format_rate_label(file_rate)} → {format_rate_label(output_rate)} resampling"
         )
 
-    unity_path = not mpv_soft_volume and device_volume
+    unity_path = not mpv_soft_volume
     output_bits_match = True
     if file_bits is not None and output_format is not None:
         output_bits_match = bit_depth_to_mpv_format(file_bits) == output_format

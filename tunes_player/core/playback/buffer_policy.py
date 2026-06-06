@@ -20,7 +20,7 @@ _LOCAL_DEMUXER_READAHEAD_SEC = 1.0
 _DIRECT_ALSA_AUDIO_BUFFER_SEC = 10.0
 _DIRECT_ALSA_ALSA_BUFFER_TIME_US = 10_000_000
 _DIRECT_ALSA_ALSA_PERIODS = 8
-_DIRECT_ALSA_CACHE_PAUSE_WAIT_SEC = 8.0
+_DIRECT_ALSA_CACHE_PAUSE_WAIT_SEC = 2.0
 _DIRECT_ALSA_DEMUXER_READAHEAD_SEC = 30.0
 
 
@@ -39,6 +39,8 @@ def classify_playback_uri(uri: str) -> InputClass:
         path = Path(unquote(parsed.path))
     else:
         path = Path(uri)
+    if "playback-cache" in path.parts:
+        return InputClass.LOCAL
     try:
         from tunes_player.platform.linux.mount_info import is_network_mount_path
 

@@ -410,7 +410,11 @@ class QueueSheet(Adw.Dialog):
         self._list_box.set_selection_mode(Gtk.SelectionMode.NONE)
         scrolled.set_child(self._list_box)
 
-        service.subscribe(lambda _event: GLib.idle_add(self._refresh_on_main))
+        def _on_queue_event(event: str) -> None:
+            if event in ("queue_changed", "playback_changed"):
+                GLib.idle_add(self._refresh_on_main)
+
+        service.subscribe(_on_queue_event)
 
         self._refresh()
 
@@ -755,7 +759,6 @@ class ReleaseTileGrid(Gtk.Box):
         self._inner_width_fn = inner_width_fn
         self._service = service
         self._playback_unsubscribe: Callable[[], None] | None = None
-        self._last_art_playing_release_id: str | None = None
         if service is not None:
             self._playback_unsubscribe = service.subscribe(self._on_playback_event)
             self.connect("destroy", self._on_destroy)
@@ -869,19 +872,9 @@ class ReleaseTileGrid(Gtk.Box):
         service = self._service
         if service is None:
             return False
-        state = service.get_playback_state()
-        playing_id = service.current_release_id() if state.is_playing else None
-        to_update: set[str] = set()
-        if self._last_art_playing_release_id:
-            to_update.add(self._last_art_playing_release_id)
-        if playing_id:
-            to_update.add(playing_id)
-        self._last_art_playing_release_id = playing_id
-        if not to_update:
-            return False
         for card in self._cards:
             release_id = getattr(card, "_tunes_release_id", None)
-            if not isinstance(release_id, str) or release_id not in to_update:
+            if not isinstance(release_id, str):
                 continue
             btn = _find_release_art_play_button(card)
             if btn is not None:

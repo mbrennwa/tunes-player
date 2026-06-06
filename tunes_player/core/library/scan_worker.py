@@ -90,3 +90,22 @@ def create_scan_process(
         daemon=True,
     )
     return process, queue
+
+
+def close_scan_queue(queue: multiprocessing.Queue | None) -> None:
+    """Release Queue feeder thread and semaphores (avoids resource_tracker warnings)."""
+    if queue is None:
+        return
+    try:
+        while True:
+            queue.get_nowait()
+    except Exception:
+        pass
+    try:
+        queue.close()
+    except Exception:
+        pass
+    try:
+        queue.join_thread()
+    except Exception:
+        pass

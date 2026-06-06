@@ -20,8 +20,12 @@ class MountInfoTests(unittest.TestCase):
         entries = ((Path("/mnt/nfs"), "nfs4"), (Path("/"), "ext4"))
         with (
             patch(
-                "tunes_player.platform.linux.mount_info._mount_entries",
+                "tunes_player.platform.linux.mount_info._mountinfo_entries",
                 return_value=entries,
+            ),
+            patch(
+                "tunes_player.platform.linux.mount_info._mount_entries",
+                return_value=(),
             ),
             patch.object(Path, "resolve", lambda self: self),
         ):
@@ -31,8 +35,12 @@ class MountInfoTests(unittest.TestCase):
         entries = ((Path("/"), "ext4"), (Path("/home"), "ext4"))
         with (
             patch(
-                "tunes_player.platform.linux.mount_info._mount_entries",
+                "tunes_player.platform.linux.mount_info._mountinfo_entries",
                 return_value=entries,
+            ),
+            patch(
+                "tunes_player.platform.linux.mount_info._mount_entries",
+                return_value=(),
             ),
             patch.object(Path, "resolve", lambda self: self),
         ):
@@ -42,25 +50,57 @@ class MountInfoTests(unittest.TestCase):
         entries = ((Path("/mnt/share"), "cifs"),)
         with (
             patch(
-                "tunes_player.platform.linux.mount_info._mount_entries",
+                "tunes_player.platform.linux.mount_info._mountinfo_entries",
                 return_value=entries,
+            ),
+            patch(
+                "tunes_player.platform.linux.mount_info._mount_entries",
+                return_value=(),
             ),
             patch.object(Path, "resolve", lambda self: self),
         ):
             self.assertTrue(is_network_mount_path("/mnt/share/album/track.flac"))
 
-    def test_autofs_mount_prefers_nfs_for_same_mountpoint(self) -> None:
-        """autofs and nfs often share a mountpoint; playback must use nfs."""
+    def test_active_local_mount_wins_over_stale_autofs_nfs(self) -> None:
+        """mountinfo shows ext4 even when /proc/mounts still lists autofs+nfs."""
         mount = Path("/home/user/music_gringotts")
-        entries = (
+        mountinfo = ((mount, "ext4"), (Path("/"), "ext4"))
+        mounts = (
             (mount, "autofs"),
             (mount, "nfs"),
             (Path("/"), "ext4"),
         )
         with (
             patch(
+                "tunes_player.platform.linux.mount_info._mountinfo_entries",
+                return_value=mountinfo,
+            ),
+            patch(
                 "tunes_player.platform.linux.mount_info._mount_entries",
-                return_value=entries,
+                return_value=mounts,
+            ),
+            patch.object(Path, "resolve", lambda self: self),
+        ):
+            self.assertFalse(
+                is_network_mount_path("/home/user/music_gringotts/album/track.flac")
+            )
+
+    def test_autofs_mount_prefers_nfs_when_active_mount_is_nfs(self) -> None:
+        mount = Path("/home/user/music_gringotts")
+        mountinfo = ((mount, "nfs4"), (Path("/"), "ext4"))
+        mounts = (
+            (mount, "autofs"),
+            (mount, "nfs"),
+            (Path("/"), "ext4"),
+        )
+        with (
+            patch(
+                "tunes_player.platform.linux.mount_info._mountinfo_entries",
+                return_value=mountinfo,
+            ),
+            patch(
+                "tunes_player.platform.linux.mount_info._mount_entries",
+                return_value=mounts,
             ),
             patch.object(Path, "resolve", lambda self: self),
         ):

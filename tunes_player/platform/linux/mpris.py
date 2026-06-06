@@ -100,7 +100,6 @@ _INTROSPECTION = """
 </node>
 """
 
-_POSITION_EMIT_INTERVAL_SEC = 1.0
 _VOID_REPLY = GLib.Variant("()", ())
 
 
@@ -128,9 +127,9 @@ class MprisService:
         self._unsubscribe: Callable[[], None] | None = None
         self._loop_status = "None"
         self._shuffle = False
-        self._last_position_emit = 0.0
         self._pending_property_names: set[str] = set()
         self._pending_property_emit = False
+        self._position_timer_id = 0
         self._node_info = Gio.DBusNodeInfo.new_for_xml(_INTROSPECTION)
 
     def start(self) -> None:
@@ -145,8 +144,16 @@ class MprisService:
             self._on_name_lost,
         )
         self._unsubscribe = self._service.subscribe(self._on_service_event)
+        if self._position_timer_id == 0:
+            self._position_timer_id = GLib.timeout_add_seconds(
+                1,
+                self._emit_position_if_playing,
+            )
 
     def stop(self) -> None:
+        if self._position_timer_id != 0:
+            GLib.source_remove(self._position_timer_id)
+            self._position_timer_id = 0
         if self._unsubscribe is not None:
             self._unsubscribe()
             self._unsubscribe = None
@@ -202,15 +209,13 @@ class MprisService:
             )
         elif event == "volume_changed":
             self._schedule_player_properties("Volume")
-        elif event == "position_changed":
-            now = GLib.get_monotonic_time() / 1_000_000
-            state = self._service.get_playback_state()
-            if not state.is_playing:
-                return False
-            if now - self._last_position_emit >= _POSITION_EMIT_INTERVAL_SEC:
-                self._last_position_emit = now
-                self._schedule_player_properties("Position")
         return False
+
+    def _emit_position_if_playing(self) -> bool:
+        state = self._service.get_playback_state()
+        if state.is_playing:
+            self._schedule_player_properties("Position")
+        return True
 
     def _handle_method_call(
         self,

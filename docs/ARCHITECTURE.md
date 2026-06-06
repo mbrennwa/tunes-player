@@ -325,7 +325,7 @@ load is high**. Built-in / PipeWire paths tolerate the same load. Investigation
 
 - Root cause is **ALSA underrun / XRUN** when mpv’s output thread is delayed — not NFS
   input alone, and not “Tunes CPU usage” in isolation.
-- **Headless mpv** (engine only, no GTK) stays clean even at ~95% CPU stress.
+- **Headless mpv** (engine only, no GTK) stays clean even at ~80% CPU stress.
 - **Full app** under load: in-process libmpv stutters; **mpv in a separate process**
   is much more stable (decode + ALSA isolated from Python/GTK/library work).
 
@@ -382,7 +382,7 @@ sprawling to maintain as-is.
 |-------|--------|
 | 1 | IPC skeleton + `PlaybackEngine` client; launch mpv child from `PlayerService` |
 | 2 | Port **`PlaybackOutputProfile` / bit-perfect policy** over IPC (direct ALSA hw, format match, device volume — parity with today); **playback path status** (`PlaybackPathInfo`) **reported from playback process** after each load |
-| 3 | USB direct-ALSA **stability** tuning inside playback process (buffers, isolation); validate #29 repro (95% CPU + Holo) **without** compromising bit-perfect |
+| 3 | USB direct-ALSA **stability** tuning inside playback process (buffers, isolation); validate #29 repro (80% CPU + Holo) **without** compromising bit-perfect |
 | 4 | Remove in-process libmpv from playback path; keep spike branch for reference only |
 
 **Reference:** branch `spike/issue-29` preserves the experimental code and benchmark
@@ -881,7 +881,7 @@ Trackable open items. Ordered milestones are in [Roadmap](#roadmap-ordered) abov
   child, not only pre-load metadata in `PlayerService` (see `core/playback/output_profile.py`,
   `format_playback_status` in now playing UI).
 - [ ] **Remove in-process libmpv** from playback hot path after parity.
-- [ ] **Validate** USB direct ALSA under `scripts/cpu_load.py` (~95%) + full GTK app.
+- [ ] **Validate** USB direct ALSA under `scripts/cpu_load.py` (~80%) + full GTK app.
 
 Spike / reference: branch `spike/issue-29`.
 

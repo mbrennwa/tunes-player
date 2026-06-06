@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""A/B benchmark: libmpv vs subprocess mpv under CPU stress (issue #29).
+"""Headless subprocess mpv benchmark under CPU stress (issue #29).
 
 Plays local staged tracks on USB direct ALSA while ``cpu_load.py`` runs,
-logs phase markers to tunes-player.log, and prints a comparison table.
+logs phase markers to tunes-player.log, and prints stutter metrics.
 
 Example:
-  python3 scripts/engine_stress_benchmark.py
-  python3 scripts/engine_stress_benchmark.py --seconds 25 --load 0.65
+  python3 scripts/engine_stress_benchmark.py --load 0.80
+  python3 scripts/engine_stress_benchmark.py --seconds 25 --load 0.80 --skip-stress
 """
 
 from __future__ import annotations
@@ -31,7 +31,8 @@ if str(REPO_ROOT) not in sys.path:
 from tunes_player.core.config import ConfigManager
 from tunes_player.core.logging_config import configure_logging, diagnostics_log_path
 from tunes_player.core.playback.output_profile import PlaybackOutputProfile
-from tunes_player.engines.mpv import create_playback_engine
+from tunes_player.engines.factory import create_playback_engine
+from tunes_player.engines.playback_ipc import END_FILE_ERROR as _IPC_END_FILE_ERROR
 from tunes_player.platform.linux.alsa_playback import effective_mpv_alsa_device
 from tunes_player.platform.linux.alsa_xrun_monitor import AlsaXrunMonitor, parse_card_from_mpv_device
 
@@ -83,10 +84,9 @@ _STUTTER_RE = re.compile(
     r"mpv stutter|underrun|ALSA PCM entered XRUN|ALSA xrun counter increased",
     re.IGNORECASE,
 )
-_END_FILE_RE = re.compile(r"end-file reason=(\d+)")
-# libmpv EndFile.ERROR is 4; mpv JSON IPC uses reason 2 for errors.
+_END_FILE_RE = re.compile(r"end-file reason=(\d+|[a-z]+)")
+# libmpv EndFile.ERROR is 4; mpv JSON IPC uses reason 5 for errors.
 _LIBMPV_END_FILE_ERROR = 4
-_IPC_END_FILE_ERROR = 2
 
 
 @dataclass
@@ -117,10 +117,16 @@ class _PhaseLogCounter(logging.Handler):
             self.metrics.alsa_xrun += 1
         match = _END_FILE_RE.search(message)
         if match is not None:
-            reason = int(match.group(1))
-            # libmpv EndFile: ERROR=4. mpv JSON IPC end-file: error=2.
-            if reason == _LIBMPV_END_FILE_ERROR or (
-                reason == _IPC_END_FILE_ERROR and record.name.endswith("mpv_ipc")
+            token = match.group(1)
+            if token == "error" or (
+                token.isdigit()
+                and (
+                    int(token) == _LIBMPV_END_FILE_ERROR
+                    or (
+                        int(token) == _IPC_END_FILE_ERROR
+                        and record.name.endswith("mpv_ipc")
+                    )
+                )
             ):
                 self.metrics.end_file_errors += 1
         if record.name.startswith("tunes_player") and "playback_error" in message:
@@ -193,7 +199,6 @@ def _run_phase(
     *,
     phase: str,
     session: str,
-    use_subprocess: bool,
     tracks: list[tuple[str, Path, PlaybackOutputProfile]],
     seconds_per_track: float,
     mpv_device: str,
@@ -201,20 +206,13 @@ def _run_phase(
     card: int | None,
     counter: _PhaseLogCounter,
 ) -> PhaseMetrics:
-    engine_name = "subprocess" if use_subprocess else "libmpv"
     _LOG.info(
-        "ENGINE_BENCHMARK session=%s phase=%s engine=%s start tracks=%d sec=%.0f",
+        "ENGINE_BENCHMARK session=%s phase=%s engine=subprocess start tracks=%d sec=%.0f",
         session,
         phase,
-        engine_name,
         len(tracks),
         seconds_per_track,
     )
-
-    if use_subprocess:
-        os.environ["TUNES_MPV_SUBPROCESS"] = "1"
-    else:
-        os.environ.pop("TUNES_MPV_SUBPROCESS", None)
 
     monitor = AlsaXrunMonitor()
     monitor.set_card(card)
@@ -234,6 +232,7 @@ def _run_phase(
         output_profile=profile,
         on_event=on_event,
         ipc_socket_path=ConfigManager().data_dir / f"benchmark-mpv-{session}.sock",
+        endpoint_id=endpoint_id,
     )
 
     try:
@@ -262,11 +261,10 @@ def _run_phase(
     metrics = counter.metrics
     metrics.playback_errors = playback_errors
     _LOG.info(
-        "ENGINE_BENCHMARK session=%s phase=%s engine=%s end "
+        "ENGINE_BENCHMARK session=%s phase=%s engine=subprocess end "
         "mpv_stutter=%d alsa_xrun=%d end_file_error=%d playback_error=%d",
         session,
         phase,
-        engine_name,
         metrics.mpv_stutter,
         metrics.alsa_xrun,
         metrics.end_file_errors,
@@ -275,13 +273,10 @@ def _run_phase(
     return metrics
 
 
-def _parse_log_slice(log_path: Path, session: str) -> dict[str, Counter[str]]:
+def _parse_log_slice(log_path: Path, session: str) -> Counter[str]:
     """Cross-check in-process counts against the persistent log file."""
-    counts: dict[str, Counter[str]] = {
-        "libmpv": Counter(),
-        "subprocess": Counter(),
-    }
-    current: str | None = None
+    counts: Counter[str] = Counter()
+    in_phase = False
     try:
         text = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -290,30 +285,33 @@ def _parse_log_slice(log_path: Path, session: str) -> dict[str, Counter[str]]:
     for line in text.splitlines():
         if f"ENGINE_BENCHMARK session={session}" not in line:
             continue
-        if " engine=libmpv start" in line:
-            current = "libmpv"
-        elif " engine=subprocess start" in line:
-            current = "subprocess"
-        elif " end " in line and current is not None:
-            current = None
+        if " engine=subprocess start" in line:
+            in_phase = True
+        elif " engine=subprocess end " in line:
+            in_phase = False
             continue
-        if current is None:
+        if not in_phase:
             continue
         if _STUTTER_RE.search(line):
             if "mpv stutter" in line:
-                counts[current]["mpv_stutter"] += 1
+                counts["mpv_stutter"] += 1
             if "ALSA" in line and ("XRUN" in line or "xrun counter" in line):
-                counts[current]["alsa_xrun"] += 1
+                counts["alsa_xrun"] += 1
         match = _END_FILE_RE.search(line)
-        if match is not None and int(match.group(1)) in (_LIBMPV_END_FILE_ERROR, _IPC_END_FILE_ERROR):
-            counts[current]["end_file_error"] += 1
+        if match is not None:
+            token = match.group(1)
+            if token == "error" or (
+                token.isdigit()
+                and int(token) in (_LIBMPV_END_FILE_ERROR, _IPC_END_FILE_ERROR)
+            ):
+                counts["end_file_error"] += 1
     return counts
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seconds", type=float, default=20.0, help="Seconds per track")
-    parser.add_argument("--load", type=float, default=0.65, help="cpu_load.py duty cycle")
+    parser.add_argument("--load", type=float, default=0.80, help="cpu_load.py duty cycle")
     parser.add_argument(
         "--device",
         default="alsa/hw:1,0",
@@ -355,7 +353,7 @@ def main() -> int:
 
     _stop_stray_mpv()
 
-    total_sec = len(tracks) * args.seconds * 2 + 10
+    total_sec = len(tracks) * args.seconds + 10
     stress_proc: subprocess.Popen[bytes] | None = None
     if not args.skip_stress:
         stress_proc = _start_cpu_load(
@@ -369,25 +367,10 @@ def main() -> int:
     counter = _PhaseLogCounter()
     app_logger.addHandler(counter)
 
-    results: dict[str, PhaseMetrics] = {}
     try:
-        results["libmpv"] = _run_phase(
+        metrics = _run_phase(
             phase="A",
             session=session,
-            use_subprocess=False,
-            tracks=tracks,
-            seconds_per_track=args.seconds,
-            mpv_device=mpv_device,
-            endpoint_id=args.endpoint,
-            card=card,
-            counter=counter,
-        )
-        time.sleep(2.0)
-        counter.metrics = PhaseMetrics()
-        results["subprocess"] = _run_phase(
-            phase="B",
-            session=session,
-            use_subprocess=True,
             tracks=tracks,
             seconds_per_track=args.seconds,
             mpv_device=mpv_device,
@@ -409,23 +392,19 @@ def main() -> int:
     print()
     print(f"Benchmark session {session}  log: {log_path}")
     print(f"Device: {mpv_device}  CPU stress: {'yes' if not args.skip_stress else 'no'}  load={args.load}")
-    print(f"{args.seconds:.0f}s × {len(tracks)} tracks per engine\n")
-    header = f"{'engine':<12} {'mpv_stutter':>12} {'alsa_xrun':>10} {'fatal_end':>10} {'playback_err':>13}"
+    print(f"{args.seconds:.0f}s × {len(tracks)} tracks (subprocess mpv IPC)\n")
+    header = f"{'mpv_stutter':>12} {'alsa_xrun':>10} {'fatal_end':>10} {'playback_err':>13}"
     print(header)
     print("-" * len(header))
-    for name in ("libmpv", "subprocess"):
-        m = results[name]
-        print(
-            f"{name:<12} {m.mpv_stutter:>12} {m.alsa_xrun:>10} "
-            f"{m.end_file_errors:>11} {m.playback_errors:>13}"
-        )
+    print(
+        f"{metrics.mpv_stutter:>12} {metrics.alsa_xrun:>10} "
+        f"{metrics.end_file_errors:>11} {metrics.playback_errors:>13}"
+    )
     print("\nLog-file cross-check (same session markers):")
-    for name in ("libmpv", "subprocess"):
-        c = log_counts[name]
-        print(
-            f"  {name}: mpv_stutter={c['mpv_stutter']} "
-            f"alsa_xrun={c['alsa_xrun']} end_file_error={c['end_file_error']}"
-        )
+    print(
+        f"  mpv_stutter={log_counts['mpv_stutter']} "
+        f"alsa_xrun={log_counts['alsa_xrun']} end_file_error={log_counts['end_file_error']}"
+    )
     print("\nGrep this session:")
     print(f"  grep 'ENGINE_BENCHMARK session={session}' {log_path}")
     print(

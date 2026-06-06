@@ -94,6 +94,55 @@ class DerivePlaybackPathTests(unittest.TestCase):
         assert path.playback_note is not None
         self.assertIn("resampling", path.playback_note)
 
+    def test_alsa_resample_flag_without_rate_mismatch_is_bit_perfect(self) -> None:
+        path = derive_playback_path_info(
+            file_meta=FileMetadata(
+                path="/a.flac",
+                codec="flac",
+                duration_sec=1.0,
+                sample_rate=96000,
+                bit_depth=24,
+                channels=2,
+            ),
+            profile=self._profile(),
+            negotiated=NegotiatedPlaybackState(
+                ao="alsa",
+                audio_samplerate=96000,
+                audio_format="s32",
+                alsa_resample=True,
+            ),
+            endpoint_id="alsa:hw:0:0",
+            device_volume=True,
+            mpv_soft_volume=False,
+        )
+        self.assertTrue(path.bit_perfect_playback)
+        self.assertEqual(path.playback_note, "ALSA bit-perfect")
+
+
+    def test_direct_alsa_bit_perfect_with_fixed_output_dac(self) -> None:
+        path = derive_playback_path_info(
+            file_meta=FileMetadata(
+                path="/a.flac",
+                codec="flac",
+                duration_sec=1.0,
+                sample_rate=192000,
+                bit_depth=24,
+                channels=2,
+            ),
+            profile=self._profile(target_rate=192000),
+            negotiated=NegotiatedPlaybackState(
+                ao="alsa",
+                audio_samplerate=192000,
+                audio_format="s32",
+                alsa_resample=False,
+            ),
+            endpoint_id="alsa:hw:1:0",
+            device_volume=False,
+            mpv_soft_volume=False,
+        )
+        self.assertTrue(path.bit_perfect_playback)
+        self.assertEqual(path.playback_note, "ALSA bit-perfect")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -45,13 +45,20 @@ class AlsaPlaybackTests(unittest.TestCase):
         for _ in range(5):
             alsa_playback.effective_mpv_alsa_device("alsa/hw:1,0")
         self.assertEqual(log_info.call_count, 1)
-        self.assertIn("exclusive disabled", log_info.call_args.args[0])
+        self.assertIn("direct hw output", log_info.call_args.args[0])
 
     @patch.object(alsa_playback, "is_usb_alsa_playback", return_value=True)
-    def test_direct_alsa_use_exclusive_false_for_usb(self, _usb: object) -> None:
-        self.assertFalse(
+    def test_direct_alsa_use_exclusive_honors_setting_for_usb(self, _usb: object) -> None:
+        self.assertTrue(
             alsa_playback.direct_alsa_use_exclusive(
                 True,
+                "alsa:hw:1:0",
+                "alsa/hw:1,0",
+            )
+        )
+        self.assertFalse(
+            alsa_playback.direct_alsa_use_exclusive(
+                False,
                 "alsa:hw:1:0",
                 "alsa/hw:1,0",
             )

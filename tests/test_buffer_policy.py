@@ -57,7 +57,7 @@ class BufferPolicyTests(unittest.TestCase):
         self.assertEqual(options["alsa_periods"], 8)
         self.assertEqual(options["demuxer_thread"], "yes")
         self.assertEqual(options["cache_pause_initial"], "yes")
-        self.assertEqual(options["cache_pause_wait"], 8.0)
+        self.assertEqual(options["cache_pause_wait"], 2.0)
 
     def test_mpv_options_local_direct_alsa(self) -> None:
         options = mpv_options_for_input(InputClass.LOCAL, direct_alsa=True)

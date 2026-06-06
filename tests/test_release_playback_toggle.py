@@ -40,6 +40,10 @@ class ReleasePlaybackToggleTests(unittest.TestCase):
         self._service._is_playing = False
         self.assertFalse(self._service.is_release_playing(self._release_id))
 
+        self._service._playback_load_active = True
+        self.assertTrue(self._service.is_release_playing(self._release_id))
+        self._service._playback_load_active = False
+
     def test_play_or_toggle_release_toggles_current_release(self) -> None:
         self._service._current_track = self._track
         self._service._current_release_id = self._release_id

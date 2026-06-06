@@ -132,9 +132,13 @@ class FolderAutoMonitorServiceTests(unittest.TestCase):
         self._config.add_music_folder(self._folder, auto_monitor=True)
         self._config.add_music_folder(other, auto_monitor=False)
 
-        with patch.object(self._service, "enqueue_scan") as enqueue:
+        with (
+            patch.object(self._service, "_run_startup_reconcile") as reconcile,
+            patch.object(self._service, "enqueue_scan") as enqueue,
+        ):
             self._service.enqueue_startup_scans()
 
+        reconcile.assert_called_once_with()
         enqueue.assert_called_once_with(folder=self._folder)
 
     def test_disable_auto_monitor_stops_active_scan(self) -> None:

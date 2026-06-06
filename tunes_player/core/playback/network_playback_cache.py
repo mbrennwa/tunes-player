@@ -1,16 +1,19 @@
-"""Stage network-library files on local disk before mpv opens them."""
+"""Stage network-library files on local disk for repeat playback."""
 
 from __future__ import annotations
 
 import hashlib
 import logging
 import shutil
+import threading
 import time
 from pathlib import Path
 
 LOG = logging.getLogger(__name__)
 
 _MAX_CACHE_BYTES = 2 * 1024 * 1024 * 1024
+_warmup_lock = threading.Lock()
+_warmup_inflight: set[str] = set()
 
 
 def _cache_key(path: Path, *, size: int, mtime_ns: int) -> str:
@@ -65,8 +68,27 @@ def _evict_cache_if_needed(cache_dir: Path, *, needed_bytes: int) -> None:
         LOG.info("Evicted playback cache entry %s", entry_dir.name)
 
 
-def stage_network_file_if_needed(path: str | Path, *, cache_dir: Path) -> str:
-    """Return a local staged copy for network-library files, else the original path."""
+def _staged_path_if_cached(resolved: Path, *, cache_dir: Path) -> Path | None:
+    try:
+        stat = resolved.stat()
+    except OSError:
+        return None
+    key = _cache_key(resolved, size=stat.st_size, mtime_ns=stat.st_mtime_ns)
+    staged = cache_dir / key / resolved.name
+    if not staged.is_file():
+        return None
+    try:
+        staged_stat = staged.stat()
+    except OSError:
+        return None
+    if staged_stat.st_size != stat.st_size:
+        return None
+    (cache_dir / key).touch(exist_ok=True)
+    return staged
+
+
+def resolve_playback_target(path: str | Path, *, cache_dir: Path) -> str:
+    """Return a cached local copy when available, else the original path (no blocking copy)."""
     source = Path(path)
     if not source.is_file():
         return str(path)
@@ -76,26 +98,26 @@ def stage_network_file_if_needed(path: str | Path, *, cache_dir: Path) -> str:
         return str(path)
     if not _is_network_library_path(resolved):
         return str(path)
+    staged = _staged_path_if_cached(resolved, cache_dir=cache_dir)
+    if staged is not None:
+        LOG.info("Using staged playback copy: %s", staged)
+        return str(staged)
+    return str(path)
 
+
+def _copy_network_file_to_cache(resolved: Path, *, cache_dir: Path) -> Path | None:
     try:
         stat = resolved.stat()
     except OSError as exc:
         LOG.warning("Could not stat network library file %s: %s", resolved, exc)
-        return str(path)
+        return None
 
     key = _cache_key(resolved, size=stat.st_size, mtime_ns=stat.st_mtime_ns)
     entry_dir = cache_dir / key
     staged = entry_dir / resolved.name
-
-    if staged.is_file():
-        try:
-            staged_stat = staged.stat()
-        except OSError:
-            staged_stat = None
-        if staged_stat is not None and staged_stat.st_size == stat.st_size:
-            entry_dir.touch(exist_ok=True)
-            LOG.info("Using staged playback copy: %s", staged)
-            return str(staged)
+    existing = _staged_path_if_cached(resolved, cache_dir=cache_dir)
+    if existing is not None:
+        return existing
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     _evict_cache_if_needed(cache_dir, needed_bytes=stat.st_size)
@@ -115,7 +137,7 @@ def stage_network_file_if_needed(path: str | Path, *, cache_dir: Path) -> str:
     except OSError as exc:
         temp.unlink(missing_ok=True)
         LOG.warning("Playback staging failed for %s: %s", resolved, exc)
-        return str(path)
+        return None
     elapsed = time.monotonic() - started
     LOG.info(
         "Staged %.1f MiB in %.2fs: %s",
@@ -123,4 +145,81 @@ def stage_network_file_if_needed(path: str | Path, *, cache_dir: Path) -> str:
         elapsed,
         staged,
     )
-    return str(staged)
+    return staged
+
+
+def warm_playback_cache(path: str | Path, *, cache_dir: Path) -> str:
+    """Copy a network-library file to the local cache; return the path mpv should open."""
+    source = Path(path)
+    if not source.is_file():
+        return str(path)
+    try:
+        resolved = source.resolve()
+    except OSError:
+        return str(path)
+    if not _is_network_library_path(resolved):
+        return str(path)
+    staged = _copy_network_file_to_cache(resolved, cache_dir=cache_dir)
+    if staged is not None:
+        return str(staged)
+    return str(path)
+
+
+def _warmup_worker(path: str | Path, *, cache_dir: Path, inflight_key: str) -> None:
+    try:
+        warm_playback_cache(path, cache_dir=cache_dir)
+    finally:
+        with _warmup_lock:
+            _warmup_inflight.discard(inflight_key)
+
+
+def schedule_playback_cache_warmup(path: str | Path, *, cache_dir: Path) -> None:
+    """Start a background cache copy for repeat playback; never blocks the caller."""
+    source = Path(path)
+    if not source.is_file():
+        return
+    try:
+        resolved = source.resolve()
+    except OSError:
+        return
+    if not _is_network_library_path(resolved):
+        return
+    if _staged_path_if_cached(resolved, cache_dir=cache_dir) is not None:
+        return
+    try:
+        stat = resolved.stat()
+    except OSError:
+        return
+    inflight_key = _cache_key(resolved, size=stat.st_size, mtime_ns=stat.st_mtime_ns)
+    with _warmup_lock:
+        if inflight_key in _warmup_inflight:
+            return
+        _warmup_inflight.add(inflight_key)
+    threading.Thread(
+        target=_warmup_worker,
+        args=(path,),
+        kwargs={"cache_dir": cache_dir, "inflight_key": inflight_key},
+        name="tunes-playback-cache-warm",
+        daemon=True,
+    ).start()
+
+
+def stage_network_file_if_needed(path: str | Path, *, cache_dir: Path) -> str:
+    """Blocking staging for benchmarks; playback uses resolve_playback_target instead."""
+    target = resolve_playback_target(path, cache_dir=cache_dir)
+    source = Path(path)
+    try:
+        resolved = source.resolve()
+    except OSError:
+        return target
+    if not _is_network_library_path(resolved):
+        return target
+    if target != str(path) and Path(target).is_file():
+        return target
+    return warm_playback_cache(path, cache_dir=cache_dir)
+
+
+def clear_warmup_state_for_tests() -> None:
+    """Reset in-flight warmup tracking (tests only)."""
+    with _warmup_lock:
+        _warmup_inflight.clear()

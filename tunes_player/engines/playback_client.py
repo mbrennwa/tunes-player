@@ -14,6 +14,7 @@ import time
 import atexit
 import weakref
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -26,9 +27,9 @@ from tunes_player.core.playback.buffer_policy import (
 )
 from tunes_player.core.playback.mpv_cli import mpv_cli_args_from_options
 from tunes_player.core.playback.playback_path import (
+    NegotiatedPlaybackState,
     PlaybackPathContext,
     derive_playback_path_info,
-    read_negotiated_playback_state,
 )
 from tunes_player.engines.playback_ipc import (
     end_file_applies_to_playlist_entry,
@@ -44,9 +45,27 @@ EngineCallback = Callable[[EngineEvent], None]
 
 _LOG = logging.getLogger(__name__)
 _CONNECT_TIMEOUT_SEC = 5.0
-_COMMAND_TIMEOUT_SEC = 30.0
-_POSITION_INTERVAL_SEC = 0.1
+_COMMAND_TIMEOUT_SEC = 5.0
+_POSITION_INTERVAL_SEC = 0.25
 _LIVE_CLIENTS: weakref.WeakSet = weakref.WeakSet()
+
+
+def _descendant_pids(root_pid: int | None = None) -> set[int]:
+    """Return child process IDs rooted at *root_pid* (default: current process)."""
+    descendants: set[int] = set()
+    stack = [root_pid if root_pid is not None else os.getpid()]
+    while stack:
+        pid = stack.pop()
+        try:
+            with open(f"/proc/{pid}/task/{pid}/children", encoding="ascii") as handle:
+                for token in handle.read().split():
+                    if token.isdigit():
+                        child = int(token)
+                        descendants.add(child)
+                        stack.append(child)
+        except OSError:
+            continue
+    return descendants
 
 
 def _configure_mpv_child_process() -> None:
@@ -137,14 +156,18 @@ class MpvPlaybackClient:
         self._playing = False
         self._track_end_signaled = False
         self._last_position_emit = 0.0
+        self._last_position_update_at = 0.0
         self._shutdown = False
         self._path_context: PlaybackPathContext | None = None
         self._path_info: PlaybackPathInfo | None = None
+        self._negotiated_state = NegotiatedPlaybackState()
         self._active_playlist_entry_id: int | None = None
         self._load_in_progress = False
         self._recovering_direct_alsa = False
         self._stable_output_active = False
         self._last_output_format_key: tuple[object, ...] | None = None
+        self._direct_alsa_device_open = False
+        self._opened_exclusive: bool | None = None
         self._keep_alsa_open_on_track_change = self._usb_keep_device_open()
         self._used_chrt = False
 
@@ -165,27 +188,29 @@ class MpvPlaybackClient:
             "--vo=null",
             "--ytdl=no",
         ]
-        args.extend(
-            mpv_cli_args_from_options(_base_audio_options(profile, self._use_device_output))
-        )
         if profile is not None and profile.direct_alsa:
-            args.extend(mpv_cli_args_from_options(direct_alsa_engine_options(warmup=True)))
+            # Keep idle mpv on the null AO until the first track load opens ALSA.
+            # Opening an exclusive USB DAC at prewarm caused the subprocess to exit
+            # while the GUI still held a stale IPC client.
+            args.extend(mpv_cli_args_from_options({"ao": "null", "replaygain": "no"}))
+        else:
+            args.extend(
+                mpv_cli_args_from_options(_base_audio_options(profile, self._use_device_output))
+            )
         if self._unity_gain:
             args.append("--volume=100")
-            args.append("--replaygain=no")
         else:
             args.append(f"--volume={max(0.0, min(100.0, self._volume * 100.0))}")
-        if self._audio_device:
+        if self._audio_device and (profile is None or not profile.direct_alsa):
             args.append(f"--audio-device={self._audio_device}")
-        if profile is not None and profile.direct_alsa and profile.use_exclusive:
-            args.append("--audio-exclusive=yes")
         return args
 
     def _start_process(self) -> None:
         self._socket_path.parent.mkdir(parents=True, exist_ok=True)
-        self._terminate_stale_mpv_instances()
+        protected = _descendant_pids()
+        self._terminate_stale_mpv_instances(protected_pids=protected)
         if self._socket_path.exists():
-            self._socket_path.unlink()
+            self._socket_path.unlink(missing_ok=True)
 
         from tunes_player.platform.linux.playback_priority import mpv_subprocess_command
 
@@ -195,13 +220,36 @@ class MpvPlaybackClient:
         popen_kwargs: dict[str, object] = {
             "stdin": subprocess.DEVNULL,
             "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
+            "stderr": subprocess.PIPE,
         }
         if os.name == "posix":
             popen_kwargs["preexec_fn"] = _configure_mpv_child_process
         self._proc = subprocess.Popen(cmd, **popen_kwargs)  # type: ignore[arg-type]
+        protected.add(self._proc.pid)
+        self.release_alsa_device_contention()
+        stderr = self._proc.stderr
+        if stderr is not None:
+            threading.Thread(
+                target=self._drain_mpv_stderr,
+                args=(stderr,),
+                name="mpv-stderr",
+                daemon=True,
+            ).start()
         self._raise_child_playback_priority()
-        self._connect_socket()
+        try:
+            self._connect_socket()
+        except Exception:
+            if self._proc is not None and self._proc.poll() is None:
+                try:
+                    self._proc.terminate()
+                    self._proc.wait(timeout=1.0)
+                except (OSError, subprocess.TimeoutExpired):
+                    try:
+                        self._proc.kill()
+                    except OSError:
+                        pass
+            self._proc = None
+            raise
         self._running = True
         self._reader = threading.Thread(
             target=self._read_loop,
@@ -210,6 +258,20 @@ class MpvPlaybackClient:
         )
         self._reader.start()
         self.command("enable_event", "end-file", 1)
+
+    def _drain_mpv_stderr(self, stderr: Any) -> None:
+        try:
+            for raw_line in stderr:
+                line = raw_line.decode("utf-8", errors="replace").rstrip()
+                if line:
+                    _LOG.warning("mpv: %s", line)
+        except OSError:
+            pass
+        finally:
+            try:
+                stderr.close()
+            except OSError:
+                pass
 
     def _connect_socket(self) -> None:
         deadline = time.monotonic() + _CONNECT_TIMEOUT_SEC
@@ -240,6 +302,12 @@ class MpvPlaybackClient:
         self.command("observe_property", 1, "time-pos")
         self.command("observe_property", 2, "duration")
         self.command("observe_property", 3, "pause")
+        self.command("observe_property", 4, "ao")
+        self.command("observe_property", 5, "audio-device")
+        self.command("observe_property", 6, "audio-samplerate")
+        self.command("observe_property", 7, "audio-format")
+        self.command("observe_property", 8, "alsa-resample")
+        self.command("observe_property", 9, "audio-channels")
 
     def _read_loop(self) -> None:
         assert self._sock_file is not None
@@ -247,8 +315,10 @@ class MpvPlaybackClient:
             try:
                 line = self._sock_file.readline()
             except OSError:
+                self._mark_ipc_disconnected()
                 break
             if not line:
+                self._mark_ipc_disconnected()
                 break
             try:
                 message = json.loads(line.decode("utf-8"))
@@ -272,9 +342,47 @@ class MpvPlaybackClient:
                     )
             except Exception:
                 _LOG.exception("Unhandled mpv IPC event")
+        if not self._shutdown:
+            proc = self._proc
+            returncode = proc.poll() if proc is not None else None
+            if returncode is not None:
+                _LOG.error(
+                    "mpv IPC reader exited unexpectedly (returncode=%s)",
+                    returncode,
+                )
+            else:
+                _LOG.warning("mpv IPC socket closed before subprocess exit")
 
-    def _terminate_stale_mpv_instances(self) -> None:
-        pattern = f"input-ipc-server={self._socket_path}"
+    def _terminate_stale_mpv_instances(
+        self,
+        *,
+        protected_pids: set[int] | None = None,
+    ) -> None:
+        protected = protected_pids or set()
+        self._terminate_mpv_matching(
+            f"input-ipc-server={self._socket_path}",
+            exclude_pids=protected,
+        )
+
+    def release_alsa_device_contention(self) -> None:
+        """Drop orphan mpv processes that still hold the configured ALSA device."""
+        if not self._audio_device:
+            return
+        from tunes_player.platform.linux.mpv_cleanup import terminate_mpv_using_audio_device
+
+        own_pid = self._proc.pid if self._proc is not None else None
+        terminate_mpv_using_audio_device(self._audio_device, exclude_pid=own_pid)
+
+    def _terminate_mpv_matching(
+        self,
+        pattern: str,
+        *,
+        exclude_pid: int | None = None,
+        exclude_pids: set[int] | None = None,
+    ) -> None:
+        protected = set(exclude_pids or ())
+        if exclude_pid is not None:
+            protected.add(exclude_pid)
         try:
             result = subprocess.run(
                 ["pgrep", "-f", pattern],
@@ -288,7 +396,9 @@ class MpvPlaybackClient:
         if not pids:
             return
         for pid in pids:
-            _LOG.warning("Terminating stale mpv process %s for %s", pid, self._socket_path)
+            if pid in protected:
+                continue
+            _LOG.warning("Terminating stale mpv process %s matching %s", pid, pattern)
             try:
                 os.kill(pid, signal.SIGTERM)
             except ProcessLookupError:
@@ -296,6 +406,20 @@ class MpvPlaybackClient:
         time.sleep(0.2)
 
     def _handle_property_change(self, name: str | None, data: object) -> None:
+        if name in {
+            "ao",
+            "audio-device",
+            "audio-samplerate",
+            "audio-format",
+            "alsa-resample",
+            "audio-channels",
+        }:
+            self._update_negotiated_property(name, data)
+            if not self._load_in_progress:
+                self.refresh_playback_path_info()
+                self._emit("playback_path_changed")
+            return
+
         if name == "time-pos":
             if data is None:
                 return
@@ -307,6 +431,9 @@ class MpvPlaybackClient:
                 return
             self._position_sec = pos
             now = time.monotonic()
+            self._last_position_update_at = now
+            if self._load_in_progress:
+                return
             if now - self._last_position_emit >= _POSITION_INTERVAL_SEC:
                 self._last_position_emit = now
                 self._emit("position_changed")
@@ -320,7 +447,10 @@ class MpvPlaybackClient:
             if duration <= 0:
                 return
             self._duration_sec = duration
+            if self._load_in_progress:
+                return
             self._emit("duration_changed")
+            self.refresh_playback_path_info()
             self._emit("playback_path_changed")
         elif name == "pause":
             if self._load_in_progress:
@@ -347,7 +477,6 @@ class MpvPlaybackClient:
             detail = f": {file_error}" if file_error else ""
             _LOG.warning("mpv end-file reason=%s%s", reason, detail)
             self._playing = False
-            self._loaded_uri = None
             self._emit("playback_error")
 
     def command(self, *args: object, timeout: float = _COMMAND_TIMEOUT_SEC) -> dict[str, Any]:
@@ -360,8 +489,12 @@ class MpvPlaybackClient:
                 {"command": list(args), "request_id": request_id},
                 separators=(",", ":"),
             ).encode("utf-8") + b"\n"
-            self._sock_file.write(payload)
-            self._sock_file.flush()
+            try:
+                self._sock_file.write(payload)
+                self._sock_file.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                self._mark_ipc_disconnected()
+                raise OSError("mpv IPC connection closed") from exc
             deadline = time.monotonic() + timeout
             with self._response_ready:
                 while request_id not in self._responses:
@@ -370,6 +503,31 @@ class MpvPlaybackClient:
                         raise TimeoutError(f"mpv IPC command timed out: {args!r}")
                     self._response_ready.wait(timeout=remaining)
                 return self._responses.pop(request_id)
+
+    def is_available(self) -> bool:
+        """Return True while the mpv subprocess and IPC socket are usable."""
+        if self._shutdown or not self._running:
+            return False
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return False
+        return self._sock_file is not None
+
+    def _mark_ipc_disconnected(self) -> None:
+        self._running = False
+        self._playing = False
+        if self._sock_file is not None:
+            try:
+                self._sock_file.close()
+            except OSError:
+                pass
+            self._sock_file = None
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
 
     def set_property(self, name: str, value: object) -> None:
         flag = name.replace("_", "-")
@@ -392,8 +550,51 @@ class MpvPlaybackClient:
         self._output_profile = profile
         if profile is None or not profile.direct_alsa:
             return
+        if self._direct_alsa_device_open and not self._ao_is_alsa(
+            self.get_property("ao")
+        ):
+            _LOG.warning("mpv ao is not alsa; reopening direct ALSA output")
+            self._direct_alsa_device_open = False
+        if not self._direct_alsa_device_open:
+            self._open_direct_alsa_device(profile)
+            return
+        if profile.use_exclusive != self._opened_exclusive:
+            self.set_property(
+                "audio-exclusive",
+                "yes" if profile.use_exclusive else "no",
+            )
+            self._opened_exclusive = profile.use_exclusive
+
+    def _open_direct_alsa_device(self, profile: PlaybackOutputProfile) -> None:
+        if self._direct_alsa_device_open:
+            return
+        self.release_alsa_device_contention()
+        _LOG.info("Opening direct ALSA output for playback")
+        for key, value in direct_alsa_engine_options(warmup=True).items():
+            try:
+                self.set_property(key, value)
+            except RuntimeError as exc:
+                _LOG.warning("mpv rejected direct ALSA warmup property %s: %s", key, exc)
         self.set_property("ao", "alsa")
-        self.set_property("audio-exclusive", "yes" if profile.use_exclusive else "no")
+        if self._audio_device:
+            self.set_property("audio-device", self._audio_device)
+        self.set_property(
+            "audio-exclusive",
+            "yes" if profile.use_exclusive else "no",
+        )
+        try:
+            self.command("ao-reload")
+        except (TimeoutError, OSError) as exc:
+            _LOG.debug("mpv ao-reload after direct ALSA open failed: %s", exc)
+        self._direct_alsa_device_open = True
+        self._opened_exclusive = profile.use_exclusive
+        ao = self.get_property("ao")
+        if not self._ao_is_alsa(ao):
+            _LOG.warning("mpv ao is still %s after opening direct ALSA", ao)
+
+    def ping(self) -> None:
+        """Verify the mpv IPC connection is alive."""
+        self.get_property("idle-active")
 
     def set_playback_path_context(self, context: PlaybackPathContext | None) -> None:
         self._path_context = context
@@ -402,7 +603,7 @@ class MpvPlaybackClient:
         return self._path_info
 
     def refresh_playback_path_info(self) -> None:
-        """Update cached path info from mpv. Must run on the main thread, not the IPC reader."""
+        """Update cached path info from observed mpv properties (no blocking IPC)."""
         profile = self._output_profile
         context = self._path_context
         if profile is None or context is None:
@@ -410,11 +611,92 @@ class MpvPlaybackClient:
         self._path_info = derive_playback_path_info(
             file_meta=context.file_meta,
             profile=profile,
-            negotiated=read_negotiated_playback_state(self.get_property),
+            negotiated=self._negotiated_state,
             endpoint_id=context.endpoint_id,
             device_volume=context.device_volume,
             mpv_soft_volume=context.mpv_soft_volume,
         )
+
+    def _update_negotiated_property(self, name: str, data: object) -> None:
+        if name == "ao":
+            self._negotiated_state = replace(
+                self._negotiated_state,
+                ao=self._coerce_negotiated_text(data),
+            )
+        elif name == "audio-device":
+            self._negotiated_state = replace(
+                self._negotiated_state,
+                audio_device=self._coerce_negotiated_text(data),
+            )
+        elif name == "audio-samplerate":
+            self._negotiated_state = replace(
+                self._negotiated_state,
+                audio_samplerate=self._coerce_negotiated_int(data),
+            )
+        elif name == "audio-format":
+            self._negotiated_state = replace(
+                self._negotiated_state,
+                audio_format=self._coerce_negotiated_text(data),
+            )
+        elif name == "alsa-resample":
+            self._negotiated_state = replace(
+                self._negotiated_state,
+                alsa_resample=self._coerce_negotiated_bool(data),
+            )
+        elif name == "audio-channels":
+            self._negotiated_state = replace(
+                self._negotiated_state,
+                audio_channels=self._coerce_negotiated_int(data),
+            )
+
+    @staticmethod
+    def _ao_is_alsa(value: object) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return value.casefold() == "alsa"
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    name = item.get("name")
+                    if isinstance(name, str) and name.casefold() == "alsa":
+                        enabled = item.get("enabled")
+                        if enabled is None or enabled is True:
+                            return True
+            return False
+        return str(value).casefold() == "alsa"
+
+    @staticmethod
+    def _coerce_negotiated_text(value: object) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @staticmethod
+    def _coerce_negotiated_int(value: object) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _coerce_negotiated_bool(value: object) -> bool | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.casefold()
+            if lowered in ("yes", "true", "1", "on"):
+                return True
+            if lowered in ("no", "false", "0", "off"):
+                return False
+        return None
 
     def set_event_callback(self, callback: EngineCallback | None) -> None:
         self._on_event = callback
@@ -459,6 +741,7 @@ class MpvPlaybackClient:
         self._active_playlist_entry_id = None
         try:
             if profile is not None and profile.direct_alsa:
+                self.set_output_profile(profile)
                 self._apply_track_format(profile, format_key=format_key)
                 self._last_output_format_key = format_key
             elif profile is not None:
@@ -474,6 +757,7 @@ class MpvPlaybackClient:
             self._position_sec = max(0.0, start_sec)
             self._duration_sec = None
             self._last_position_emit = 0.0
+            self._last_position_update_at = time.monotonic()
             response = self.command("loadfile", uri, "replace")
             if response.get("error") != "success":
                 raise RuntimeError(f"mpv loadfile failed: {response.get('error')}")
@@ -488,6 +772,7 @@ class MpvPlaybackClient:
             self._playing = True
         finally:
             self._load_in_progress = False
+        self.refresh_playback_path_info()
         self._emit("playback_path_changed")
         self._emit("duration_changed")
         self._emit("playing_changed")
@@ -607,7 +892,12 @@ class MpvPlaybackClient:
         except ImportError:
             pass
 
-    def recover_direct_alsa_output(self, *, full_reload: bool = False) -> bool:
+    def recover_direct_alsa_output(
+        self,
+        *,
+        full_reload: bool = False,
+        ao_reload_only: bool = False,
+    ) -> bool:
         profile = self._output_profile
         uri = self._loaded_uri
         if profile is None or not profile.direct_alsa or uri is None:
@@ -618,11 +908,28 @@ class MpvPlaybackClient:
         preview = uri if len(uri) <= 120 else f"{uri[:117]}..."
         self._recovering_direct_alsa = True
         try:
+            if ao_reload_only:
+                _LOG.warning(
+                    "ao-reload direct ALSA recovery for %s at %.2fs",
+                    preview,
+                    resume_sec,
+                )
+                self._reload_direct_alsa_output(stop_first=False)
+                if resume_sec > 0.0:
+                    self.command("seek", resume_sec, "absolute")
+                    self._position_sec = resume_sec
+                self._touch_position_clock()
+                self.set_property("pause", False)
+                self._playing = True
+                self._emit("playing_changed")
+                return True
+
             if not full_reload:
                 _LOG.warning("Light direct ALSA recovery for %s at %.2fs", preview, resume_sec)
                 if resume_sec > 0.0:
                     self.command("seek", resume_sec, "absolute")
                     self._position_sec = resume_sec
+                self._touch_position_clock()
                 self.set_property("pause", False)
                 self._playing = True
                 self._emit("playing_changed")
@@ -634,6 +941,10 @@ class MpvPlaybackClient:
             self._apply_buffer_policy(uri, profile, warmup=False)
             self._apply_track_format(profile)
             self.command("loadfile", uri, "replace")
+            if resume_sec > 0.5:
+                self.command("seek", resume_sec, "absolute")
+                self._position_sec = resume_sec
+            self._touch_position_clock()
             self.set_property("pause", False)
             self._playing = True
             self._emit("playing_changed")
@@ -674,6 +985,10 @@ class MpvPlaybackClient:
             self._apply_buffer_policy(uri, profile, warmup=False)
             self._apply_track_format(profile)
             self.command("loadfile", uri, "replace")
+            if resume_sec > 0.5:
+                self.command("seek", resume_sec, "absolute")
+                self._position_sec = resume_sec
+            self._touch_position_clock()
             self.set_property("pause", False)
             self._playing = True
             self._emit("playing_changed")
@@ -702,16 +1017,14 @@ class MpvPlaybackClient:
             return
         self.set_property("pause", False)
         self._playing = True
+        self._touch_position_clock()
         self._emit("playing_changed")
 
     def pause(self) -> None:
         if self._loaded_uri is None:
             return
         self.set_property("pause", True)
-        pos = self.get_property("time-pos")
         self._playing = False
-        if pos is not None:
-            self._position_sec = float(pos)
         self._emit("playing_changed")
         self._emit("position_changed")
 
@@ -733,6 +1046,7 @@ class MpvPlaybackClient:
         target = max(0.0, position_sec)
         self.command("seek", target, "absolute")
         self._position_sec = target
+        self._touch_position_clock()
         self._emit("position_changed")
 
     def set_volume(self, level: float) -> None:
@@ -757,33 +1071,26 @@ class MpvPlaybackClient:
         self.set_property("volume", gain * 100.0)
 
     def get_position(self) -> float:
-        if self._shutdown or self._sock_file is None:
-            return self._position_sec
-        try:
-            pos = self.get_property("time-pos")
-        except OSError:
-            return self._position_sec
-        if pos is not None:
-            try:
-                self._position_sec = float(pos)
-            except (TypeError, ValueError):
-                pass
+        """Return the last mpv time-pos observed on the IPC reader thread."""
         return self._position_sec
 
+    @property
+    def load_in_progress(self) -> bool:
+        return self._load_in_progress
+
+    def playback_stall_age_sec(self) -> float | None:
+        """Seconds since the last time-pos update while playback is intended."""
+        if not self._playing or self._loaded_uri is None or self._shutdown:
+            return None
+        if self._last_position_update_at <= 0.0:
+            return None
+        return time.monotonic() - self._last_position_update_at
+
+    def _touch_position_clock(self) -> None:
+        self._last_position_update_at = time.monotonic()
+
     def get_duration(self) -> float | None:
-        if self._shutdown or self._sock_file is None:
-            return self._duration_sec
-        try:
-            duration = self.get_property("duration")
-        except OSError:
-            return self._duration_sec
-        if duration is not None:
-            try:
-                value = float(duration)
-            except (TypeError, ValueError):
-                return self._duration_sec
-            if value > 0:
-                self._duration_sec = value
+        """Return the last mpv duration observed on the IPC reader thread."""
         return self._duration_sec
 
     def is_playing(self) -> bool:
