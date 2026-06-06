@@ -50,7 +50,7 @@ class PlaybackErrorRecoveryTests(unittest.TestCase):
         self._service._engine_error = (
             "This track isn't available for streaming on Qobuz."
         )
-        existing = object()
+        existing = type("Engine", (), {"quit": lambda self: None})()
         self._service._engine = existing
         result: list[object | None] = []
 

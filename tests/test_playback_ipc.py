@@ -33,6 +33,23 @@ class MpvCliArgsTests(unittest.TestCase):
         self.assertIn("--volume=72.5", args)
         self.assertNotIn("--skip-none", args)
 
+    def test_base_audio_options_direct_alsa(self) -> None:
+        from tunes_player.core.playback.mpv_cli import base_audio_options
+        from tunes_player.core.playback.output_profile import PlaybackOutputProfile
+
+        profile = PlaybackOutputProfile(
+            direct_alsa=True,
+            use_exclusive=True,
+            allow_resample=False,
+            target_rate=48000,
+            audio_format="s32",
+            target_channels=2,
+        )
+        options = base_audio_options(profile, use_device_output=False)
+        args = mpv_cli_args_from_options(options)
+        self.assertIn("--ao=alsa", args)
+        self.assertIn("--audio-exclusive=yes", args)
+
 
 class EndFileReasonTests(unittest.TestCase):
     def test_eof_triggers_track_finished(self) -> None:

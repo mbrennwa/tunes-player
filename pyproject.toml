@@ -23,7 +23,6 @@ classifiers = [
 dependencies = [
     "platformdirs>=4.0",
     "mutagen>=1.47",
-    "python-mpv>=1.0.8",
     "tidalapi>=0.8.0",
 ]
 
@@ -59,14 +58,12 @@ apt_depends = [
   "gir1.2-gtk-4.0",
   "gir1.2-adw-1",
   "mpv",
-  "libmpv2",
   "python3-mutagen",
   "python3-platformdirs",
 ]
 # Packages vendored as wheels in the .deb (built at package build time).
 pypi_wheelhouse = [
   "tidalapi",
-  "python-mpv",
 ]
 
 [tool.pytest.ini_options]

@@ -23,7 +23,6 @@ Depends: ${misc:Depends},
           gir1.2-gtk-4.0,
           gir1.2-adw-1,
           mpv,
-          libmpv2,
           python3-mutagen,
           python3-platformdirs
 Description: Tunes — music player for local files and streaming

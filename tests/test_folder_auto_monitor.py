@@ -157,7 +157,9 @@ class FolderAutoMonitorServiceTests(unittest.TestCase):
 
         process.terminate.assert_called_once_with()
         self.assertIsNone(self._service._scanning_folder)
-        record.assert_called_once_with(resolved, errors=FOLDER_SCAN_INCOMPLETE)
+        record.assert_called_once_with(
+            resolved, errors=FOLDER_SCAN_INCOMPLETE, scan_kind="full"
+        )
         notify.assert_called_once_with()
         emit.assert_any_call("scan_finished")
 

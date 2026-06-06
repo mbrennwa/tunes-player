@@ -19,13 +19,14 @@ class FolderMonitorManagerTests(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self._config = ConfigManager(Path(self._tmpdir.name) / "config.json")
         self._config.load()
-        self._service = PlayerService(config=self._config)
+        self._service = PlayerService(config=self._config, prewarm_engine=False)
         self._folder = str(Path(self._tmpdir.name) / "music")
         Path(self._folder).mkdir()
         self._manager = FolderMonitorManager(self._service)
 
     def tearDown(self) -> None:
         self._manager.stop()
+        self._service.shutdown()
         self._tmpdir.cleanup()
 
     def test_start_enqueues_startup_scan_only(self) -> None:

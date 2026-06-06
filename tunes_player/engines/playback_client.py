@@ -25,7 +25,7 @@ from tunes_player.core.playback.buffer_policy import (
     log_buffer_policy,
     mpv_options_for_input,
 )
-from tunes_player.core.playback.mpv_cli import mpv_cli_args_from_options
+from tunes_player.core.playback.mpv_cli import base_audio_options, mpv_cli_args_from_options
 from tunes_player.core.playback.playback_path import (
     NegotiatedPlaybackState,
     PlaybackPathContext,
@@ -87,20 +87,6 @@ def _quit_live_mpv_clients() -> None:
             client.quit()
         except Exception:
             _LOG.exception("Failed to quit mpv playback client during process exit")
-
-
-def _base_audio_options(
-    profile: PlaybackOutputProfile | None,
-    use_device_output: bool,
-) -> dict[str, object]:
-    if profile is not None and profile.direct_alsa:
-        opts: dict[str, object] = {"ao": "alsa", "replaygain": "no"}
-        if profile.use_exclusive:
-            opts["audio_exclusive"] = "yes"
-        return opts
-    if use_device_output:
-        return {"ao": "pipewire,pulse,alsa,sndio"}
-    return {"ao": "sndio,pulse,alsa,pipewire"}
 
 
 class MpvPlaybackClient:
@@ -195,7 +181,9 @@ class MpvPlaybackClient:
             args.extend(mpv_cli_args_from_options({"ao": "null", "replaygain": "no"}))
         else:
             args.extend(
-                mpv_cli_args_from_options(_base_audio_options(profile, self._use_device_output))
+                mpv_cli_args_from_options(
+                    base_audio_options(profile, self._use_device_output)
+                )
             )
         if self._unity_gain:
             args.append("--volume=100")
