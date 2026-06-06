@@ -11,6 +11,7 @@ EngineEvent = Literal[
     "position_changed",
     "duration_changed",
     "playing_changed",
+    "track_started",
     "track_finished",
     "playback_error",
     "playback_path_changed",
@@ -36,7 +37,7 @@ class PlaybackEngine(Protocol):
 
     def stop(self) -> None: ...
 
-    def seek(self, position_sec: float) -> None: ...
+    def seek(self, position_sec: float, *, resume: bool | None = None) -> None: ...
 
     def set_volume(self, level: float) -> None: ...
 

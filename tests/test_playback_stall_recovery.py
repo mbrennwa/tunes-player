@@ -16,11 +16,15 @@ from tunes_player.core.services import PlayerService
 class _StallEngine:
     def __init__(self, *, stall_age: float) -> None:
         self._position_sec = 42.0
+        self._duration_sec = 180.0
         self._stall_age = stall_age
         self.recover_calls: list[dict[str, bool]] = []
 
     def get_position(self) -> float:
         return self._position_sec
+
+    def get_duration(self) -> float | None:
+        return self._duration_sec
 
     def playback_stall_age_sec(self) -> float:
         return self._stall_age

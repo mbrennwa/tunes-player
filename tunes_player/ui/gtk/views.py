@@ -452,7 +452,7 @@ class QueueSheet(Adw.Dialog):
             row.set_activatable(True)
             row.connect(
                 "activated",
-                lambda _row, track_id=track.id: self._service.play_track(track_id),
+                lambda _row, index=index: self._service.play_playlist_index(index),
             )
             self._list_box.append(row)
 

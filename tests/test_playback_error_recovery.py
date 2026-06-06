@@ -44,7 +44,8 @@ class PlaybackErrorRecoveryTests(unittest.TestCase):
             "tunes_player.core.services.resolve_track",
             side_effect=resolve_track,
         ):
-            self._service._start_queue_track(self._track)
+            self._service._start_playlist([self._track], start_index=0)
+            threading.Event().wait(timeout=0.5)
 
     def test_ensure_engine_not_blocked_by_stale_playback_error(self) -> None:
         self._service._engine_error = (
