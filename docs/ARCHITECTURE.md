@@ -97,7 +97,7 @@ others) with rationale and collisions are in **[docs/NAMING.md](NAMING.md)**.
 | Minimized compact controller | Not started |
 | UPnP / AES67 output | Not started |
 | DEB packaging | Not started |
-| USB direct-ALSA under CPU load ([#29](https://github.com/mbrennwa/tunes-player/issues/29)) | Done — subprocess mpv playback client; spike branch kept for reference |
+| USB direct-ALSA under CPU load ([#29](https://github.com/mbrennwa/tunes-player/issues/29)) | Done — subprocess mpv; validated NFS + Holo direct ALSA clean to ~80% CPU (`scripts/cpu_load.py`) |
 
 ---
 
@@ -334,6 +334,15 @@ via `TUNES_MPV_SUBPROCESS=1`, duplicated engine logic in `mpv.py` and `mpv_ipc.p
 That spike is **not merged to `devel`**. It informed the design below but is too
 sprawling to maintain as-is.
 
+**Validation (June 2026, `devel`):** Full GTK app, **NFS library**, **Holo USB DAC**
+(`alsa:hw:…`, exclusive direct ALSA), CPU stress via `scripts/cpu_load.py`:
+
+- **≤ ~80% CPU:** no audible stuttering (acceptance target met).
+- **~90% CPU:** occasional stutter — expected at extreme scheduler load; direct ALSA +
+  USB isochronous output can still underrun when the whole machine is saturated.
+
+Spike / reference branch `spike/issue-29` remains for comparison only.
+
 **Target architecture:**
 
 ```text
@@ -381,7 +390,7 @@ sprawling to maintain as-is.
 |-------|--------|
 | 1 | IPC skeleton + `PlaybackEngine` client; launch mpv child from `PlayerService` |
 | 2 | Port **`PlaybackOutputProfile` / bit-perfect policy** over IPC (direct ALSA hw, format match, device volume — parity with today); **playback path status** (`PlaybackPathInfo`) **reported from playback process** after each load |
-| 3 | USB direct-ALSA **stability** tuning inside playback process (buffers, isolation); validate #29 repro (80% CPU + Holo) **without** compromising bit-perfect |
+| 3 | USB direct-ALSA **stability** tuning inside playback process (buffers, isolation); **validated** #29 repro (NFS + Holo, ~80% CPU, no stutter) **without** compromising bit-perfect |
 | 4 | ~~Remove in-process libmpv from playback path~~ **Done** — spike branch for reference only |
 
 **Reference:** branch `spike/issue-29` preserves the experimental code and benchmark
@@ -829,7 +838,7 @@ Status as of current tree — see [Implementation status](#implementation-status
 1. ~~Local folder scan + SQLite library index.~~ **Done**
 2. ~~`PlaybackEngine` + `MpvEngine` + queue; GTK transport bar; **MPRIS + media keys**.~~ **Done** (minimized compact controller still open)
 3. ~~**Local output:** bit-perfect profile + output device selection + **`VolumeController`**.~~ **Done (Linux v1)** — ALSA hw bit-perfect path + PipeWire/Pulse sink volume; PW bit-perfect not planned (see [Bit-perfect playback](#bit-perfect-playback-requirement))
-4. **Playback process** — out-of-process mpv service; Tunes as remote control ([#29](https://github.com/mbrennwa/tunes-player/issues/29)). **Planned** — see [Playback process redesign](#playback-process-redesign-issue-29)
+4. ~~**Playback process** — out-of-process mpv service; Tunes as remote control ([#29](https://github.com/mbrennwa/tunes-player/issues/29)).~~ **Done** — see [Playback process redesign](#playback-process-redesign-issue-29); NFS + Holo validated to ~80% CPU
 5. **External control interface** — inbound volume from device/stack → Tunes UI + MPRIS. **Partial** — outbound MPRIS done; inbound `VolumeController.subscribe()` not wired
 6. DEB package with declared depends (`python3-gi`, `gir1.2-adw-1`, `mpv`, …). **Not started**
 7. **UPnP / DLNA Media Renderer** output. **Not started**
@@ -878,7 +887,9 @@ Trackable open items. Ordered milestones are in [Roadmap](#roadmap-ordered) abov
 - [x] **`PlaybackPathInfo` from playback process** — Now Playing quality/path line
   driven by mpv/ALSA ground truth in the child.
 - [x] **Remove in-process libmpv** from playback hot path after parity.
-- [ ] **Validate** USB direct ALSA under `scripts/cpu_load.py` (~80%) + full GTK app.
+- [x] **Validate** USB direct ALSA under `scripts/cpu_load.py` (~80%) + full GTK app
+  — NFS library, Holo USB DAC, direct ALSA: **no stutter ≤ ~80% CPU**; occasional
+  stutter at ~90% (June 2026).
 
 Spike / reference: branch `spike/issue-29`.
 

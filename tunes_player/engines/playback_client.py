@@ -47,6 +47,8 @@ _LOG = logging.getLogger(__name__)
 _CONNECT_TIMEOUT_SEC = 5.0
 _COMMAND_TIMEOUT_SEC = 5.0
 _POSITION_INTERVAL_SEC = 0.25
+_TRACK_END_POSITION_TOLERANCE_SEC = 0.4
+_DIRECT_ALSA_TAIL_BUFFER_SEC = 10.0
 _LIVE_CLIENTS: weakref.WeakSet = weakref.WeakSet()
 
 
@@ -141,6 +143,11 @@ class MpvPlaybackClient:
         self._duration_sec: float | None = None
         self._playing = False
         self._track_end_signaled = False
+        self._demuxer_eof_reached = False
+        self._demuxer_eof_position_sec = 0.0
+        self._demuxer_eof_at = 0.0
+        self._audio_pts_available = False
+        self._eof_completion_timer: threading.Timer | None = None
         self._last_position_emit = 0.0
         self._last_position_update_at = 0.0
         self._shutdown = False
@@ -166,7 +173,9 @@ class MpvPlaybackClient:
         profile = self._output_profile
         args = [
             "--idle=yes",
-            "--keep-open=yes",
+            # keep-open=no emits end-file/eof so we can advance the queue; idle=yes
+            # keeps the subprocess alive after EOF without pausing on the last frame.
+            "--keep-open=no",
             f"--input-ipc-server={self._socket_path}",
             "--input-default-bindings=no",
             "--input-vo-keyboard=no",
@@ -296,6 +305,7 @@ class MpvPlaybackClient:
         self.command("observe_property", 7, "audio-format")
         self.command("observe_property", 8, "alsa-resample")
         self.command("observe_property", 9, "audio-channels")
+        self.command("observe_property", 10, "audio-pts")
 
     def _read_loop(self) -> None:
         assert self._sock_file is not None
@@ -408,23 +418,14 @@ class MpvPlaybackClient:
                 self._emit("playback_path_changed")
             return
 
-        if name == "time-pos":
+        if name in ("time-pos", "audio-pts"):
             if data is None:
                 return
             try:
                 pos = float(data)
             except (TypeError, ValueError):
                 return
-            if pos < 0:
-                return
-            self._position_sec = pos
-            now = time.monotonic()
-            self._last_position_update_at = now
-            if self._load_in_progress:
-                return
-            if now - self._last_position_emit >= _POSITION_INTERVAL_SEC:
-                self._last_position_emit = now
-                self._emit("position_changed")
+            self._apply_position_update(pos, source=name)
         elif name == "duration":
             if data is None:
                 return
@@ -445,6 +446,8 @@ class MpvPlaybackClient:
                 return
             paused = data is True or data == "yes"
             self._playing = not paused and self._loaded_uri is not None
+            if paused and self._demuxer_eof_reached:
+                self._signal_track_finished()
             self._emit("playing_changed")
 
     def _handle_end_file(
@@ -460,7 +463,11 @@ class MpvPlaybackClient:
         ):
             return
         if end_file_triggers_track_finished(reason):
-            self._signal_track_finished()
+            self._demuxer_eof_reached = True
+            self._demuxer_eof_position_sec = self._position_sec
+            self._demuxer_eof_at = time.monotonic()
+            self._schedule_eof_completion_timer()
+            self._try_complete_track()
         elif end_file_triggers_playback_error(reason):
             detail = f": {file_error}" if file_error else ""
             _LOG.warning("mpv end-file reason=%s%s", reason, detail)
@@ -538,10 +545,9 @@ class MpvPlaybackClient:
         self._output_profile = profile
         if profile is None or not profile.direct_alsa:
             return
-        if self._direct_alsa_device_open and not self._ao_is_alsa(
-            self.get_property("ao")
-        ):
-            _LOG.warning("mpv ao is not alsa; reopening direct ALSA output")
+        ao = self._negotiated_state.ao
+        if self._direct_alsa_device_open and ao is not None and not self._ao_is_alsa(ao):
+            _LOG.warning("mpv ao is not alsa (%s); reopening direct ALSA output", ao)
             self._direct_alsa_device_open = False
         if not self._direct_alsa_device_open:
             self._open_direct_alsa_device(profile)
@@ -564,6 +570,7 @@ class MpvPlaybackClient:
             except RuntimeError as exc:
                 _LOG.warning("mpv rejected direct ALSA warmup property %s: %s", key, exc)
         self.set_property("ao", "alsa")
+        self._negotiated_state = replace(self._negotiated_state, ao="alsa")
         if self._audio_device:
             self.set_property("audio-device", self._audio_device)
         self.set_property(
@@ -571,13 +578,13 @@ class MpvPlaybackClient:
             "yes" if profile.use_exclusive else "no",
         )
         try:
-            self.command("ao-reload")
+            self.command("ao-reload", timeout=15.0)
         except (TimeoutError, OSError) as exc:
             _LOG.debug("mpv ao-reload after direct ALSA open failed: %s", exc)
         self._direct_alsa_device_open = True
         self._opened_exclusive = profile.use_exclusive
-        ao = self.get_property("ao")
-        if not self._ao_is_alsa(ao):
+        ao = self._negotiated_state.ao
+        if ao is not None and not self._ao_is_alsa(ao):
             _LOG.warning("mpv ao is still %s after opening direct ALSA", ao)
 
     def ping(self) -> None:
@@ -609,7 +616,7 @@ class MpvPlaybackClient:
         if name == "ao":
             self._negotiated_state = replace(
                 self._negotiated_state,
-                ao=self._coerce_negotiated_text(data),
+                ao=self._coerce_negotiated_ao(data),
             )
         elif name == "audio-device":
             self._negotiated_state = replace(
@@ -653,6 +660,24 @@ class MpvPlaybackClient:
                             return True
             return False
         return str(value).casefold() == "alsa"
+
+    @staticmethod
+    def _coerce_negotiated_ao(value: object) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+            return text or None
+        if isinstance(value, list):
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("name")
+                enabled = item.get("enabled")
+                if isinstance(name, str) and (enabled is None or enabled is True):
+                    return name
+        text = str(value).strip()
+        return text or None
 
     @staticmethod
     def _coerce_negotiated_text(value: object) -> str | None:
@@ -742,6 +767,11 @@ class MpvPlaybackClient:
                 )
             self._loaded_uri = uri
             self._track_end_signaled = False
+            self._demuxer_eof_reached = False
+            self._demuxer_eof_position_sec = 0.0
+            self._demuxer_eof_at = 0.0
+            self._audio_pts_available = False
+            self._cancel_eof_completion_timer()
             self._position_sec = max(0.0, start_sec)
             self._duration_sec = None
             self._last_position_emit = 0.0
@@ -1019,6 +1049,11 @@ class MpvPlaybackClient:
     def stop(self) -> None:
         self.command("stop")
         self._track_end_signaled = False
+        self._demuxer_eof_reached = False
+        self._demuxer_eof_position_sec = 0.0
+        self._demuxer_eof_at = 0.0
+        self._audio_pts_available = False
+        self._cancel_eof_completion_timer()
         self._loaded_uri = None
         self._active_playlist_entry_id = None
         self._playing = False
@@ -1058,16 +1093,86 @@ class MpvPlaybackClient:
         gain = max(0.0, min(1.0, self._volume))
         self.set_property("volume", gain * 100.0)
 
+    def _apply_position_update(self, pos: float, *, source: str) -> None:
+        pos = max(0.0, pos)
+        if self._demuxer_eof_reached:
+            return
+        if source == "time-pos" and self._audio_pts_available:
+            return
+        if source == "audio-pts":
+            self._audio_pts_available = True
+        if pos + 0.01 < self._position_sec:
+            return
+        changed = abs(pos - self._position_sec) > 0.01
+        self._position_sec = pos
+        now = time.monotonic()
+        self._last_position_update_at = now
+        if self._load_in_progress:
+            return
+        if changed and now - self._last_position_emit >= _POSITION_INTERVAL_SEC:
+            self._last_position_emit = now
+            self._emit("position_changed")
+
     def get_position(self) -> float:
-        """Return the last mpv time-pos observed on the IPC reader thread."""
+        """Return cached playback position; never blocks on mpv IPC."""
+        self._advance_eof_tail_if_needed()
         return self._position_sec
+
+    def _estimated_eof_tail_remaining_sec(self) -> float:
+        duration = self._duration_sec
+        if duration is not None and duration > self._demuxer_eof_position_sec:
+            return max(0.0, duration - self._demuxer_eof_position_sec)
+        return _DIRECT_ALSA_TAIL_BUFFER_SEC
+
+    def _cancel_eof_completion_timer(self) -> None:
+        timer = getattr(self, "_eof_completion_timer", None)
+        self._eof_completion_timer = None
+        if timer is not None:
+            timer.cancel()
+
+    def _schedule_eof_completion_timer(self) -> None:
+        self._cancel_eof_completion_timer()
+        remaining = self._estimated_eof_tail_remaining_sec()
+        if remaining <= 0:
+            return
+        timer = threading.Timer(remaining + 0.25, self._eof_completion_timer_fired)
+        timer.daemon = True
+        self._eof_completion_timer = timer
+        timer.start()
+
+    def _eof_completion_timer_fired(self) -> None:
+        self._eof_completion_timer = None
+        if not self._demuxer_eof_reached or self._track_end_signaled:
+            return
+        self._signal_track_finished()
+
+    def _advance_eof_tail_if_needed(self) -> None:
+        """Advance UI position through the AO buffer drain without IPC."""
+        if not self._demuxer_eof_reached or self._track_end_signaled:
+            return
+        duration = self._duration_sec
+        if duration is None or duration <= 0:
+            return
+        elapsed = time.monotonic() - self._demuxer_eof_at
+        projected = min(duration, self._demuxer_eof_position_sec + elapsed)
+        if projected <= self._position_sec + 0.01:
+            return
+        self._position_sec = projected
+        now = time.monotonic()
+        self._last_position_update_at = now
+        if now - self._last_position_emit >= _POSITION_INTERVAL_SEC:
+            self._last_position_emit = now
+            self._emit("position_changed")
+        self._try_complete_track()
 
     @property
     def load_in_progress(self) -> bool:
         return self._load_in_progress
 
     def playback_stall_age_sec(self) -> float | None:
-        """Seconds since the last time-pos update while playback is intended."""
+        """Seconds since the last position update while playback is intended."""
+        if self._demuxer_eof_reached:
+            return None
         if not self._playing or self._loaded_uri is None or self._shutdown:
             return None
         if self._last_position_update_at <= 0.0:
@@ -1090,6 +1195,7 @@ class MpvPlaybackClient:
         if self._shutdown:
             return
         self._shutdown = True
+        self._cancel_eof_completion_timer()
         self._loaded_uri = None
         self._track_end_signaled = False
         self._playing = False
@@ -1128,9 +1234,22 @@ class MpvPlaybackClient:
             except OSError:
                 pass
 
+    def _try_complete_track(self) -> None:
+        """Finish the track once demuxer EOF is reached and playback catches up."""
+        if not self._demuxer_eof_reached or self._track_end_signaled:
+            return
+        if self._loaded_uri is None:
+            return
+        duration = self._duration_sec
+        if duration is not None and duration > 0:
+            if self._position_sec + _TRACK_END_POSITION_TOLERANCE_SEC < duration:
+                return
+        self._signal_track_finished()
+
     def _signal_track_finished(self) -> None:
         if self._loaded_uri is None or self._track_end_signaled:
             return
+        self._cancel_eof_completion_timer()
         self._track_end_signaled = True
         self._playing = False
         self._emit("track_finished")

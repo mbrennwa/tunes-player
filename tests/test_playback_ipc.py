@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import unittest
 from pathlib import Path
 
@@ -160,6 +161,7 @@ class PlaybackClientEndFileTests(unittest.TestCase):
         client._socket_path = Path("/tmp/tunes-mpv-test.sock")
         args = client._build_startup_args()
         joined = " ".join(args)
+        self.assertIn("--keep-open=no", joined)
         self.assertIn("--ao=null", joined)
         self.assertNotIn("--audio-device=", joined)
         self.assertNotIn("--audio-exclusive=", joined)
@@ -176,6 +178,147 @@ class PlaybackClientEndFileTests(unittest.TestCase):
             MpvPlaybackClient._ao_is_alsa([{"name": "null", "enabled": True}])
         )
         self.assertFalse(MpvPlaybackClient._ao_is_alsa(None))
+
+    def test_coerce_negotiated_ao_from_mpv_list(self) -> None:
+        from tunes_player.engines.playback_client import MpvPlaybackClient
+
+        ao = MpvPlaybackClient._coerce_negotiated_ao(
+            [{"name": "alsa", "enabled": True, "params": {}}]
+        )
+        self.assertEqual(ao, "alsa")
+        self.assertTrue(MpvPlaybackClient._ao_is_alsa(ao))
+
+    def test_eof_defers_track_finished_until_playback_catches_up(self) -> None:
+        from tunes_player.engines.playback_client import MpvPlaybackClient
+
+        client = object.__new__(MpvPlaybackClient)
+        client._loaded_uri = "/music/track.flac"
+        client._active_playlist_entry_id = 1
+        client._track_end_signaled = False
+        client._demuxer_eof_reached = False
+        client._duration_sec = 300.0
+        client._position_sec = 289.0
+        client._playing = True
+        client._eof_completion_timer = None
+        client._on_event = None
+        events: list[str] = []
+
+        def capture(event: str) -> None:
+            events.append(event)
+
+        client._on_event = capture
+        client._handle_end_file("eof", playlist_entry_id=1)
+        self.assertTrue(client._demuxer_eof_reached)
+        self.assertFalse(client._track_end_signaled)
+        self.assertEqual(events, [])
+
+        client._position_sec = 299.75
+        client._try_complete_track()
+        self.assertTrue(client._track_end_signaled)
+        self.assertEqual(events, ["track_finished"])
+
+    def test_eof_track_finished_on_pause_after_demuxer_eof(self) -> None:
+        from tunes_player.engines.playback_client import MpvPlaybackClient
+
+        client = object.__new__(MpvPlaybackClient)
+        client._loaded_uri = "/music/track.flac"
+        client._active_playlist_entry_id = 1
+        client._track_end_signaled = False
+        client._demuxer_eof_reached = True
+        client._duration_sec = None
+        client._position_sec = 290.0
+        client._load_in_progress = False
+        client._playing = True
+        client._shutdown = False
+        client._last_position_update_at = 0.0
+        client._eof_completion_timer = None
+        client._on_event = None
+        events: list[str] = []
+
+        def capture(event: str) -> None:
+            events.append(event)
+
+        client._on_event = capture
+        client._handle_property_change("pause", True)
+        self.assertTrue(client._track_end_signaled)
+        self.assertEqual(events, ["track_finished", "playing_changed"])
+
+    def test_eof_tail_advances_without_ipc(self) -> None:
+        from tunes_player.engines.playback_client import MpvPlaybackClient
+
+        client = object.__new__(MpvPlaybackClient)
+        client._loaded_uri = "/music/track.flac"
+        client._track_end_signaled = False
+        client._demuxer_eof_reached = True
+        client._demuxer_eof_position_sec = 240.0
+        client._demuxer_eof_at = time.monotonic() - 5.0
+        client._duration_sec = 250.0
+        client._position_sec = 240.0
+        client._last_position_emit = 0.0
+        client._last_position_update_at = 0.0
+        client._on_event = None
+        client._eof_completion_timer = None
+
+        pos = client.get_position()
+        self.assertGreater(pos, 244.0)
+        self.assertIsNone(client.playback_stall_age_sec())
+
+    def test_eof_completion_timer_fires_track_finished(self) -> None:
+        from tunes_player.engines.playback_client import MpvPlaybackClient
+
+        client = object.__new__(MpvPlaybackClient)
+        client._loaded_uri = "/music/track.flac"
+        client._track_end_signaled = False
+        client._demuxer_eof_reached = True
+        client._demuxer_eof_position_sec = 249.9
+        client._demuxer_eof_at = time.monotonic()
+        client._duration_sec = 250.0
+        client._position_sec = 249.9
+        client._playing = True
+        client._eof_completion_timer = None
+        events: list[str] = []
+
+        def capture(event: str) -> None:
+            events.append(event)
+
+        client._on_event = capture
+        client._schedule_eof_completion_timer()
+        time.sleep(0.6)
+        self.assertEqual(events, ["track_finished"])
+
+    def test_time_pos_fallback_before_audio_pts(self) -> None:
+        from tunes_player.engines.playback_client import MpvPlaybackClient
+
+        client = object.__new__(MpvPlaybackClient)
+        client._loaded_uri = "/music/track.flac"
+        client._track_end_signaled = False
+        client._demuxer_eof_reached = False
+        client._audio_pts_available = False
+        client._position_sec = 0.0
+        client._load_in_progress = False
+        client._last_position_emit = 0.0
+        client._last_position_update_at = 0.0
+        client._on_event = None
+        client._apply_position_update(12.5, source="time-pos")
+        self.assertAlmostEqual(client._position_sec, 12.5)
+
+    def test_observer_updates_ignored_during_demuxer_eof(self) -> None:
+        from tunes_player.engines.playback_client import MpvPlaybackClient
+
+        client = object.__new__(MpvPlaybackClient)
+        client._loaded_uri = "/music/track.flac"
+        client._track_end_signaled = False
+        client._demuxer_eof_reached = True
+        client._duration_sec = 250.0
+        client._position_sec = 240.0
+        client._audio_pts_available = True
+        client._load_in_progress = False
+        client._last_position_emit = 0.0
+        client._last_position_update_at = 0.0
+        client._on_event = None
+        client._apply_position_update(241.0, source="time-pos")
+        client._apply_position_update(241.0, source="audio-pts")
+        self.assertEqual(client._position_sec, 240.0)
 
     def test_direct_alsa_open_switches_ao_from_null(self) -> None:
         import shutil

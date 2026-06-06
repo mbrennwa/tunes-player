@@ -1457,8 +1457,14 @@ class PlayerService:
         engine = self._engine
         if engine is None or self._current_track is None:
             return
+        if not self._engine_is_available(engine):
+            return
         target = max(0.0, position_sec)
-        engine.seek(target)
+        try:
+            engine.seek(target)
+        except (TimeoutError, OSError):
+            log.debug("Seek ignored while playback engine is unavailable", exc_info=True)
+            return
         self._reset_playback_position(target)
         self._emit("position_changed")
 
@@ -1637,6 +1643,8 @@ class PlayerService:
             or engine is None
             or not hasattr(engine, "recover_direct_alsa_output")
         ):
+            return
+        if getattr(engine, "_demuxer_eof_reached", False):
             return
 
         stall_age_fn = getattr(engine, "playback_stall_age_sec", None)
@@ -2134,8 +2142,6 @@ class PlayerService:
             format_label=source.format_label,
             playback_note=path_info.playback_note,
         )
-        if hasattr(engine, "set_output_profile"):
-            engine.set_output_profile(profile)
         self._configure_engine_playback_path(engine, track, source=source)
         playback_target = self._playback_target_for_engine(source)
         engine.load(
@@ -2474,8 +2480,6 @@ class PlayerService:
                 try:
                     self._sync_exclusive_session_for_profile(profile)
                     self._refresh_usb_playback_isolation()
-                    if hasattr(engine, "set_output_profile"):
-                        engine.set_output_profile(profile)
                     self._configure_engine_playback_path(engine, track, source=source)
                     if generation != self._load_generation:
                         return
@@ -2787,6 +2791,11 @@ class PlayerService:
         self._position_synced_at = time.monotonic()
 
     def _playback_position(self) -> float:
+        engine = self._engine
+        if engine is not None and self._is_playing:
+            pos = engine.get_position()
+            if abs(pos - self._position_sec) > 0.01:
+                self._apply_engine_position(pos)
         return self._position_sec
 
     def _apply_engine_position(self, position_sec: float) -> None:
