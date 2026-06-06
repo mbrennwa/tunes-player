@@ -18,6 +18,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from tunes_player.core.playback.engine import EngineEvent
+from tunes_player.core.playback.buffer_policy import (
+    classify_playback_uri,
+    direct_alsa_engine_options,
+    log_buffer_policy,
+    mpv_options_for_input,
+)
 from tunes_player.core.playback.mpv_cli import mpv_cli_args_from_options
 from tunes_player.core.playback.playback_path import (
     PlaybackPathContext,
@@ -110,6 +116,7 @@ class MpvPlaybackClient:
         self._output_profile = output_profile
         self._software_volume = not unity_gain and not use_device_output
         self._on_event = on_event
+        self._endpoint_id = endpoint_id
         self._socket_path = ipc_socket_path or Path(f"/tmp/tunes-mpv-{time.time_ns()}.sock")
 
         self._proc: subprocess.Popen[bytes] | None = None
@@ -134,6 +141,11 @@ class MpvPlaybackClient:
         self._path_info: PlaybackPathInfo | None = None
         self._active_playlist_entry_id: int | None = None
         self._load_in_progress = False
+        self._recovering_direct_alsa = False
+        self._stable_output_active = False
+        self._last_output_format_key: tuple[object, ...] | None = None
+        self._keep_alsa_open_on_track_change = self._usb_keep_device_open()
+        self._used_chrt = False
 
         _LIVE_CLIENTS.add(self)
         self._start_process()
@@ -155,6 +167,8 @@ class MpvPlaybackClient:
         args.extend(
             mpv_cli_args_from_options(_base_audio_options(profile, self._use_device_output))
         )
+        if profile is not None and profile.direct_alsa:
+            args.extend(mpv_cli_args_from_options(direct_alsa_engine_options(warmup=True)))
         if self._unity_gain:
             args.append("--volume=100")
             args.append("--replaygain=no")
@@ -172,7 +186,10 @@ class MpvPlaybackClient:
         if self._socket_path.exists():
             self._socket_path.unlink()
 
-        cmd = [self._mpv_bin, *self._build_startup_args()]
+        from tunes_player.platform.linux.playback_priority import mpv_subprocess_command
+
+        mpv_args = self._build_startup_args()
+        cmd, self._used_chrt = mpv_subprocess_command(self._mpv_bin, mpv_args)
         _LOG.info("Starting subprocess mpv: %s", " ".join(cmd))
         popen_kwargs: dict[str, object] = {
             "stdin": subprocess.DEVNULL,
@@ -182,6 +199,7 @@ class MpvPlaybackClient:
         if os.name == "posix":
             popen_kwargs["preexec_fn"] = _configure_mpv_child_process
         self._proc = subprocess.Popen(cmd, **popen_kwargs)  # type: ignore[arg-type]
+        self._raise_child_playback_priority()
         self._connect_socket()
         self._running = True
         self._reader = threading.Thread(
@@ -408,11 +426,48 @@ class MpvPlaybackClient:
         output_profile: PlaybackOutputProfile | None = None,
     ) -> None:
         profile = output_profile if output_profile is not None else self._output_profile
+        previous_uri = self._loaded_uri
+        track_change = previous_uri is not None and previous_uri != uri
+        if (
+            track_change
+            and profile is not None
+            and profile.direct_alsa
+            and not self._keep_alsa_open_on_track_change
+        ):
+            self._reset_direct_alsa_for_track_change()
+
+        format_key: tuple[object, ...] | None = None
+        format_changed = False
+        if profile is not None and profile.direct_alsa:
+            format_key = self._output_format_key(profile)
+            format_changed = bool(
+                track_change
+                and self._keep_alsa_open_on_track_change
+                and self._last_output_format_key is not None
+                and format_key != self._last_output_format_key
+            )
+            if format_changed:
+                _LOG.info(
+                    "USB output format changed %s -> %s; reloading ALSA",
+                    self._last_output_format_key,
+                    format_key,
+                )
+                self._reload_direct_alsa_output(stop_first=True)
+
         self._load_in_progress = True
         self._active_playlist_entry_id = None
         try:
-            if profile is not None:
+            if profile is not None and profile.direct_alsa:
+                self._apply_track_format(profile, format_key=format_key)
+                self._last_output_format_key = format_key
+            elif profile is not None:
                 self._apply_track_format(profile)
+            if previous_uri is None or format_changed or not self._keep_alsa_open_on_track_change:
+                self._apply_buffer_policy(
+                    uri,
+                    profile,
+                    warmup=previous_uri is None or format_changed,
+                )
             self._loaded_uri = uri
             self._track_end_signaled = False
             self._position_sec = max(0.0, start_sec)
@@ -436,8 +491,20 @@ class MpvPlaybackClient:
         self._emit("duration_changed")
         self._emit("playing_changed")
 
-    def _apply_track_format(self, profile: PlaybackOutputProfile) -> None:
+    def _apply_track_format(
+        self,
+        profile: PlaybackOutputProfile,
+        *,
+        format_key: tuple[object, ...] | None = None,
+    ) -> None:
         if not profile.direct_alsa:
+            return
+        key = format_key if format_key is not None else self._output_format_key(profile)
+        if (
+            self._keep_alsa_open_on_track_change
+            and self._last_output_format_key is not None
+            and key == self._last_output_format_key
+        ):
             return
         self.set_property("replaygain", "no")
         if self._unity_gain:
@@ -467,6 +534,167 @@ class MpvPlaybackClient:
                     profile.target_channels,
                     exc,
                 )
+
+    def _usb_keep_device_open(self) -> bool:
+        try:
+            from tunes_player.platform.linux.alsa_playback import usb_alsa_keep_device_open
+            from tunes_player.platform.linux.alsa_xrun_monitor import parse_card_from_mpv_device
+
+            card = parse_card_from_mpv_device(self._audio_device)
+            endpoint_hint = f"alsa:hw:{card}:0" if card is not None else self._endpoint_id
+            return usb_alsa_keep_device_open(endpoint_hint, self._audio_device)
+        except ImportError:
+            return bool(
+                self._audio_device and "plughw" in self._audio_device.casefold()
+            )
+
+    @staticmethod
+    def _output_format_key(profile: PlaybackOutputProfile) -> tuple[object, ...]:
+        return (
+            profile.target_rate,
+            profile.audio_format,
+            profile.target_channels,
+            profile.allow_resample,
+        )
+
+    def _apply_buffer_policy(
+        self,
+        uri: str,
+        profile: PlaybackOutputProfile | None,
+        *,
+        warmup: bool = True,
+    ) -> None:
+        input_class = classify_playback_uri(uri)
+        direct_alsa = profile is not None and profile.direct_alsa
+        options = mpv_options_for_input(
+            input_class,
+            direct_alsa=direct_alsa,
+            warmup=warmup,
+        )
+        log_buffer_policy(input_class, uri, options)
+        for key, value in options.items():
+            try:
+                self.set_property(key, value)
+            except RuntimeError as exc:
+                _LOG.warning("mpv rejected buffer policy property %s: %s", key, exc)
+
+    def _reload_direct_alsa_output(self, *, stop_first: bool) -> None:
+        if stop_first:
+            try:
+                self.command("stop")
+            except (TimeoutError, OSError) as exc:
+                _LOG.debug("mpv stop before ao reload failed: %s", exc)
+        try:
+            self.command("ao-reload")
+        except (TimeoutError, OSError) as exc:
+            _LOG.debug("mpv ao-reload failed: %s", exc)
+
+    def _reset_direct_alsa_for_track_change(self) -> None:
+        _LOG.info("Resetting direct ALSA output before track change")
+        self._reload_direct_alsa_output(stop_first=True)
+
+    def refresh_usb_playback_isolation(self) -> None:
+        if self._proc is None or self._proc.pid <= 0:
+            return
+        try:
+            from tunes_player.platform.linux.alsa_xrun_monitor import parse_card_from_mpv_device
+            from tunes_player.platform.linux.playback_priority import refresh_usb_mpv_affinity
+
+            card = parse_card_from_mpv_device(self._audio_device)
+            if card is not None:
+                refresh_usb_mpv_affinity(self._proc.pid, card)
+        except ImportError:
+            pass
+
+    def recover_direct_alsa_output(self, *, full_reload: bool = False) -> bool:
+        profile = self._output_profile
+        uri = self._loaded_uri
+        if profile is None or not profile.direct_alsa or uri is None:
+            return False
+        if self._recovering_direct_alsa:
+            return False
+        resume_sec = self.get_position()
+        preview = uri if len(uri) <= 120 else f"{uri[:117]}..."
+        self._recovering_direct_alsa = True
+        try:
+            if not full_reload:
+                _LOG.warning("Light direct ALSA recovery for %s at %.2fs", preview, resume_sec)
+                if resume_sec > 0.0:
+                    self.command("seek", resume_sec, "absolute")
+                    self._position_sec = resume_sec
+                self.set_property("pause", False)
+                self._playing = True
+                self._emit("playing_changed")
+                return True
+
+            _LOG.warning("Full direct ALSA recovery for %s at %.2fs", preview, resume_sec)
+            self._reload_direct_alsa_output(stop_first=True)
+            self._track_end_signaled = False
+            self._apply_buffer_policy(uri, profile, warmup=False)
+            self._apply_track_format(profile)
+            self.command("loadfile", uri, "replace")
+            self.set_property("pause", False)
+            self._playing = True
+            self._emit("playing_changed")
+            return True
+        except (TimeoutError, OSError, RuntimeError) as exc:
+            _LOG.warning("Direct ALSA playback recovery failed: %s", exc)
+            return False
+        finally:
+            self._recovering_direct_alsa = False
+
+    def switch_to_stable_alsa_output(self) -> bool:
+        if self._stable_output_active:
+            return False
+        try:
+            from tunes_player.platform.linux.alsa_playback import plughw_mpv_device
+        except ImportError:
+            return False
+        stable_device = plughw_mpv_device(self._audio_device)
+        profile = self._output_profile
+        uri = self._loaded_uri
+        if stable_device is None or profile is None or uri is None or not profile.direct_alsa:
+            return False
+        resume_sec = self.get_position()
+        preview = uri if len(uri) <= 120 else f"{uri[:117]}..."
+        _LOG.warning(
+            "Switching USB playback to plughw/non-exclusive ALSA (%s) at %.2fs",
+            stable_device,
+            resume_sec,
+        )
+        self._stable_output_active = True
+        self._audio_device = stable_device
+        self._recovering_direct_alsa = True
+        try:
+            self.set_property("audio-exclusive", "no")
+            self.set_property("audio-device", stable_device)
+            self._reload_direct_alsa_output(stop_first=True)
+            self._track_end_signaled = False
+            self._apply_buffer_policy(uri, profile, warmup=False)
+            self._apply_track_format(profile)
+            self.command("loadfile", uri, "replace")
+            self.set_property("pause", False)
+            self._playing = True
+            self._emit("playing_changed")
+            return True
+        except (TimeoutError, OSError, RuntimeError) as exc:
+            _LOG.warning("Stable ALSA fallback failed: %s", exc)
+            self._stable_output_active = False
+            return False
+        finally:
+            self._recovering_direct_alsa = False
+
+    def _raise_child_playback_priority(self) -> None:
+        if self._proc is None or self._proc.pid <= 0:
+            return
+        try:
+            from tunes_player.platform.linux.alsa_xrun_monitor import parse_card_from_mpv_device
+            from tunes_player.platform.linux.playback_priority import pin_mpv_subprocess
+
+            card = parse_card_from_mpv_device(self._audio_device)
+            pin_mpv_subprocess(self._proc.pid, alsa_card=card, used_chrt=self._used_chrt)
+        except ImportError:
+            pass
 
     def play(self) -> None:
         if self._loaded_uri is None:

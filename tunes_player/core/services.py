@@ -165,6 +165,13 @@ class PlayerService:
         self._engine: PlaybackEngine | None = None
         self._engine_error: str | None = None
         self._engine_events: Queue[EngineEvent] = Queue()
+        self._alsa_xrun_monitor = self._create_alsa_xrun_monitor()
+        self._playback_intended = False
+        self._direct_alsa_recovery_at = 0.0
+        self._direct_alsa_recovery_attempts = 0
+        self._direct_alsa_light_recovery_failures = 0
+        self._direct_alsa_watchdog_pos = 0.0
+        self._direct_alsa_watchdog_at = 0.0
         self._scan_process: multiprocessing.Process | None = None
         self._scan_queue: multiprocessing.Queue | None = None
         self._scanning_folder: str | None = None
@@ -1155,6 +1162,7 @@ class PlayerService:
     def pause(self) -> None:
         if not self._is_playing:
             return
+        self._playback_intended = False
         engine = self._engine
         if engine is not None:
             engine.pause()
@@ -1172,6 +1180,7 @@ class PlayerService:
             return
         if self._is_playing:
             return
+        self._playback_intended = True
         engine = self._ensure_engine()
         if engine is None:
             self._notify_playback_unavailable()
@@ -1184,6 +1193,7 @@ class PlayerService:
         if not self._queue:
             return
         if self._queue_index + 1 >= len(self._queue):
+            self._playback_intended = False
             engine = self._engine
             if engine is not None:
                 engine.pause()
@@ -1352,9 +1362,61 @@ class PlayerService:
             except Empty:
                 break
             self._handle_engine_event(event)
+        self._poll_alsa_xrun_monitor()
+        self._poll_direct_alsa_recovery()
+
+    @staticmethod
+    def _create_alsa_xrun_monitor():
+        try:
+            from tunes_player.platform.linux.alsa_xrun_monitor import AlsaXrunMonitor
+        except ImportError:
+            return None
+        return AlsaXrunMonitor()
+
+    def _poll_alsa_xrun_monitor(self) -> None:
+        monitor = self._alsa_xrun_monitor
+        if monitor is None or not self._is_playing or self._engine is None:
+            return
+        endpoint_id = self._active_endpoint_id()
+        if not is_alsa_endpoint_id(endpoint_id):
+            return
+        try:
+            monitor.poll(
+                mpv_audio_device=self._mpv_audio_device(),
+                endpoint_id=endpoint_id,
+            )
+        except OSError:
+            log.debug("ALSA xrun monitor poll failed", exc_info=True)
+
+    def _poll_direct_alsa_recovery(self) -> None:
+        if not self._playback_intended or not self._is_playing:
+            return
+        if self._usb_direct_alsa_active():
+            return
+        profile = self._output_profile
+        engine = self._engine
+        if (
+            profile is None
+            or not profile.direct_alsa
+            or engine is None
+            or not hasattr(engine, "recover_direct_alsa_output")
+        ):
+            return
+        pos = engine.get_position()
+        now = time.monotonic()
+        if pos != self._direct_alsa_watchdog_pos:
+            self._direct_alsa_watchdog_pos = pos
+            self._direct_alsa_watchdog_at = now
+            self._direct_alsa_light_recovery_failures = 0
+            return
+        if now - self._direct_alsa_watchdog_at < 5.0:
+            return
+        self._try_recover_direct_alsa(reason="stall")
 
     def shutdown(self) -> None:
         self._release_exclusive_session()
+        if self._alsa_xrun_monitor is not None:
+            self._alsa_xrun_monitor.reset()
         engine = self._engine
         self._engine = None
         while True:
@@ -1414,29 +1476,185 @@ class PlayerService:
         self, track: Track, *, source: PlayableSource | None = None
     ) -> tuple[PlaybackOutputProfile, PlaybackPathInfo]:
         file_meta = self._file_meta_for_playback_profile(track, source=source)
-        return compute_output_profile(
+        profile, path_info = compute_output_profile(
             file_meta=file_meta,
             hw_caps=self._hw_caps_for_endpoint(self._active_endpoint_id()),
             endpoint_id=self._active_endpoint_id(),
-            exclusive_enabled=self._config_manager.config.exclusive_device_access,
+            exclusive_enabled=self._direct_alsa_exclusive_enabled(),
             device_volume=self._device_volume,
             mpv_soft_volume=self._mpv_soft_volume(),
         )
+        return self._apply_portable_usb_playback_path(profile, path_info)
 
     def _compute_playback_profile_for_current(
         self,
     ) -> tuple[PlaybackOutputProfile, PlaybackPathInfo]:
         track = self._current_track
         if track is None:
-            return compute_output_profile(
+            profile, path_info = compute_output_profile(
                 file_meta=None,
                 hw_caps=self._hw_caps_for_endpoint(self._active_endpoint_id()),
                 endpoint_id=self._active_endpoint_id(),
-                exclusive_enabled=self._config_manager.config.exclusive_device_access,
+                exclusive_enabled=self._direct_alsa_exclusive_enabled(),
                 device_volume=self._device_volume,
                 mpv_soft_volume=self._mpv_soft_volume(),
             )
+            return self._apply_portable_usb_playback_path(profile, path_info)
         return self._compute_playback_profile_for_track(track)
+
+    def _apply_portable_usb_playback_path(
+        self,
+        profile: PlaybackOutputProfile,
+        path_info: PlaybackPathInfo,
+    ) -> tuple[PlaybackOutputProfile, PlaybackPathInfo]:
+        try:
+            from dataclasses import replace
+
+            from tunes_player.platform.linux.alsa_playback import (
+                direct_alsa_use_exclusive,
+                portable_usb_playback_note,
+            )
+        except ImportError:
+            return profile, path_info
+
+        endpoint_id = self._active_endpoint_id()
+        raw_device = self._raw_mpv_audio_device()
+        if profile.direct_alsa and not direct_alsa_use_exclusive(
+            self._config_manager.config.exclusive_device_access,
+            endpoint_id,
+            raw_device,
+        ):
+            if profile.use_exclusive:
+                profile = replace(profile, use_exclusive=False)
+        extra = portable_usb_playback_note(endpoint_id, raw_device)
+        if extra is None:
+            return profile, path_info
+        base = path_info.playback_note
+        if not base:
+            note = extra
+        elif extra in base:
+            note = base
+        else:
+            note = f"{base} · {extra}"
+        if note == path_info.playback_note:
+            return profile, path_info
+        return profile, replace(path_info, playback_note=note)
+
+    def _direct_alsa_exclusive_enabled(self) -> bool:
+        if not self._config_manager.config.exclusive_device_access:
+            return False
+        try:
+            from tunes_player.platform.linux.alsa_playback import direct_alsa_use_exclusive
+        except ImportError:
+            return True
+        return direct_alsa_use_exclusive(
+            True,
+            self._active_endpoint_id(),
+            self._raw_mpv_audio_device(),
+        )
+
+    def _usb_direct_alsa_active(self) -> bool:
+        profile = self._output_profile
+        if profile is None or not profile.direct_alsa:
+            return False
+        try:
+            from tunes_player.platform.linux.alsa_playback import is_usb_alsa_playback
+        except ImportError:
+            return False
+        return is_usb_alsa_playback(
+            self._active_endpoint_id(),
+            self._raw_mpv_audio_device(),
+        )
+
+    def _raw_mpv_audio_device(self) -> str | None:
+        return self._mpv_audio_device()
+
+    def _playback_target_for_engine(self, source: PlayableSource) -> str:
+        from tunes_player.core.playback.network_playback_cache import (
+            stage_network_file_if_needed,
+        )
+
+        return stage_network_file_if_needed(
+            source.playback_target,
+            cache_dir=self._config_manager.data_dir / "playback-cache",
+        )
+
+    def _playback_note_for_source(
+        self,
+        path_info: PlaybackPathInfo,
+        source: PlayableSource,
+    ) -> str | None:
+        from tunes_player.core.playback.buffer_policy import (
+            classify_playback_uri,
+            merge_playback_note,
+        )
+
+        return merge_playback_note(
+            path_info.playback_note,
+            classify_playback_uri(source.playback_target),
+        )
+
+    def _refresh_usb_playback_isolation(self) -> None:
+        if not self._usb_direct_alsa_active():
+            return
+        engine = self._engine
+        if engine is not None and hasattr(engine, "refresh_usb_playback_isolation"):
+            engine.refresh_usb_playback_isolation()
+
+    def _try_recover_direct_alsa(self, *, reason: str = "stall") -> bool:
+        if not self._playback_intended or reason == "xrun":
+            return False
+        if self._usb_direct_alsa_active() and reason == "stall":
+            return False
+        profile = self._output_profile
+        engine = self._engine
+        if (
+            profile is None
+            or not profile.direct_alsa
+            or engine is None
+            or not hasattr(engine, "recover_direct_alsa_output")
+        ):
+            return False
+        if self._direct_alsa_recovery_attempts >= 5:
+            return False
+        now = time.monotonic()
+        if now - self._direct_alsa_recovery_at < 5.0:
+            return False
+
+        pos_before = engine.get_position()
+        if (
+            self._direct_alsa_light_recovery_failures >= 2
+            and hasattr(engine, "switch_to_stable_alsa_output")
+            and not getattr(engine, "_stable_output_active", False)
+        ):
+            if engine.switch_to_stable_alsa_output():
+                self._direct_alsa_recovery_at = now
+                self._direct_alsa_recovery_attempts += 1
+                self._direct_alsa_light_recovery_failures = 0
+                self._direct_alsa_watchdog_at = now
+                self._direct_alsa_watchdog_pos = engine.get_position()
+                self._sync_from_engine()
+                self._emit("playback_changed")
+                return True
+
+        full_reload = self._direct_alsa_light_recovery_failures >= 3
+        if not engine.recover_direct_alsa_output(full_reload=full_reload):
+            self._direct_alsa_light_recovery_failures += 1
+            return False
+
+        pos_after = engine.get_position()
+        if abs(pos_after - pos_before) < 0.25:
+            self._direct_alsa_light_recovery_failures += 1
+        elif full_reload:
+            self._direct_alsa_light_recovery_failures = 0
+
+        self._direct_alsa_recovery_at = now
+        self._direct_alsa_recovery_attempts += 1
+        self._direct_alsa_watchdog_at = now
+        self._direct_alsa_watchdog_pos = pos_after
+        self._sync_from_engine()
+        self._emit("playback_changed")
+        return True
 
     def _tidal_quality_hint_for_track(self, track_id: str) -> str:
         if (
@@ -1593,8 +1811,9 @@ class PlayerService:
         if hasattr(engine, "set_output_profile"):
             engine.set_output_profile(profile)
         self._configure_engine_playback_path(engine, track, source=source)
+        playback_target = self._playback_target_for_engine(source)
         engine.load(
-            source.playback_target,
+            playback_target,
             start_sec=pos,
             output_profile=profile,
         )
@@ -1660,7 +1879,8 @@ class PlayerService:
             playback_note=path_info.playback_note,
         )
         self._configure_engine_playback_path(engine, track, source=source)
-        engine.load(source.playback_target, start_sec=pos, output_profile=profile)
+        playback_target = self._playback_target_for_engine(source)
+        engine.load(playback_target, start_sec=pos, output_profile=profile)
         if not playing:
             engine.pause()
         engine.set_volume(self._volume)
@@ -1732,6 +1952,7 @@ class PlayerService:
                 output_profile=profile,
                 on_event=self._on_engine_event,
                 ipc_socket_path=self._config_manager.data_dir / "mpv-playback.sock",
+                endpoint_id=self._active_endpoint_id(),
             )
         except RuntimeError as exc:
             self._report_error(str(exc), exc=exc)
@@ -1770,22 +1991,30 @@ class PlayerService:
         )
         self._output_profile = profile
         self._apply_path_info(path_info)
+        playback_note = self._playback_note_for_source(path_info, source)
         self._set_current_track(
             track,
             format_label=source.format_label,
-            playback_note=path_info.playback_note,
+            playback_note=playback_note,
         )
         self._record_playback(track)
         self._release_exclusive_session()
         self._acquire_exclusive_session_if_needed(profile)
+        self._refresh_usb_playback_isolation()
         if self._engine is not None and hasattr(self._engine, "set_output_profile"):
             self._engine.set_output_profile(profile)
         self._configure_engine_playback_path(engine, track, source=source)
+        playback_target = self._playback_target_for_engine(source)
         engine.load(
-            source.playback_target,
+            playback_target,
             start_sec=source.start_sec,
             output_profile=profile,
         )
+        self._direct_alsa_recovery_attempts = 0
+        self._direct_alsa_light_recovery_failures = 0
+        self._direct_alsa_watchdog_at = time.monotonic()
+        self._direct_alsa_watchdog_pos = 0.0
+        self._playback_intended = resume
         if not resume:
             engine.pause()
         self._sync_from_engine()
@@ -1937,6 +2166,8 @@ class PlayerService:
         if event == "playback_error":
             if self._fallback_to_software_volume():
                 self._emit("playback_changed", "volume_changed")
+                return
+            if self._try_recover_direct_alsa():
                 return
             self._sync_duration_from_engine()
             self._sync_playback_position_from_engine()
