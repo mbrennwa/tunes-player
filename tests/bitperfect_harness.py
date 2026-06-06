@@ -27,7 +27,7 @@ from tunes_player.core.library.db import connect
 from tunes_player.core.library.scanner import LibraryScanner
 from tunes_player.core.library.store import LibraryStore
 from tunes_player.core.services import PlayerService
-from tunes_player.engines.mpv import probe_playback_engine
+from tunes_player.engines.factory import probe_playback_engine
 from tunes_player.platform.linux.audio import create_volume_controller
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "bitperfect"

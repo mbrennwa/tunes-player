@@ -219,7 +219,7 @@ class PlayerService:
 
     def playback_available(self) -> str | None:
         """Return an error message when the playback engine cannot load, else None."""
-        from tunes_player.engines.mpv import probe_playback_engine
+        from tunes_player.engines.factory import probe_playback_engine
 
         return probe_playback_engine()
 
@@ -1355,9 +1355,15 @@ class PlayerService:
 
     def shutdown(self) -> None:
         self._release_exclusive_session()
-        if self._engine is not None:
-            self._engine.quit()
-            self._engine = None
+        engine = self._engine
+        self._engine = None
+        while True:
+            try:
+                self._engine_events.get_nowait()
+            except Empty:
+                break
+        if engine is not None:
+            engine.quit()
 
     def subscribe(self, callback: EventCallback) -> Unsubscribe:
         self._listeners.append(callback)
@@ -1676,18 +1682,19 @@ class PlayerService:
         if self._engine is not None:
             return self._engine
         try:
-            from tunes_player.engines.mpv import create_mpv_engine
+            from tunes_player.engines.factory import create_playback_engine
 
             profile, path_info = self._compute_playback_profile_for_current()
             self._output_profile = profile
             self._apply_path_info(path_info)
-            self._engine = create_mpv_engine(
+            self._engine = create_playback_engine(
                 unity_gain=self._unity_gain_profile(),
                 volume=self._mpv_volume_level(),
                 audio_device=self._mpv_audio_device(),
                 use_device_output=self._device_volume and not profile.direct_alsa,
                 output_profile=profile,
                 on_event=self._on_engine_event,
+                ipc_socket_path=self._config_manager.data_dir / "mpv-playback.sock",
             )
         except RuntimeError as exc:
             self._report_error(str(exc), exc=exc)

@@ -38,13 +38,10 @@ def create_mpv_engine(
 
 
 def probe_playback_engine() -> str | None:
-    """Return a user-facing error message if libmpv cannot be loaded, else None."""
-    try:
-        engine = create_mpv_engine(volume=0.5, use_device_output=False)
-    except RuntimeError as exc:
-        return str(exc)
-    engine.quit()
-    return None
+    """Return a user-facing error message if playback is unavailable, else None."""
+    from tunes_player.engines.factory import probe_playback_engine as probe_ipc
+
+    return probe_ipc()
 
 
 class MpvEngine:
@@ -172,9 +169,15 @@ class MpvEngine:
         else:
             self._apply_software_volume()
         if profile.allow_resample:
-            self._player.audio_resample = "yes"
+            try:
+                self._player.alsa_resample = "yes"
+            except (AttributeError, TypeError) as exc:
+                log.warning("mpv rejected alsa-resample: %s", exc)
         else:
-            self._player.audio_resample = "no"
+            try:
+                self._player.alsa_resample = "no"
+            except (AttributeError, TypeError) as exc:
+                log.warning("mpv rejected alsa-resample: %s", exc)
         if profile.target_rate is not None:
             try:
                 self._player.audio_samplerate = profile.target_rate
@@ -185,7 +188,7 @@ class MpvEngine:
                 self._player.audio_format = profile.audio_format
             except TypeError as exc:
                 log.warning("mpv rejected audio-format %s: %s", profile.audio_format, exc)
-        if profile.target_channels is not None:
+        if profile.target_channels is not None and profile.target_channels != 2:
             try:
                 self._player.audio_channels = profile.target_channels
             except TypeError as exc:
