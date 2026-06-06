@@ -71,13 +71,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         )
         self._log_row.add_suffix(copy_log_btn)
         self._log_row.set_activatable_widget(copy_log_btn)
-        diagnostics_group = Adw.PreferencesGroup(
-            title="Diagnostics",
-            description=(
-                "Errors, warnings, and library scan failures are appended to this "
-                "file while Tunes runs."
-            ),
-        )
+        diagnostics_group = Adw.PreferencesGroup(title="Diagnostics")
         diagnostics_group.add(self._log_row)
 
         sources_page = Adw.PreferencesPage(title="Sources", icon_name="folder-music-symbolic")
@@ -162,6 +156,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
             icon_name="applications-system-symbolic",
         )
         application_page.add(application_group)
+        application_page.add(diagnostics_group)
 
         self._tidal_status_row = Adw.ActionRow(title="TIDAL")
         self._tidal_sign_in_btn = Gtk.Button(label="Sign in")
@@ -232,17 +227,9 @@ class PreferencesWindow(Adw.PreferencesWindow):
         qobuz_group.add(self._qobuz_status_row)
         sources_page.add(qobuz_group)
 
-        diagnostics_page = Adw.PreferencesPage(
-            title="Diagnostics",
-            icon_name="utilities-terminal-symbolic",
-        )
-        diagnostics_page.add(diagnostics_group)
-
-        self.add(application_page)
         self.add(sources_page)
         self.add(audio_page)
-        self.add(diagnostics_page)
-        self.set_visible_page(sources_page)
+        self.add(application_page)
 
         self._tidal_pkce_dialog: Adw.Dialog | None = None
         self._updating_output_dropdown = False
