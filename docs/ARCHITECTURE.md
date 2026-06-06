@@ -268,7 +268,10 @@ files live in **core/backends/** and `platformdirs` config/data dirs. Settings U
 - **New Releases / Suggest Music:** merged selections from local + signed-in services.
 - **Search:** federated release results (local first, then streaming append).
 - **Release detail / playback:** same views for `local:…`, `tidal:…`, `qobuz:…` IDs.
-- **Now Playing:** quality hint (e.g. FLAC metadata, “TIDAL”, “QOBUZ”); source badge deferred.
+- **Now Playing:** quality hint (e.g. FLAC metadata, “TIDAL”, “QOBUZ”) plus **playback
+  path** (`ALSA bit-perfect`, resample notes, `via PipeWire`). After #29, the path
+  portion is **authoritative from the playback process** (negotiated mpv/ALSA state),
+  not only pre-load inference in `PlayerService`.
 - **Playlists:** not implemented — catalog phase D.
 
 ---
@@ -344,15 +347,32 @@ sprawling to maintain as-is.
 
 **Principles:**
 
+0. **Bit-perfect first, ALSA direct preferred** — the playback-process redesign must
+   **preserve** today’s sample-accurate path, not trade it for stability. Where hardware
+   allows, audio reaches the DAC in the **original format** (rate, bit depth, channels)
+   with mpv unity gain and **no soft-volume DSP** (see
+   [Bit-perfect playback](#bit-perfect-playback-requirement)). **Direct ALSA `alsa:hw:…`**
+   is the **preferred** output route for local listening; PipeWire/Pulse remains a
+   mixed-desktop fallback only. Issue #29 is about **isolating** the existing direct-ALSA
+   bit-perfect pipeline in a child process — not relaxing format matching or defaulting
+   to resampled/mixed output.
 1. **One playback implementation** — subprocess mpv behind the existing
    `PlaybackEngine` protocol (client in main process; service in child).
 2. **Main process never runs libmpv for playback** — optional check that `mpv` binary
    exists at startup.
 3. **Explicit IPC contract** — commands (`load`, `play`, `pause`, `seek`, `stop`,
    `set_property`) and events (`position`, `duration`, `playing`, `track_finished`,
-   `playback_error`).
-4. **Output policy in the playback process** — USB buffer sizes, IRQ affinity,
-   keep-ALSA-open across same-format skips, format-change `ao-reload`.
+   `playback_error`, **`playback_path_changed`**). The **Now Playing** path label
+   (e.g. `ALSA bit-perfect`, resample notes, `via PipeWire`) must reflect **what the
+   playback process actually negotiated** (mpv properties, ALSA `hw_params`), not a
+   pre-compute in the main process alone. Today `PlayerService` derives
+   `PlaybackPathInfo` from file metadata + endpoint before load; after #29 the
+   **authoritative** label comes from the playback child (main may show intent until
+   load confirms).
+4. **Output policy in the playback process** — per-track `PlaybackOutputProfile`
+   (rate/format/channels, exclusive when appropriate), USB buffer sizes, IRQ affinity,
+   keep-ALSA-open across same-format skips, format-change `ao-reload`. **Bit-perfect
+   constraints apply inside the child** the same as in-process mpv today.
 5. **Input staging stays in main (v1)** — resolve track → local path or URL → pass to
    playback process (`file://` or HTTPS as today).
 
@@ -361,8 +381,8 @@ sprawling to maintain as-is.
 | Phase | Scope |
 |-------|--------|
 | 1 | IPC skeleton + `PlaybackEngine` client; launch mpv child from `PlayerService` |
-| 2 | Port output profiles, device selection, volume modes over IPC |
-| 3 | USB / direct-ALSA tuning inside playback process only; validate #29 repro (95% CPU + Holo) |
+| 2 | Port **`PlaybackOutputProfile` / bit-perfect policy** over IPC (direct ALSA hw, format match, device volume — parity with today); **playback path status** (`PlaybackPathInfo`) **reported from playback process** after each load |
+| 3 | USB direct-ALSA **stability** tuning inside playback process (buffers, isolation); validate #29 repro (95% CPU + Holo) **without** compromising bit-perfect |
 | 4 | Remove in-process libmpv from playback path; keep spike branch for reference only |
 
 **Reference:** branch `spike/issue-29` preserves the experimental code and benchmark
@@ -408,7 +428,8 @@ hardware** entry for their DAC, not the PipeWire sink with the same name.
 - **Local FLAC/WAV** is the primary bit-perfect use case for v1 (ALSA hw only).
 
 Implement bit-perfect as an explicit **settings profile** applied when constructing
-`MpvEngine` (see `platform/*/audio.py`), not scattered mpv flags in UI code.
+the playback engine (`MpvEngine` today; out-of-process mpv client after #29), not
+scattered mpv flags in UI code.
 
 **Not planned (v1):** PipeWire pro-audio / rate-matched sink bit-perfect. ALSA hw +
 optional exclusive access covers solo listening; PipeWire remains the correct default
@@ -850,8 +871,15 @@ Trackable open items. Ordered milestones are in [Roadmap](#roadmap-ordered) abov
 ### Playback process ([#29](https://github.com/mbrennwa/tunes-player/issues/29))
 
 - [ ] **Out-of-process mpv** — single `PlaybackEngine` client; child mpv service (see
-  [Playback process redesign](#playback-process-redesign-issue-29)).
+  [Playback process redesign](#playback-process-redesign-issue-29)). **Must preserve
+  bit-perfect direct ALSA** when selected; PipeWire only when user chooses a sink.
 - [ ] **IPC contract** — document commands/events; unit tests with mocked socket.
+- [ ] **Port `output_profile.py` policy over IPC** — format match, unity gain, honest
+  resample labels; no silent fallback to mixed/resampled output on hw endpoints.
+- [ ] **`PlaybackPathInfo` from playback process** — Now Playing quality/path line
+  (e.g. `ALSA bit-perfect`, resampling notes) driven by mpv/ALSA ground truth in the
+  child, not only pre-load metadata in `PlayerService` (see `core/playback/output_profile.py`,
+  `format_playback_status` in now playing UI).
 - [ ] **Remove in-process libmpv** from playback hot path after parity.
 - [ ] **Validate** USB direct ALSA under `scripts/cpu_load.py` (~95%) + full GTK app.
 
