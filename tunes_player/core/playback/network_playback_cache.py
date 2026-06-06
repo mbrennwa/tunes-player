@@ -204,21 +204,6 @@ def schedule_playback_cache_warmup(path: str | Path, *, cache_dir: Path) -> None
     ).start()
 
 
-def stage_network_file_if_needed(path: str | Path, *, cache_dir: Path) -> str:
-    """Blocking staging for benchmarks; playback uses resolve_playback_target instead."""
-    target = resolve_playback_target(path, cache_dir=cache_dir)
-    source = Path(path)
-    try:
-        resolved = source.resolve()
-    except OSError:
-        return target
-    if not _is_network_library_path(resolved):
-        return target
-    if target != str(path) and Path(target).is_file():
-        return target
-    return warm_playback_cache(path, cache_dir=cache_dir)
-
-
 def clear_warmup_state_for_tests() -> None:
     """Reset in-flight warmup tracking (tests only)."""
     with _warmup_lock:

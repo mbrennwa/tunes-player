@@ -2,7 +2,7 @@
 """Headless subprocess mpv benchmark under CPU stress (issue #29).
 
 Plays local staged tracks on USB direct ALSA while ``cpu_load.py`` runs,
-logs phase markers to tunes-player.log, and prints stutter metrics.
+logs phase markers to tunes-player.log, and prints xrun/error metrics.
 
 Example:
   python3 scripts/engine_stress_benchmark.py --load 0.80
@@ -32,7 +32,7 @@ from tunes_player.core.config import ConfigManager
 from tunes_player.core.logging_config import configure_logging, diagnostics_log_path
 from tunes_player.core.playback.output_profile import PlaybackOutputProfile
 from tunes_player.engines.factory import create_playback_engine
-from tunes_player.engines.playback_ipc import END_FILE_ERROR as _IPC_END_FILE_ERROR
+from tunes_player.engines.playback_ipc import END_FILE_ERROR
 from tunes_player.platform.linux.alsa_playback import effective_mpv_alsa_device
 from tunes_player.platform.linux.alsa_xrun_monitor import AlsaXrunMonitor, parse_card_from_mpv_device
 
@@ -80,26 +80,31 @@ _DEFAULT_TRACKS: tuple[tuple[str, str, PlaybackOutputProfile], ...] = (
     ),
 )
 
-_STUTTER_RE = re.compile(
-    r"mpv stutter|underrun|ALSA PCM entered XRUN|ALSA xrun counter increased",
+_ALSA_XRUN_RE = re.compile(
+    r"ALSA PCM entered XRUN|ALSA xrun counter increased",
     re.IGNORECASE,
 )
 _END_FILE_RE = re.compile(r"end-file reason=(\d+|[a-z]+)")
-# libmpv EndFile.ERROR is 4; mpv JSON IPC uses reason 5 for errors.
-_LIBMPV_END_FILE_ERROR = 4
 
 
 @dataclass
 class PhaseMetrics:
-    mpv_stutter: int = 0
     alsa_xrun: int = 0
     end_file_errors: int = 0
     playback_errors: int = 0
     lines: list[str] = field(default_factory=list)
 
 
+def _is_end_file_error(token: str) -> bool:
+    if token == "error":
+        return True
+    if token.isdigit():
+        return int(token) == END_FILE_ERROR
+    return False
+
+
 class _PhaseLogCounter(logging.Handler):
-    """Count stutter-related log lines during one benchmark phase."""
+    """Count xrun and playback error log lines during one benchmark phase."""
 
     def __init__(self) -> None:
         super().__init__(level=logging.WARNING)
@@ -111,24 +116,11 @@ class _PhaseLogCounter(logging.Handler):
         except Exception:
             return
         self.metrics.lines.append(message)
-        if "mpv stutter" in message:
-            self.metrics.mpv_stutter += 1
         if "ALSA PCM entered XRUN" in message or "ALSA xrun counter increased" in message:
             self.metrics.alsa_xrun += 1
         match = _END_FILE_RE.search(message)
-        if match is not None:
-            token = match.group(1)
-            if token == "error" or (
-                token.isdigit()
-                and (
-                    int(token) == _LIBMPV_END_FILE_ERROR
-                    or (
-                        int(token) == _IPC_END_FILE_ERROR
-                        and record.name.endswith("mpv_ipc")
-                    )
-                )
-            ):
-                self.metrics.end_file_errors += 1
+        if match is not None and _is_end_file_error(match.group(1)):
+            self.metrics.end_file_errors += 1
         if record.name.startswith("tunes_player") and "playback_error" in message:
             self.metrics.playback_errors += 1
 
@@ -262,10 +254,9 @@ def _run_phase(
     metrics.playback_errors = playback_errors
     _LOG.info(
         "ENGINE_BENCHMARK session=%s phase=%s engine=subprocess end "
-        "mpv_stutter=%d alsa_xrun=%d end_file_error=%d playback_error=%d",
+        "alsa_xrun=%d end_file_error=%d playback_error=%d",
         session,
         phase,
-        metrics.mpv_stutter,
         metrics.alsa_xrun,
         metrics.end_file_errors,
         metrics.playback_errors,
@@ -292,19 +283,11 @@ def _parse_log_slice(log_path: Path, session: str) -> Counter[str]:
             continue
         if not in_phase:
             continue
-        if _STUTTER_RE.search(line):
-            if "mpv stutter" in line:
-                counts["mpv_stutter"] += 1
-            if "ALSA" in line and ("XRUN" in line or "xrun counter" in line):
-                counts["alsa_xrun"] += 1
+        if _ALSA_XRUN_RE.search(line):
+            counts["alsa_xrun"] += 1
         match = _END_FILE_RE.search(line)
-        if match is not None:
-            token = match.group(1)
-            if token == "error" or (
-                token.isdigit()
-                and int(token) in (_LIBMPV_END_FILE_ERROR, _IPC_END_FILE_ERROR)
-            ):
-                counts["end_file_error"] += 1
+        if match is not None and _is_end_file_error(match.group(1)):
+            counts["end_file_error"] += 1
     return counts
 
 
@@ -393,23 +376,23 @@ def main() -> int:
     print(f"Benchmark session {session}  log: {log_path}")
     print(f"Device: {mpv_device}  CPU stress: {'yes' if not args.skip_stress else 'no'}  load={args.load}")
     print(f"{args.seconds:.0f}s × {len(tracks)} tracks (subprocess mpv IPC)\n")
-    header = f"{'mpv_stutter':>12} {'alsa_xrun':>10} {'fatal_end':>10} {'playback_err':>13}"
+    header = f"{'alsa_xrun':>10} {'end_file_err':>13} {'playback_err':>13}"
     print(header)
     print("-" * len(header))
     print(
-        f"{metrics.mpv_stutter:>12} {metrics.alsa_xrun:>10} "
-        f"{metrics.end_file_errors:>11} {metrics.playback_errors:>13}"
+        f"{metrics.alsa_xrun:>10} {metrics.end_file_errors:>13} "
+        f"{metrics.playback_errors:>13}"
     )
     print("\nLog-file cross-check (same session markers):")
     print(
-        f"  mpv_stutter={log_counts['mpv_stutter']} "
-        f"alsa_xrun={log_counts['alsa_xrun']} end_file_error={log_counts['end_file_error']}"
+        f"  alsa_xrun={log_counts['alsa_xrun']} "
+        f"end_file_error={log_counts['end_file_error']}"
     )
     print("\nGrep this session:")
     print(f"  grep 'ENGINE_BENCHMARK session={session}' {log_path}")
     print(
-        f"  grep -E 'session={session}|underrun|XRUN|stutter|end-file' {log_path} | "
-        f"grep -E 'ENGINE_BENCHMARK|stutter|XRUN|end-file'"
+        f"  grep -E 'session={session}|XRUN|xrun|end-file' {log_path} | "
+        f"grep -E 'ENGINE_BENCHMARK|XRUN|end-file'"
     )
     return 0
 

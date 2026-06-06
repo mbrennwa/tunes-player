@@ -12,9 +12,25 @@ from tunes_player.core.playback.network_playback_cache import (
     clear_warmup_state_for_tests,
     resolve_playback_target,
     schedule_playback_cache_warmup,
-    stage_network_file_if_needed,
     warm_playback_cache,
 )
+
+
+def _stage_network_file_for_test(path: str | Path, *, cache_dir: Path) -> str:
+    """Blocking staging helper for tests (production uses resolve_playback_target)."""
+    from tunes_player.core.playback import network_playback_cache as cache
+
+    target = cache.resolve_playback_target(path, cache_dir=cache_dir)
+    source = Path(path)
+    try:
+        resolved = source.resolve()
+    except OSError:
+        return target
+    if not cache._is_network_library_path(resolved):
+        return target
+    if target != str(path) and Path(target).is_file():
+        return target
+    return cache.warm_playback_cache(path, cache_dir=cache_dir)
 
 
 class NetworkPlaybackCacheTests(unittest.TestCase):
@@ -31,7 +47,7 @@ class NetworkPlaybackCacheTests(unittest.TestCase):
                 "tunes_player.core.playback.network_playback_cache._is_network_library_path",
                 return_value=False,
             ):
-                result = stage_network_file_if_needed(source, cache_dir=cache_dir)
+                result = _stage_network_file_for_test(source, cache_dir=cache_dir)
             self.assertEqual(result, str(source))
             self.assertFalse(cache_dir.exists())
 
@@ -46,8 +62,8 @@ class NetworkPlaybackCacheTests(unittest.TestCase):
                 "tunes_player.core.playback.network_playback_cache._is_network_library_path",
                 return_value=True,
             ):
-                first = stage_network_file_if_needed(source, cache_dir=cache_dir)
-                second = stage_network_file_if_needed(source, cache_dir=cache_dir)
+                first = _stage_network_file_for_test(source, cache_dir=cache_dir)
+                second = _stage_network_file_for_test(source, cache_dir=cache_dir)
             self.assertNotEqual(first, str(source))
             self.assertEqual(first, second)
             self.assertEqual(Path(first).read_bytes(), payload)
@@ -123,7 +139,7 @@ class NetworkPlaybackCacheTests(unittest.TestCase):
                     side_effect=OSError("disk full"),
                 ),
             ):
-                result = stage_network_file_if_needed(source, cache_dir=cache_dir)
+                result = _stage_network_file_for_test(source, cache_dir=cache_dir)
             self.assertEqual(result, str(source))
 
 

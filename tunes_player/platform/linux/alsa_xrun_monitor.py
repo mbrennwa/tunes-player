@@ -1,4 +1,7 @@
-"""Poll ALSA PCM status for xrun counter increases (Linux direct output)."""
+"""Poll ALSA PCM status for xrun counter increases (Linux direct output).
+
+Diagnostics only — stall watchdog in PlayerService handles playback recovery.
+"""
 
 from __future__ import annotations
 
@@ -69,7 +72,7 @@ def list_playback_pcm_statuses(*, card: int | None = None) -> list[PcmStatus]:
 
 
 class AlsaXrunMonitor:
-    """Track ALSA playback PCM xrun counters for the active output card."""
+    """Log ALSA playback PCM xrun events for the active output card."""
 
     def __init__(self) -> None:
         self._last_xruns: dict[str, int] = {}
@@ -92,14 +95,13 @@ class AlsaXrunMonitor:
         *,
         mpv_audio_device: str | None = None,
         endpoint_id: str | None = None,
-    ) -> bool:
-        """Return True when a new xrun or XRUN state transition was observed."""
+    ) -> None:
+        """Poll PCM status and log new xrun or XRUN state transitions."""
         card = parse_card_from_mpv_device(mpv_audio_device)
         if card is None:
             card = parse_card_from_endpoint_id(endpoint_id)
         self.set_card(card)
 
-        detected = False
         for status in list_playback_pcm_statuses(card=self._card):
             path = status.path
             prev_state = self._last_state.get(path)
@@ -109,7 +111,6 @@ class AlsaXrunMonitor:
                     path,
                     status.xruns if status.xruns is not None else "?",
                 )
-                detected = True
             self._last_state[path] = status.state
 
             if status.xruns is None:
@@ -123,6 +124,4 @@ class AlsaXrunMonitor:
                     status.xruns,
                     status.state,
                 )
-                detected = True
             self._last_xruns[path] = status.xruns
-        return detected

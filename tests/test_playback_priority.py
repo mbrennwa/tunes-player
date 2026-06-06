@@ -10,11 +10,10 @@ from tunes_player.platform.linux import playback_priority
 
 class PlaybackPriorityTests(unittest.TestCase):
     def test_mpv_subprocess_command_is_plain_mpv(self) -> None:
-        cmd, used_chrt = playback_priority.mpv_subprocess_command(
+        cmd = playback_priority.mpv_subprocess_command(
             "/usr/bin/mpv",
             ["--idle=yes"],
         )
-        self.assertFalse(used_chrt)
         self.assertEqual(cmd, ["/usr/bin/mpv", "--idle=yes"])
 
     def test_pin_mpv_subprocess_usb_uses_irq_cpu(self) -> None:
@@ -39,10 +38,6 @@ class PlaybackPriorityTests(unittest.TestCase):
             status = playback_priority.pin_mpv_subprocess(4242, alsa_card=0)
         affinity.assert_not_called()
         self.assertIsNone(status.cpu_affinity)
-
-    def test_raise_and_restore_are_no_ops(self) -> None:
-        playback_priority.raise_for_playback()
-        playback_priority.restore_after_playback()
 
 
 if __name__ == "__main__":

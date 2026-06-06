@@ -44,9 +44,6 @@ class _StallEngine:
     def is_playing(self) -> bool:
         return True
 
-    def get_duration(self) -> float | None:
-        return 180.0
-
 
 class PlaybackStallRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:

@@ -1905,7 +1905,7 @@ class PlayerService:
             engine.refresh_usb_playback_isolation()
 
     def _try_recover_direct_alsa(self, *, reason: str = "stall") -> bool:
-        if not self._playback_intended or reason == "xrun":
+        if not self._playback_intended:
             return False
         profile = self._output_profile
         engine = self._engine

@@ -13,10 +13,6 @@ _IRQ_LINE = re.compile(r"^\s*(\d+):\s+([\d\s]+)\s+(.+)$")
 _AFFINITY_ISOLATED: dict[int, int] = {}
 
 
-def clear_irq_affinity_cache() -> None:
-    _AFFINITY_ISOLATED.clear()
-
-
 def _cpu_count() -> int:
     try:
         return len(Path("/proc/cpuinfo").read_text(encoding="utf-8").split("processor\t:"))

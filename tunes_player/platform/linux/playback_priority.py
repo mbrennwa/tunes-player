@@ -15,20 +15,18 @@ class PlaybackPriorityStatus:
     cpu_affinity: int | None
 
 
-def mpv_subprocess_command(mpv_bin: str, mpv_args: list[str]) -> tuple[list[str], bool]:
-    """Return mpv argv unchanged; RT/chrt is intentionally not used (not portable)."""
-    return [mpv_bin, *mpv_args], False
+def mpv_subprocess_command(mpv_bin: str, mpv_args: list[str]) -> list[str]:
+    """Return mpv argv unchanged (no RT/chrt — not portable)."""
+    return [mpv_bin, *mpv_args]
 
 
 def pin_mpv_subprocess(
     pid: int,
     *,
     alsa_card: int | None = None,
-    used_chrt: bool = False,
     force_irq: bool = False,
 ) -> PlaybackPriorityStatus:
     """Co-locate mpv with USB xHCI IRQ CPU when possible; otherwise leave unpinned."""
-    del used_chrt
     cpu: int | None = None
     if alsa_card is not None:
         try:
@@ -63,11 +61,3 @@ def pin_mpv_subprocess(
 def refresh_usb_mpv_affinity(pid: int, alsa_card: int) -> PlaybackPriorityStatus:
     """Re-apply USB IRQ isolation before each track (affinity can drift under load)."""
     return pin_mpv_subprocess(pid, alsa_card=alsa_card, force_irq=True)
-
-
-def raise_for_playback() -> None:
-    """No-op: priority tweaks apply to the mpv child only."""
-
-
-def restore_after_playback() -> None:
-    """No-op."""

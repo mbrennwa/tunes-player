@@ -161,7 +161,6 @@ class MpvPlaybackClient:
         self._direct_alsa_device_open = False
         self._opened_exclusive: bool | None = None
         self._keep_alsa_open_on_track_change = self._usb_keep_device_open()
-        self._used_chrt = False
 
         _LIVE_CLIENTS.add(self)
         self._start_process()
@@ -209,7 +208,7 @@ class MpvPlaybackClient:
         from tunes_player.platform.linux.playback_priority import mpv_subprocess_command
 
         mpv_args = self._build_startup_args()
-        cmd, self._used_chrt = mpv_subprocess_command(self._mpv_bin, mpv_args)
+        cmd = mpv_subprocess_command(self._mpv_bin, mpv_args)
         _LOG.info("Starting subprocess mpv: %s", " ".join(cmd))
         popen_kwargs: dict[str, object] = {
             "stdin": subprocess.DEVNULL,
@@ -1132,7 +1131,7 @@ class MpvPlaybackClient:
             from tunes_player.platform.linux.playback_priority import pin_mpv_subprocess
 
             card = parse_card_from_mpv_device(self._audio_device)
-            pin_mpv_subprocess(self._proc.pid, alsa_card=card, used_chrt=self._used_chrt)
+            pin_mpv_subprocess(self._proc.pid, alsa_card=card)
         except ImportError:
             pass
 
