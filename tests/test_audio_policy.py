@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+
 from tunes_player.core.audio_labels import (
     classify_sink_potential,
     endpoint_display_label,
@@ -73,7 +74,7 @@ class AudioPolicyTests(unittest.TestCase):
             "none",
         )
 
-    def test_system_default_dropdown_label_is_short(self) -> None:
+    def test_system_default_dropdown_label_has_no_suffix(self) -> None:
         endpoint = VolumeEndpoint(
             id=SYSTEM_DEFAULT_SINK_ID,
             name="default",
@@ -81,14 +82,26 @@ class AudioPolicyTests(unittest.TestCase):
         )
         self.assertEqual(endpoint_dropdown_label(endpoint), "System default")
 
-    def test_endpoint_display_label_adds_suffix(self) -> None:
+    def test_endpoint_display_label_alsa_bit_perfect(self) -> None:
         endpoint = VolumeEndpoint(
-            id="1",
+            id="alsa:hw:1:0",
+            name="hw:1,0",
+            description="My DAC",
+            bit_perfect_potential="direct",
+        )
+        self.assertEqual(
+            endpoint_display_label(endpoint),
+            "My DAC · bit perfect",
+        )
+
+    def test_endpoint_display_label_pipewire_has_no_suffix(self) -> None:
+        endpoint = VolumeEndpoint(
+            id="pw:alsa_output.usb-x",
             name="alsa_output.usb-x",
             description="My DAC",
             bit_perfect_potential="capable",
         )
-        self.assertEqual(endpoint_display_label(endpoint), "My DAC · capable")
+        self.assertEqual(endpoint_display_label(endpoint), "My DAC")
 
     def test_derive_volume_mode(self) -> None:
         self.assertEqual(

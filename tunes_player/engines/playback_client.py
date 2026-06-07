@@ -26,6 +26,12 @@ from tunes_player.core.playback.buffer_policy import (
     mpv_options_for_input,
 )
 from tunes_player.core.playback.mpv_cli import base_audio_options, mpv_cli_args_from_options
+from tunes_player.core.playback.mpv_logging import (
+    mpv_log_path_for_socket,
+    mpv_logging_cli_args,
+    prepare_mpv_log_file,
+    tail_mpv_log,
+)
 from tunes_player.core.playback.playback_path import (
     NegotiatedPlaybackState,
     PlaybackPathContext,
@@ -126,6 +132,7 @@ class MpvPlaybackClient:
         self._on_event = on_event
         self._endpoint_id = endpoint_id
         self._socket_path = ipc_socket_path or Path(f"/tmp/tunes-mpv-{time.time_ns()}.sock")
+        self._mpv_log_path = mpv_log_path_for_socket(self._socket_path)
 
         self._proc: subprocess.Popen[bytes] | None = None
         self._sock: socket.socket | None = None
@@ -146,6 +153,7 @@ class MpvPlaybackClient:
         self._last_position_emit = 0.0
         self._last_position_update_at = 0.0
         self._shutdown = False
+        self._ipc_disconnected = False
         self._path_context: PlaybackPathContext | None = None
         self._path_info: PlaybackPathInfo | None = None
         self._negotiated_state = NegotiatedPlaybackState()
@@ -196,7 +204,55 @@ class MpvPlaybackClient:
             args.append(f"--volume={max(0.0, min(100.0, self._volume * 100.0))}")
         if self._audio_device and (profile is None or not profile.direct_alsa):
             args.append(f"--audio-device={self._audio_device}")
+        args.extend(
+            mpv_logging_cli_args(
+                log_path=getattr(self, "_mpv_log_path", None)
+                or mpv_log_path_for_socket(self._socket_path),
+            )
+        )
         return args
+
+    def _log_ipc_disconnect_diagnostics(self) -> None:
+        proc = self._proc
+        pid = proc.pid if proc is not None and hasattr(proc, "pid") else None
+        returncode = proc.poll() if proc is not None else None
+        uri = getattr(self, "_loaded_uri", None)
+        if uri is None:
+            uri_preview = None
+        elif len(uri) <= 120:
+            uri_preview = uri
+        else:
+            uri_preview = f"{uri[:117]}..."
+        playlist_uris = getattr(self, "_playlist_uris", [])
+        playlist_count = max(getattr(self, "_playlist_count", 0), len(playlist_uris))
+        log_path = getattr(self, "_mpv_log_path", None)
+        if log_path is None:
+            socket_path = getattr(self, "_socket_path", None)
+            log_path = (
+                mpv_log_path_for_socket(socket_path)
+                if socket_path is not None
+                else Path("/tmp") / "mpv-playback.log"
+            )
+        details = (
+            f"pid={pid} returncode={returncode} playing={self._playing} "
+            f"playlist_pos={getattr(self, '_playlist_pos', -1)} "
+            f"playlist_count={playlist_count} "
+            f"loaded_uri={uri_preview!r} mpv_log={log_path}"
+        )
+        if returncode is not None:
+            _LOG.error("mpv IPC disconnected (%s)", details)
+        else:
+            _LOG.warning("mpv IPC disconnected before subprocess exit (%s)", details)
+        tail = tail_mpv_log(log_path)
+        if tail:
+            _LOG.warning(
+                "mpv log tail (%d lines from %s):\n%s",
+                len(tail),
+                log_path,
+                "\n".join(tail),
+            )
+        else:
+            _LOG.warning("mpv log empty or unreadable: %s", log_path)
 
     def _start_process(self) -> None:
         self._socket_path.parent.mkdir(parents=True, exist_ok=True)
@@ -204,12 +260,17 @@ class MpvPlaybackClient:
         self._terminate_stale_mpv_instances(protected_pids=protected)
         if self._socket_path.exists():
             self._socket_path.unlink(missing_ok=True)
+        prepare_mpv_log_file(self._mpv_log_path)
 
         from tunes_player.platform.linux.playback_priority import mpv_subprocess_command
 
         mpv_args = self._build_startup_args()
         cmd = mpv_subprocess_command(self._mpv_bin, mpv_args)
-        _LOG.info("Starting subprocess mpv: %s", " ".join(cmd))
+        _LOG.info(
+            "Starting subprocess mpv: %s (log=%s)",
+            " ".join(cmd),
+            self._mpv_log_path,
+        )
         popen_kwargs: dict[str, object] = {
             "stdin": subprocess.DEVNULL,
             "stdout": subprocess.DEVNULL,
@@ -343,16 +404,8 @@ class MpvPlaybackClient:
                     )
             except Exception:
                 _LOG.exception("Unhandled mpv IPC event")
-        if not self._shutdown:
-            proc = self._proc
-            returncode = proc.poll() if proc is not None else None
-            if returncode is not None:
-                _LOG.error(
-                    "mpv IPC reader exited unexpectedly (returncode=%s)",
-                    returncode,
-                )
-            else:
-                _LOG.warning("mpv IPC socket closed before subprocess exit")
+        if not self._shutdown and not self._ipc_disconnected:
+            self._mark_ipc_disconnected()
 
     def _terminate_stale_mpv_instances(
         self,
@@ -551,6 +604,9 @@ class MpvPlaybackClient:
         return self._sock_file is not None
 
     def _mark_ipc_disconnected(self) -> None:
+        if getattr(self, "_ipc_disconnected", False):
+            return
+        self._ipc_disconnected = True
         self._running = False
         self._playing = False
         if self._sock_file is not None:
@@ -565,6 +621,8 @@ class MpvPlaybackClient:
             except OSError:
                 pass
             self._sock = None
+        if not self._shutdown:
+            self._log_ipc_disconnect_diagnostics()
 
     def set_property(self, name: str, value: object) -> None:
         flag = name.replace("_", "-")

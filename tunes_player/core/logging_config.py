@@ -16,6 +16,12 @@ def diagnostics_log_path(data_dir: Path) -> Path:
     return data_dir / LOG_FILE_NAME
 
 
+def mpv_diagnostics_log_path(data_dir: Path) -> Path:
+    from tunes_player.core.playback.mpv_logging import mpv_log_path
+
+    return mpv_log_path(data_dir)
+
+
 def configure_logging(data_dir: Path) -> Path:
     """Configure file logging and optional stderr output. Returns the log file path."""
     data_dir.mkdir(parents=True, exist_ok=True)

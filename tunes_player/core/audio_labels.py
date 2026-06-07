@@ -1,18 +1,14 @@
-"""Display labels for audio output endpoints (bit-perfect potential hints)."""
+"""Display labels for audio output endpoints (bit-perfect hint on direct ALSA only)."""
 
 from __future__ import annotations
 
 from tunes_player.core.volume import (
-    SYSTEM_DEFAULT_SINK_ID,
     BitPerfectPotential,
     VolumeEndpoint,
+    is_alsa_endpoint_id,
 )
 
-_POTENTIAL_SUFFIX = {
-    "direct": " · bit-perfect",
-    "capable": " · capable",
-    "none": "",
-}
+_BIT_PERFECT_SUFFIX = " · bit perfect"
 
 
 def classify_sink_potential(*, name: str, description: str) -> BitPerfectPotential:
@@ -43,10 +39,9 @@ def classify_sink_potential(*, name: str, description: str) -> BitPerfectPotenti
 
 def endpoint_dropdown_label(endpoint: VolumeEndpoint) -> str:
     """Short label for Settings dropdowns (keeps Adw row layout readable)."""
-    if endpoint.id == SYSTEM_DEFAULT_SINK_ID:
-        return "System default"
-    suffix = _POTENTIAL_SUFFIX.get(endpoint.bit_perfect_potential, "")
-    return f"{endpoint.description}{suffix}"
+    if is_alsa_endpoint_id(endpoint.id):
+        return f"{endpoint.description}{_BIT_PERFECT_SUFFIX}"
+    return endpoint.description
 
 
 def endpoint_display_label(endpoint: VolumeEndpoint) -> str:
