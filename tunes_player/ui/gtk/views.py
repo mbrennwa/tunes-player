@@ -759,6 +759,7 @@ class ReleaseTileGrid(Gtk.Box):
         self._inner_width_fn = inner_width_fn
         self._service = service
         self._playback_unsubscribe: Callable[[], None] | None = None
+        self._last_art_playing_release_id: str | None = None
         if service is not None:
             self._playback_unsubscribe = service.subscribe(self._on_playback_event)
             self.connect("destroy", self._on_destroy)
@@ -872,9 +873,23 @@ class ReleaseTileGrid(Gtk.Box):
         service = self._service
         if service is None:
             return False
+        current_id = service.current_release_id()
+        playing_id = (
+            current_id
+            if current_id is not None and service.is_release_playing(current_id)
+            else None
+        )
+        to_update: set[str] = set()
+        if self._last_art_playing_release_id:
+            to_update.add(self._last_art_playing_release_id)
+        if playing_id:
+            to_update.add(playing_id)
+        self._last_art_playing_release_id = playing_id
+        if not to_update:
+            return False
         for card in self._cards:
             release_id = getattr(card, "_tunes_release_id", None)
-            if not isinstance(release_id, str):
+            if not isinstance(release_id, str) or release_id not in to_update:
                 continue
             btn = _find_release_art_play_button(card)
             if btn is not None:
