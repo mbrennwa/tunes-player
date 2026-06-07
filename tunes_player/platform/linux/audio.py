@@ -434,9 +434,9 @@ class LinuxOutputController:
         card = self._active_alsa_card()
         if card is None:
             return False
-        from tunes_player.platform.linux.alsa_mixer import alsa_mixer_adjustable
+        from tunes_player.platform.linux.alsa_mixer import alsa_mixer_available
 
-        return alsa_mixer_adjustable(card)
+        return alsa_mixer_available(card)
 
     @property
     def uses_device_volume(self) -> bool:

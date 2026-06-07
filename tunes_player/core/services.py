@@ -1318,7 +1318,7 @@ class PlayerService:
         except ImportError:
             pass
         was_device_volume = self._device_volume
-        detected = self._has_device_volume()
+        detected = self._has_device_volume(verify_alsa=True)
         self._device_volume = detected
         if (
             was_device_volume
@@ -1835,9 +1835,22 @@ class PlayerService:
 
         return unsubscribe
 
-    def _has_device_volume(self) -> bool:
+    def _has_device_volume(self, *, verify_alsa: bool = False) -> bool:
         controller = self._volume_controller
-        return controller is not None and controller.available() and controller.uses_device_volume
+        if controller is None or not controller.available():
+            return False
+        if verify_alsa:
+            active = self._active_endpoint_id()
+            if is_alsa_endpoint_id(active):
+                from tunes_player.platform.linux.alsa_mixer import (
+                    alsa_card_from_endpoint_id,
+                    alsa_mixer_adjustable,
+                )
+
+                card = alsa_card_from_endpoint_id(active)
+                if card is not None:
+                    return alsa_mixer_adjustable(card)
+        return controller.uses_device_volume
 
     def _active_endpoint_id(self) -> str | None:
         if self._volume_controller is None:

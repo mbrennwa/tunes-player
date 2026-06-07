@@ -243,6 +243,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
     def _on_preferences_map(self, *_args: object) -> None:
         self._apply_audio_group_description()
         self._reload_output_sinks()
+        self._service.refresh_output_volume_detection()
         self._sync_volume_mode_row()
         self._sync_scan_ui()
 
@@ -489,7 +490,6 @@ class PreferencesWindow(Adw.PreferencesWindow):
         dropdown = getattr(self, "_volume_mode_dropdown", None)
         if row is None or dropdown is None:
             return
-        self._service.refresh_output_volume_detection()
         state = self._service.get_playback_state()
         row.set_subtitle(_VOLUME_MODE_SUBTITLES[state.volume_mode])
         labels = self._volume_mode_dropdown_labels(state.device_volume)
@@ -580,6 +580,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
             return
         self._service.set_output_sink(endpoint.id)
         self._output_row.set_subtitle(self._output_row_subtitle())
+        self._service.refresh_output_volume_detection()
         self._sync_volume_mode_row()
         self._sync_exclusive_row()
 
