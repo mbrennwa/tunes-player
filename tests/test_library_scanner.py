@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -39,10 +40,10 @@ class LibraryScannerScopedTests(unittest.TestCase):
 
     def test_collect_candidates_scoped_to_one_folder(self) -> None:
         roots = [str(self._folder_a.resolve())]
-        candidates = self._scanner._collect_candidates(roots=roots)
-        self.assertEqual(len(candidates), 1)
-        self.assertEqual(candidates[0].name, "track_a.flac")
-        self.assertTrue(str(candidates[0]).startswith(str(self._folder_a.resolve())))
+        discovery = self._scanner._collect_candidates(roots=roots)
+        self.assertEqual(len(discovery), 1)
+        self.assertEqual(discovery[0].name, "track_a.flac")
+        self.assertTrue(str(discovery[0].resolve()).startswith(str(self._folder_a.resolve())))
 
     def test_remove_missing_files_scoped_to_scan_roots(self) -> None:
         path_a = str((self._folder_a / "gone.flac").resolve())
@@ -260,7 +261,6 @@ class LibraryScannerScopedTests(unittest.TestCase):
         scanner = LibraryScanner(db_path=self._db_path, config=config)
         with (
             patch("tunes_player.core.library.scanner._parse_file", side_effect=fake_parse),
-            patch("tunes_player.core.library.scanner.index_album_art_for_file"),
             patch("tunes_player.core.library.scanner.maintain_album_art", return_value=(0, 0)),
         ):
             result = scanner.scan(scan_folders=[str(collision_root.resolve())])
@@ -317,7 +317,6 @@ class LibraryScannerScopedTests(unittest.TestCase):
 
         with (
             patch("tunes_player.core.library.scanner._parse_file", side_effect=fake_parse),
-            patch("tunes_player.core.library.scanner.index_album_art_for_file"),
             patch("tunes_player.core.library.scanner.maintain_album_art", return_value=(0, 0)),
         ):
             result = self._scanner.scan(scan_folders=[str(scan_root.resolve())])
@@ -361,7 +360,6 @@ class LibraryScannerScopedTests(unittest.TestCase):
 
         with (
             patch("tunes_player.core.library.scanner._parse_file", side_effect=fake_parse),
-            patch("tunes_player.core.library.scanner.maintain_album_art", return_value=(0, 0)),
             patch(
                 "tunes_player.core.library.art_cache.extract_embedded_art",
                 return_value=(b"jpeg-bytes", "image/jpeg"),
@@ -371,6 +369,7 @@ class LibraryScannerScopedTests(unittest.TestCase):
 
         self.assertEqual(result.errors, 0)
         self.assertEqual(result.indexed, 1)
+        self.assertEqual(result.art_indexed, 1)
 
         connection = connect(self._db_path)
         try:
@@ -430,7 +429,6 @@ class LibraryScannerScopedTests(unittest.TestCase):
         with (
             patch("tunes_player.core.library.scanner._parse_file", side_effect=fake_parse),
             patch.object(LibraryScanner, "_insert_track", side_effect=failing_insert_track),
-            patch("tunes_player.core.library.scanner.index_album_art_for_file"),
             patch("tunes_player.core.library.scanner.maintain_album_art", return_value=(0, 0)),
         ):
             result = self._scanner.scan(scan_folders=[str(scan_root.resolve())])
@@ -466,7 +464,7 @@ class LibraryScannerScopedTests(unittest.TestCase):
             patch.object(
                 LibraryScanner,
                 "_process_candidate",
-                return_value=("skipped", None),
+                return_value=("indexed", "/tmp/fake_0.flac", True),
             ),
             patch(
                 "tunes_player.core.library.scanner.maintain_album_art",
@@ -475,7 +473,7 @@ class LibraryScannerScopedTests(unittest.TestCase):
         ):
             self._scanner.scan(scan_folders=[str(self._folder_a.resolve())])
 
-        self.assertGreaterEqual(len(commits), 3)
+        self.assertGreaterEqual(len(commits), 2)
 
     def test_scan_changes_indexes_added_file_and_removes_deleted_file(self) -> None:
         added = self._folder_a / "new_track.flac"
@@ -493,7 +491,6 @@ class LibraryScannerScopedTests(unittest.TestCase):
 
         with (
             patch("tunes_player.core.library.scanner._parse_file") as parse_file,
-            patch("tunes_player.core.library.scanner.index_album_art_for_file"),
             patch("tunes_player.core.library.scanner.maintain_album_art", return_value=(0, 0)),
         ):
             parse_file.return_value = _ParsedTrack(
@@ -554,7 +551,7 @@ class LibraryScannerScopedTests(unittest.TestCase):
         self.assertEqual(attempts["count"], 2)
         self.assertEqual(result.indexed, 0)
 
-    def test_scan_resumes_after_checkpoint(self) -> None:
+    def test_rescan_skips_already_indexed_files(self) -> None:
         scan_root = self._folder_a / "resume"
         scan_root.mkdir()
         file_a = scan_root / "a.flac"
@@ -593,7 +590,6 @@ class LibraryScannerScopedTests(unittest.TestCase):
         scanner = LibraryScanner(db_path=self._db_path, config=config)
         with (
             patch("tunes_player.core.library.scanner._parse_file", side_effect=fake_parse),
-            patch("tunes_player.core.library.scanner.index_album_art_for_file"),
             patch("tunes_player.core.library.scanner.maintain_album_art", return_value=(0, 0)),
         ):
             file_c.unlink()
@@ -606,7 +602,7 @@ class LibraryScannerScopedTests(unittest.TestCase):
 
         self.assertEqual(first.indexed, 2)
         self.assertEqual(result.indexed, 1)
-        self.assertEqual(result.skipped, 0)
+        self.assertEqual(result.skipped, 2)
         self.assertEqual(result.total_candidates, 3)
 
         connection = connect(self._db_path)
@@ -645,11 +641,17 @@ class LibraryScannerScopedTests(unittest.TestCase):
         calls = {"count": 0}
         original_process = LibraryScanner._process_candidate
 
-        def flaky_process(self, connection, path, *, file_errors):
+        def flaky_process(self, connection, path, *, file_errors, existing_files=None):
             calls["count"] += 1
             if calls["count"] == 1:
                 raise RuntimeError("scan interrupted")
-            return original_process(self, connection, path, file_errors=file_errors)
+            return original_process(
+                self,
+                connection,
+                path,
+                file_errors=file_errors,
+                existing_files=existing_files,
+            )
 
         config = AppConfig(music_folders=[str(scan_root.resolve())])
         scanner = LibraryScanner(db_path=self._db_path, config=config)
@@ -672,6 +674,68 @@ class LibraryScannerScopedTests(unittest.TestCase):
             connection.close()
         self.assertIn(stale, paths)
 
+    def test_process_candidate_skips_indexed_file_with_stat(self) -> None:
+        track = self._folder_a / "indexed.flac"
+        track.write_bytes(b"data")
+        path_str = str(track.resolve())
+        stat = track.stat()
+        connection = connect(self._db_path)
+        try:
+            connection.execute(
+                "INSERT INTO files(path, mtime_ns, size_bytes, indexed_at_ns) VALUES (?, ?, ?, ?)",
+                (path_str, stat.st_mtime_ns, stat.st_size, time.time_ns()),
+            )
+            connection.commit()
+            existing = LibraryScanner._load_existing_files_metadata(
+                connection,
+                [str(self._folder_a.resolve())],
+            )
+            with patch("tunes_player.core.library.scanner._parse_file") as parse_file:
+                outcome, result_path, wrote = self._scanner._process_candidate(
+                    connection,
+                    track,
+                    file_errors=[],
+                    existing_files=existing,
+                )
+        finally:
+            connection.close()
+
+        parse_file.assert_not_called()
+        self.assertEqual(outcome, "skipped")
+        self.assertEqual(result_path, path_str)
+        self.assertFalse(wrote)
+
+    def test_process_candidate_skips_when_mtime_differs_only_in_subseconds(self) -> None:
+        track = self._folder_a / "nfs-ish.flac"
+        track.write_bytes(b"data")
+        path_str = str(track.resolve())
+        stat = track.stat()
+        connection = connect(self._db_path)
+        try:
+            connection.execute(
+                "INSERT INTO files(path, mtime_ns, size_bytes, indexed_at_ns) VALUES (?, ?, ?, ?)",
+                (path_str, stat.st_mtime_ns + 1, stat.st_size, time.time_ns()),
+            )
+            connection.commit()
+            existing = LibraryScanner._load_existing_files_metadata(
+                connection,
+                [str(self._folder_a.resolve())],
+            )
+            with patch("tunes_player.core.library.scanner._parse_file") as parse_file:
+                outcome, result_path, wrote = self._scanner._process_candidate(
+                    connection,
+                    track,
+                    file_errors=[],
+                    existing_files=existing,
+                )
+        finally:
+            connection.close()
+
+        parse_file.assert_not_called()
+        self.assertEqual(outcome, "skipped")
+        self.assertEqual(result_path, path_str)
+        self.assertFalse(wrote)
+
     def test_collect_candidates_reports_time_based_progress(self) -> None:
         scan_root = self._folder_a / "discover"
         scan_root.mkdir()
@@ -684,12 +748,12 @@ class LibraryScannerScopedTests(unittest.TestCase):
             progress_calls.append((current, total, path))
 
         with patch.object(LibraryScanner, "_PROGRESS_INTERVAL_SEC", 0.0):
-            paths = self._scanner._collect_candidates(
+            discovery = self._scanner._collect_candidates(
                 roots=[str(scan_root.resolve())],
                 progress=progress,
             )
 
-        self.assertEqual(len(paths), 12)
+        self.assertEqual(len(discovery), 12)
         self.assertTrue(any("Discovering files" in call[2] for call in progress_calls))
         self.assertTrue(any("12" in call[2] for call in progress_calls))
 
@@ -733,19 +797,17 @@ class LibraryScannerScopedTests(unittest.TestCase):
         scanner = LibraryScanner(db_path=self._db_path, config=config)
         with (
             patch("tunes_player.core.library.scanner._parse_file", side_effect=fake_parse),
-            patch("tunes_player.core.library.scanner.index_album_art_for_file"),
             patch("tunes_player.core.library.scanner.maintain_album_art", return_value=(0, 0)),
         ):
             scanner.scan(scan_folders=[str(scan_root.resolve())], progress=progress)
 
         transition = next(
-            (call for call in progress_calls if call[2].startswith("Found ")),
+            (call for call in progress_calls if call[0] > 0 and call[1] == 2),
             None,
         )
         self.assertIsNotNone(transition)
         assert transition is not None
-        self.assertEqual(transition[0], 0)
-        self.assertEqual(transition[1], 2)
+        self.assertIn(".flac", transition[2])
         self.assertTrue(
             any(call[0] > 0 and call[1] == 2 for call in progress_calls),
         )

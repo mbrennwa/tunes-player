@@ -14,11 +14,14 @@ from tunes_player.core.config import AppConfig
 from tunes_player.core.library import ids
 from tunes_player.core.library.art_cache import (
     maintain_album_art,
-    index_album_art_for_file,
     prune_orphan_album_art,
 )
 from tunes_player.core.library.db import connect
-from tunes_player.core.library.formats import codec_for_path, has_tier1_extension, is_tier1_path
+from tunes_player.core.library.formats import (
+    codec_for_path,
+    has_tier1_extension,
+    is_tier1_path,
+)
 
 ProgressCallback = Callable[[int, int, str], None]
 _CandidateOutcome = Literal["indexed", "skipped", "error"]
@@ -83,6 +86,7 @@ class LibraryScanner:
         self._db_path = db_path
         self._data_dir = db_path.parent
         self._config = config
+        self._resolved_folders: list[str] | None = None
 
     def scan(
         self,
@@ -91,13 +95,13 @@ class LibraryScanner:
         progress: ProgressCallback | None = None,
         checkpoint_path: str | None = None,
     ) -> ScanResult:
+        del checkpoint_path  # Resume is handled by fast-skipping indexed files.
         last_error: sqlite3.OperationalError | None = None
         for attempt in range(_LOCK_RETRY_ATTEMPTS):
             try:
                 return self._scan_once(
                     scan_folders=scan_folders,
                     progress=progress,
-                    checkpoint_path=checkpoint_path,
                 )
             except sqlite3.OperationalError as exc:
                 if not _is_locked_error(exc) or attempt == _LOCK_RETRY_ATTEMPTS - 1:
@@ -140,7 +144,6 @@ class LibraryScanner:
         *,
         scan_folders: list[str] | None = None,
         progress: ProgressCallback | None = None,
-        checkpoint_path: str | None = None,
     ) -> ScanResult:
         if progress is not None:
             progress(0, 0, "Discovering files…")
@@ -153,37 +156,14 @@ class LibraryScanner:
         else:
             roots = [str(Path(folder).resolve()) for folder in scan_folders]
 
-        all_candidates = self._collect_candidates(roots=roots, progress=progress)
-        catalog_total = len(all_candidates)
-        if checkpoint_path and checkpoint_path.strip():
-            checkpoint = checkpoint_path.strip()
-            candidates = [
-                path
-                for path in all_candidates
-                if str(path) > checkpoint
-            ]
-        else:
-            candidates = all_candidates
-        total = len(candidates)
-        if progress is not None:
-            if total > 0:
-                progress(
-                    0,
-                    catalog_total,
-                    f"Found {catalog_total:,} files, scanning…",
-                )
-            elif catalog_total > 0:
-                progress(
-                    catalog_total,
-                    catalog_total,
-                    "Finalizing library…",
-                )
-        discovered_paths = {str(path) for path in all_candidates}
+        candidates = self._collect_candidates(roots=roots, progress=progress)
+        discovered_paths: set[str] = set()
         seen_paths: set[str] = set()
         indexed = 0
         skipped = 0
         errors = 0
         file_errors: list[ScanFileError] = []
+        total = len(candidates)
         last_progress_at = 0.0
         removed = 0
         art_indexed = 0
@@ -191,6 +171,7 @@ class LibraryScanner:
         connection = connect(self._db_path)
         try:
             connection.execute("BEGIN")
+            existing_files = self._load_existing_files_metadata(connection, roots)
             for index, path in enumerate(candidates, start=1):
                 if index % self._YIELD_EVERY == 0:
                     time.sleep(0)
@@ -205,22 +186,23 @@ class LibraryScanner:
                         progress(index, total, str(path))
                         last_progress_at = now
 
-                outcome, path_str = self._process_candidate(
+                outcome, path_str, wrote = self._process_candidate(
                     connection,
                     path,
                     file_errors=file_errors,
+                    existing_files=existing_files,
                 )
+                if path_str is not None:
+                    seen_paths.add(path_str)
+                    discovered_paths.add(path_str)
                 if outcome == "skipped":
                     skipped += 1
+                elif outcome == "error":
+                    errors += 1
                 else:
-                    if path_str is not None:
-                        seen_paths.add(path_str)
-                    if outcome == "error":
-                        errors += 1
-                    else:
-                        indexed += 1
+                    indexed += 1
 
-                if index % self._BATCH_SIZE == 0:
+                if wrote and index % self._BATCH_SIZE == 0:
                     connection.commit()
                     connection.execute("BEGIN")
 
@@ -232,7 +214,10 @@ class LibraryScanner:
                 for folder in self._config.music_folders
             ]
             removed += self._purge_files_outside_roots(connection, configured_roots)
-            art_added, art_repaired = maintain_album_art(connection, data_dir=self._data_dir)
+            art_added, art_repaired = maintain_album_art(
+                connection,
+                data_dir=self._data_dir,
+            )
             art_indexed = art_added + art_repaired
             connection.commit()
         except Exception:
@@ -248,7 +233,7 @@ class LibraryScanner:
             errors=errors,
             art_indexed=art_indexed,
             file_errors=tuple(file_errors),
-            total_candidates=catalog_total,
+            total_candidates=total,
         )
 
     def _scan_changes_once(
@@ -296,7 +281,13 @@ class LibraryScanner:
                     removed += self._remove_paths(connection, [str(target)])
                     continue
 
-                outcome, _path_str = self._process_candidate(
+                if not isinstance(target, Path):
+                    target = Path(str(target))
+                if not is_tier1_path(target):
+                    skipped += 1
+                    continue
+
+                outcome, _path_str, wrote = self._process_candidate(
                     connection,
                     target,
                     file_errors=file_errors,
@@ -307,12 +298,14 @@ class LibraryScanner:
                     errors += 1
                 else:
                     indexed += 1
-
-                if index % self._BATCH_SIZE == 0:
+                if wrote and index % self._BATCH_SIZE == 0:
                     connection.commit()
                     connection.execute("BEGIN")
 
-            art_added, art_repaired = maintain_album_art(connection, data_dir=self._data_dir)
+            art_added, art_repaired = maintain_album_art(
+                connection,
+                data_dir=self._data_dir,
+            )
             art_indexed = art_added + art_repaired
             connection.commit()
         except Exception:
@@ -342,17 +335,87 @@ class LibraryScanner:
         text = reason.strip() or "unknown error"
         file_errors.append(ScanFileError(path_str, text))
 
+    def _canonical_path_str(self, path: Path) -> str:
+        try:
+            return str(path.resolve())
+        except OSError:
+            return str(path.absolute())
+
+    def _lookup_existing_file(
+        self,
+        path: Path,
+        existing_files: dict[str, sqlite3.Row] | None,
+        connection: sqlite3.Connection,
+        *,
+        resolved_path: str | None = None,
+    ) -> tuple[str, sqlite3.Row | None]:
+        path_candidates: list[str] = []
+        if resolved_path is not None:
+            path_candidates.append(resolved_path)
+        try:
+            resolved = str(path.resolve())
+            if resolved not in path_candidates:
+                path_candidates.append(resolved)
+        except OSError:
+            pass
+        absolute = str(path.absolute())
+        if absolute not in path_candidates:
+            path_candidates.append(absolute)
+
+        for path_str in path_candidates:
+            row: sqlite3.Row | None = None
+            if existing_files is not None:
+                row = existing_files.get(path_str)
+                if row is None:
+                    for key, candidate in existing_files.items():
+                        if os.path.normcase(key) == os.path.normcase(path_str):
+                            row = candidate
+                            path_str = str(key)
+                            break
+            else:
+                row = connection.execute(
+                    """
+                    SELECT id, path, mtime_ns, size_bytes, indexed_at_ns
+                    FROM files WHERE path = ?
+                    """,
+                    (path_str,),
+                ).fetchone()
+            if row is not None:
+                return path_str, row
+
+        return (path_candidates[0] if path_candidates else self._canonical_path_str(path)), None
+
+    @staticmethod
+    def _file_metadata_unchanged(existing: sqlite3.Row, stat: os.stat_result) -> bool:
+        if int(existing["size_bytes"]) != stat.st_size:
+            return False
+        existing_ns = int(existing["mtime_ns"])
+        file_ns = stat.st_mtime_ns
+        if existing_ns == file_ns:
+            return True
+        # NFS and other remote filesystems often expose only second precision.
+        return existing_ns // 1_000_000_000 == file_ns // 1_000_000_000
+
     def _process_candidate(
         self,
         connection: sqlite3.Connection,
         path: Path,
         *,
         file_errors: list[ScanFileError],
-    ) -> tuple[_CandidateOutcome, str | None]:
+        existing_files: dict[str, sqlite3.Row] | None = None,
+    ) -> tuple[_CandidateOutcome, str | None, bool]:
         if not is_tier1_path(path):
-            return "skipped", None
+            return "skipped", None, False
 
-        path_str = str(path.resolve())
+        path_str, existing = self._lookup_existing_file(path, existing_files, connection)
+        if existing is not None and not self._should_bump_indexed_at(
+            path_str=path_str,
+            indexed_at_ns=int(existing["indexed_at_ns"]),
+            mtime_ns=int(existing["mtime_ns"]),
+            file_mtime_ns=int(existing["mtime_ns"]),
+        ):
+            return "skipped", path_str, False
+
         try:
             stat = path.stat()
         except OSError as exc:
@@ -361,17 +424,21 @@ class LibraryScanner:
                 path_str,
                 f"could not read file ({exc})",
             )
-            return "error", path_str
+            return "error", path_str, False
 
-        existing = connection.execute(
-            "SELECT id, mtime_ns, size_bytes, indexed_at_ns FROM files WHERE path = ?",
-            (path_str,),
-        ).fetchone()
+        if existing is None:
+            path_str, existing = self._lookup_existing_file(
+                path,
+                existing_files,
+                connection,
+                resolved_path=path_str,
+            )
+
         if (
             existing is not None
-            and int(existing["mtime_ns"]) == stat.st_mtime_ns
-            and int(existing["size_bytes"]) == stat.st_size
+            and self._file_metadata_unchanged(existing, stat)
         ):
+            wrote = False
             if self._should_bump_indexed_at(
                 path_str=path_str,
                 indexed_at_ns=int(existing["indexed_at_ns"]),
@@ -382,14 +449,15 @@ class LibraryScanner:
                     "UPDATE files SET indexed_at_ns = ? WHERE id = ?",
                     (time.time_ns(), int(existing["id"])),
                 )
-            return "skipped", path_str
+                wrote = True
+            return "skipped", path_str, wrote
 
         try:
             parsed = _parse_file(path, stat.st_mtime_ns, stat.st_size)
         except Exception as exc:
             reason = str(exc).strip() or type(exc).__name__
             self._record_file_error(file_errors, path_str, reason)
-            return "error", path_str
+            return "error", path_str, False
 
         last_error: sqlite3.OperationalError | None = None
         for attempt in range(_LOCK_RETRY_ATTEMPTS):
@@ -400,14 +468,8 @@ class LibraryScanner:
                 connection.execute("DELETE FROM files WHERE path = ?", (path_str,))
                 file_id = self._insert_file(connection, parsed, indexed_at_ns=time.time_ns())
                 self._insert_track(connection, parsed, file_id)
-                index_album_art_for_file(
-                    connection,
-                    data_dir=self._data_dir,
-                    path=Path(parsed.path),
-                    album_id=parsed.release_id,
-                )
                 connection.execute("RELEASE SAVEPOINT index_file")
-                return "indexed", path_str
+                return "indexed", path_str, True
             except sqlite3.OperationalError as exc:
                 try:
                     connection.execute("ROLLBACK TO SAVEPOINT index_file")
@@ -420,7 +482,7 @@ class LibraryScanner:
                     continue
                 reason = str(exc).strip() or type(exc).__name__
                 self._record_file_error(file_errors, path_str, reason)
-                return "error", path_str
+                return "error", path_str, False
             except Exception as exc:
                 try:
                     connection.execute("ROLLBACK TO SAVEPOINT index_file")
@@ -429,11 +491,11 @@ class LibraryScanner:
                     pass
                 reason = str(exc).strip() or type(exc).__name__
                 self._record_file_error(file_errors, path_str, reason)
-                return "error", path_str
+                return "error", path_str, False
 
         if last_error is not None:
             self._record_file_error(file_errors, path_str, str(last_error))
-        return "error", path_str
+        return "error", path_str, False
 
     def purge_folder(self, folder: str) -> int:
         """Remove all indexed files under *folder* from the library database."""
@@ -511,11 +573,18 @@ class LibraryScanner:
         return indexed_at_ns == 0 and file_mtime_ns >= cutoff_ns
 
     def _folder_for_path(self, path_str: str) -> str | None:
-        for folder in self._config.music_folders:
-            folder_resolved = str(Path(folder).resolve())
-            if path_str == folder_resolved or path_str.startswith(folder_resolved + os.sep):
-                return folder_resolved
+        for folder in self._resolved_music_folders():
+            if path_str == folder or path_str.startswith(folder + os.sep):
+                return folder
         return None
+
+    def _resolved_music_folders(self) -> list[str]:
+        if self._resolved_folders is None:
+            self._resolved_folders = [
+                str(Path(folder).resolve())
+                for folder in self._config.music_folders
+            ]
+        return self._resolved_folders
 
     def _collect_candidates(
         self,
@@ -536,12 +605,7 @@ class LibraryScanner:
                     if not has_tier1_extension(candidate):
                         seen += 1
                         continue
-                    try:
-                        path = candidate.resolve()
-                    except OSError:
-                        seen += 1
-                        continue
-                    paths.append(path)
+                    paths.append(candidate)
                     seen += 1
                     if progress is not None:
                         now = time.monotonic()
@@ -569,6 +633,25 @@ class LibraryScanner:
                 f"Discovering files… ({len(paths):,} found, preparing scan…)",
             )
         return paths
+
+    @staticmethod
+    def _load_existing_files_metadata(
+        connection: sqlite3.Connection,
+        roots: list[str],
+    ) -> dict[str, sqlite3.Row]:
+        by_path: dict[str, sqlite3.Row] = {}
+        for root in roots:
+            rows = connection.execute(
+                """
+                SELECT id, path, mtime_ns, size_bytes, indexed_at_ns
+                FROM files
+                WHERE path = ? OR path LIKE ?
+                """,
+                (root, root + os.sep + "%"),
+            ).fetchall()
+            for row in rows:
+                by_path[str(row["path"])] = row
+        return by_path
 
     @staticmethod
     def _insert_file(
@@ -707,16 +790,21 @@ class LibraryScanner:
                 removed += int(cursor.rowcount)
             return removed
 
-        rows = connection.execute("SELECT id, path FROM files").fetchall()
         removed = 0
-        for row in rows:
-            path_str = row["path"]
-            if not LibraryScanner._path_under_roots(path_str, roots):
-                continue
-            if path_str in exclude_paths:
-                continue
-            connection.execute("DELETE FROM files WHERE id = ?", (row["id"],))
-            removed += 1
+        for root in roots:
+            rows = connection.execute(
+                """
+                SELECT id, path FROM files
+                WHERE path = ? OR path LIKE ?
+                """,
+                (root, root + os.sep + "%"),
+            ).fetchall()
+            for row in rows:
+                path_str = row["path"]
+                if path_str in exclude_paths:
+                    continue
+                connection.execute("DELETE FROM files WHERE id = ?", (row["id"],))
+                removed += 1
         return removed
 
     @staticmethod
@@ -850,35 +938,21 @@ def _read_mutagen_id3(path: Path) -> dict:
 
     audio = MP3(path, ID3=EasyID3)
     tags = _tags_from_easyid3(audio.tags or {})
-    tags.update(_id3_extra_tags(path))
+    if audio.tags is not None:
+        for frame in audio.tags.values():
+            frame_id = getattr(frame, "FrameID", "")
+            if frame_id != "TXXX":
+                continue
+            desc = str(getattr(frame, "desc", "") or "")
+            desc_key = desc.strip().casefold()
+            if desc_key not in {"musicbrainz album type", "albumtype", "release type"}:
+                continue
+            text = getattr(frame, "text", None)
+            if text:
+                tags["musicbrainz_albumtype"] = str(text[0])
+                break
     tags.update(_audio_info(audio.info))
     return tags
-
-
-def _id3_extra_tags(path: Path) -> dict:
-    """Read MusicBrainz album type and similar TXXX frames not in EasyID3."""
-    from mutagen.mp3 import MP3
-
-    try:
-        audio = MP3(path)
-    except Exception:
-        return {}
-    if audio.tags is None:
-        return {}
-    extra: dict = {}
-    for frame in audio.tags.values():
-        frame_id = getattr(frame, "FrameID", "")
-        if frame_id != "TXXX":
-            continue
-        desc = str(getattr(frame, "desc", "") or "")
-        desc_key = desc.strip().casefold()
-        if desc_key not in {"musicbrainz album type", "albumtype", "release type"}:
-            continue
-        text = getattr(frame, "text", None)
-        if text:
-            extra["musicbrainz_albumtype"] = str(text[0])
-            break
-    return extra
 
 
 def _read_mutagen_vorbis(path: Path) -> dict:

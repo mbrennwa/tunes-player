@@ -9,7 +9,15 @@ TIER1_EXTENSIONS = frozenset({".flac", ".wav", ".aiff", ".aif", ".mp3", ".aac", 
 
 def has_tier1_extension(path: Path) -> bool:
     """Fast extension check for directory walks — no file I/O."""
-    return path.suffix.casefold() in TIER1_EXTENSIONS
+    return has_tier1_extension_name(path.name)
+
+
+def has_tier1_extension_name(name: str) -> bool:
+    """Fast extension check on a filename — no file I/O."""
+    dot = name.rfind(".")
+    if dot < 0:
+        return False
+    return name[dot:].casefold() in TIER1_EXTENSIONS
 
 
 def is_tier1_path(path: Path) -> bool:

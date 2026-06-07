@@ -141,6 +141,24 @@ class FolderAutoMonitorServiceTests(unittest.TestCase):
         reconcile.assert_called_once_with()
         enqueue.assert_called_once_with(folder=self._folder)
 
+    def test_enqueue_startup_scans_skips_complete_auto_monitor_folder(self) -> None:
+        self._config.add_music_folder(self._folder, auto_monitor=True)
+        self._config.record_folder_scan(
+            self._folder,
+            errors=0,
+            scan_kind="full",
+            catalog_total=10,
+        )
+
+        with (
+            patch.object(self._service, "_run_startup_reconcile"),
+            patch.object(self._service, "count_indexed_files", return_value=10),
+            patch.object(self._service, "enqueue_scan") as enqueue,
+        ):
+            self._service.enqueue_startup_scans()
+
+        enqueue.assert_not_called()
+
     def test_disable_auto_monitor_stops_active_scan(self) -> None:
         from tunes_player.core.services import _ScanJob
 
@@ -305,7 +323,23 @@ class FolderScanResumeServiceTests(unittest.TestCase):
 
         enqueue.assert_called_once_with(folder=self._folder)
 
-    def test_start_scan_passes_checkpoint_to_worker(self) -> None:
+    def test_folder_needs_scan_resume_clears_stale_incomplete_when_complete(self) -> None:
+        self._config.add_music_folder(self._folder, auto_monitor=False)
+        self._config.record_folder_scan(
+            self._folder,
+            errors=FOLDER_SCAN_INCOMPLETE,
+            scan_kind="full",
+            catalog_total=100,
+            checkpoint=str((Path(self._folder) / "x.flac").resolve()),
+        )
+
+        with patch.object(self._service, "count_indexed_files", return_value=100):
+            self.assertFalse(self._service._folder_needs_scan_resume(self._folder))
+
+        self.assertIsNone(self._config.folder_scan_checkpoint(self._folder))
+        self.assertEqual(self._config.folder_last_scan_errors(self._folder), 0)
+
+    def test_start_scan_does_not_pass_checkpoint_to_worker(self) -> None:
         from tunes_player.core.services import _ScanJob
 
         self._config.add_music_folder(self._folder)
@@ -321,7 +355,7 @@ class FolderScanResumeServiceTests(unittest.TestCase):
             )
 
         create_scan.assert_called_once()
-        self.assertEqual(create_scan.call_args.kwargs.get("checkpoint_path"), checkpoint)
+        self.assertIsNone(create_scan.call_args.kwargs.get("checkpoint_path"))
 
 
 if __name__ == "__main__":

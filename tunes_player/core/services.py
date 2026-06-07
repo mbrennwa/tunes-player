@@ -634,7 +634,8 @@ class PlayerService:
         enqueued: set[str] = set()
         for folder in self._config_manager.config.music_folders:
             if self.folder_auto_monitor_enabled(folder):
-                self.enqueue_scan(folder=folder)
+                if not self._folder_scan_is_complete(folder):
+                    self.enqueue_scan(folder=folder)
                 enqueued.add(str(Path(folder).expanduser().resolve()))
         for folder in self._config_manager.config.music_folders:
             resolved = str(Path(folder).expanduser().resolve())
@@ -957,7 +958,28 @@ class PlayerService:
     def count_indexed_files(self, folder: str) -> int:
         return self._store.count_files_under_folder(folder)
 
+    def _folder_scan_is_complete(self, folder: str) -> bool:
+        catalog_total = self._config_manager.folder_catalog_total(folder)
+        if catalog_total is None or catalog_total <= 0:
+            return False
+        errors = self._config_manager.folder_last_scan_errors(folder)
+        if errors is not None and errors not in (0, FOLDER_SCAN_INCOMPLETE):
+            return False
+        return self.count_indexed_files(folder) >= catalog_total
+
     def _folder_needs_scan_resume(self, folder: str) -> bool:
+        if self._folder_scan_is_complete(folder):
+            errors = self._config_manager.folder_last_scan_errors(folder)
+            checkpoint = self._config_manager.folder_scan_checkpoint(folder)
+            if errors == FOLDER_SCAN_INCOMPLETE or checkpoint:
+                catalog_total = self._config_manager.folder_catalog_total(folder)
+                self._config_manager.record_folder_scan(
+                    folder,
+                    errors=0,
+                    checkpoint="clear",
+                    catalog_total=catalog_total,
+                )
+            return False
         errors = self._config_manager.folder_last_scan_errors(folder)
         if errors == FOLDER_SCAN_INCOMPLETE:
             return True
@@ -1052,7 +1074,9 @@ class PlayerService:
         self._scan_last_checkpoint_at = 0
         checkpoint_path = None
         if not job.is_incremental:
-            checkpoint_path = self._config_manager.folder_scan_checkpoint(job.folder)
+            # Checkpoints are persisted for status only. The scanner always walks
+            # the full catalog and fast-skips files already indexed in the DB.
+            pass
         terminate_orphan_library_scans(db_path=self._config_manager.database_path)
         self._store.close()
         time.sleep(0.1)
