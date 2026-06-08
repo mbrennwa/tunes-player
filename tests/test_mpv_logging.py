@@ -10,6 +10,9 @@ from unittest import mock
 
 from tunes_player.core.playback.mpv_logging import (
     MPV_LOG_FILE_NAME,
+    archive_mpv_log,
+    describe_process_snapshot,
+    format_action_provenance,
     mpv_log_path,
     mpv_log_path_for_socket,
     mpv_logging_cli_args,
@@ -75,6 +78,39 @@ class MpvLoggingTests(unittest.TestCase):
         client._mpv_log_path = mpv_log_path_for_socket(client._socket_path)
         joined = " ".join(client._build_startup_args())
         self.assertIn("--log-file=/tmp/tunes-data/mpv-playback.log", joined)
+
+    def test_format_action_provenance_includes_caller(self) -> None:
+        def nested() -> str:
+            return format_action_provenance(depth=2, skip=1)
+
+        provenance = nested()
+        self.assertIn("nested(", provenance)
+        self.assertIn("test_mpv_logging.py", provenance)
+
+    def test_archive_mpv_log_preserves_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / MPV_LOG_FILE_NAME
+            log_path.write_text("disconnect context\n", encoding="utf-8")
+            archived = archive_mpv_log(log_path)
+            self.assertIsNotNone(archived)
+            assert archived is not None
+            self.assertTrue(archived.name.startswith("mpv-playback-disconnect-"))
+            self.assertEqual(
+                archived.read_text(encoding="utf-8"),
+                "disconnect context\n",
+            )
+
+    def test_archive_mpv_log_skips_empty_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / MPV_LOG_FILE_NAME
+            prepare_mpv_log_file(log_path)
+            self.assertIsNone(archive_mpv_log(log_path))
+
+    def test_describe_process_snapshot_includes_own_pid(self) -> None:
+        snapshot = describe_process_snapshot()
+        self.assertIn(f"own_pid={os.getpid()}", snapshot)
+        self.assertIn("tunes_player_count=", snapshot)
+        self.assertIn("mpv_count=", snapshot)
 
 
 if __name__ == "__main__":

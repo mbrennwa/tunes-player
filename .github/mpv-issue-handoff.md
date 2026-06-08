@@ -1,6 +1,6 @@
 # mpv playback work — agent handoff
 
-Handoff context for continuing **GitHub issue [#34](https://github.com/mbrennwa/tunes-player/issues/34)** (mpv IPC disconnect / unexpected quit) and related subprocess-mpv work from **#29**. Written 2026-06-07 after investigation on branch `devel`.
+Handoff context for continuing **GitHub issue [#34](https://github.com/mbrennwa/tunes-player/issues/34)** (mpv IPC disconnect / unexpected quit) and related subprocess-mpv work from **#29**. Last updated 2026-06-08 on branch `devel`.
 
 ---
 
@@ -57,6 +57,7 @@ Commits that matter:
 | `908ee31` | Load-time UI sync (`_playback_load_active`), engine owner thread — **also regressed grid play-button sync to O(n)** (fixed in #42) |
 | `4eb0c1b` | mpv-native playlist queue |
 | `c802c9a` | mpv file logging + disconnect diagnostics (#34) |
+| *(this commit)* | Targeted provenance logging — quit/reset/stale-kill caller chains, process snapshot on disconnect, mpv log archive (#34 phase 2) |
 
 See `docs/ARCHITECTURE.md` for playback-process design notes.
 
@@ -129,9 +130,9 @@ Diagnose separately; do not conflate with #34.
 
 ---
 
-## Diagnostic tooling already on `devel` (#34)
+## Diagnostic tooling on `devel` (#34)
 
-Implemented in `c802c9a`:
+### Phase 1 — `c802c9a`
 
 | Piece | Location |
 |-------|----------|
@@ -141,7 +142,64 @@ Implemented in `c802c9a`:
 | Disconnect snapshot | `playback_client._log_ipc_disconnect_diagnostics()` — pid, playing, playlist pos/count, loaded URI, **last 20 lines of mpv log** |
 | Tests | `tests/test_mpv_logging.py` |
 
-Intentional shutdown: `MpvPlaybackClient.quit()` sets `_shutdown=True`; `_mark_ipc_disconnected()` **suppresses** warning when shutdown was requested.
+### Phase 2 — targeted provenance
+
+| Piece | Location | When it logs |
+|-------|----------|--------------|
+| Caller chain helper | `format_action_provenance()` in `mpv_logging.py` | — |
+| Process snapshot | `describe_process_snapshot()` — `pgrep -f 'bin/tunes-player$'`, `pgrep -x mpv` | Unexpected IPC disconnect |
+| Log preservation | `archive_mpv_log()` → `mpv-playback-disconnect-<timestamp>.log` | Unexpected IPC disconnect |
+| mpv subprocess ready | `playback_client._start_process()` | After IPC connect |
+| Intentional quit | `MpvPlaybackClient.quit()` | Every `engine.quit()` |
+| Stale mpv SIGTERM | `_terminate_mpv_matching()` | Stale cleanup |
+| Engine reset | `_reset_engine_unlocked()` | Engine teardown |
+| Replace dead engine | `_ensure_engine_locked()` | Unavailable engine replaced |
+| Engine creation | `_create_playback_engine()` | New `MpvPlaybackClient` |
+
+Intentional shutdown: `MpvPlaybackClient.quit()` sets `_shutdown=True`; `_mark_ipc_disconnected()` **suppresses** disconnect warning when shutdown was requested.
+
+### Live log verification (2026-06-08)
+
+**Verified in production** (`~/.local/share/tunes-player/tunes-player.log`):
+
+```
+mpv subprocess ready pid=148937 client_id=140678410739328 socket=…/mpv-playback.sock …
+Created playback engine engine_id=140678410739328 socket=… 
+  (_create_playback_engine … <- _prewarm_playback_engine_worker …)
+mpv client quit requested mpv_pid=148133 … 
+  (quit … <- shutdown(services.py:1825) <- do_shutdown(app.py:1302) …)
+```
+
+- `engine_id` matches `client_id` — use to correlate disconnect vs live engine.
+- App restart at 07:24:39 logged intentional quit; **no** spurious `IPC disconnected` after it.
+
+**Not yet seen in production** (no unexpected IPC drop since phase 2):
+
+- `mpv IPC disconnect process snapshot`
+- `Preserved mpv log for disconnect diagnosis`
+- `Resetting playback engine` / `Replacing unavailable playback engine`
+- `Terminating stale mpv … (caller chain)`
+
+Jun 7 disconnects (15:51 Eagles, etc.) used **phase 1 only** — tail but no snapshot/archive/provenance.
+
+### Orphan mpv false alarm (2026-06-08)
+
+Two mpv processes were observed briefly; the extra one was **not** Tunes failing to stop mpv:
+
+```
+bash → python (hung agent integration test in /tmp/tunes-mpv-log-test-…)
+  └─ mpv on /tmp/…/test-mpv.sock
+```
+
+Parent Python **never exited** (test hung), so `@atexit _quit_live_mpv_clients()` and `client.quit()` never ran. Tunes mpv was correctly parented:
+
+```
+tunes-player → mpv on ~/.local/share/tunes-player/mpv-playback.sock
+```
+
+Tunes also sets **`PR_SET_PDEATHSIG`** (`_configure_mpv_child_process`) so mpv gets SIGTERM when its spawning process exits. Orphans from Tunes would imply parent hung/crashed without exiting, or `quit()` failed — not normal app quit (which logs `mpv client quit requested`).
+
+**Do not** count stray mpv from agent tests or hung scripts as #34 evidence. Use socket path to distinguish (`mpv-playback.sock` vs `/tmp/…`).
 
 ---
 
@@ -149,21 +207,29 @@ Intentional shutdown: `MpvPlaybackClient.quit()` sets `_shutdown=True`; `_mark_i
 
 Priority order — **fix trigger, not symptom**:
 
-1. ~~Add mpv file logging~~ — **done**
-2. **Log quit provenance** — caller tag or stack in `engine.quit()` / `_reset_engine_unlocked()`; log pid when `_terminate_stale_mpv_instances()` SIGTERMs
-3. **Single-instance guard or per-process socket** — prevent two apps sharing one mpv socket; or detect + warn loudly
-4. **Preserve mpv log on disconnect** — copy/rotate log before truncate on next start
+1. ~~Add mpv file logging~~ — **done** (`c802c9a`)
+2. ~~Log quit provenance~~ — **done** — caller chains on quit/reset/stale-kill
+3. ~~Preserve mpv log on disconnect~~ — **done** — `archive_mpv_log()`
+4. **Single-instance guard or per-process socket** — prevent two apps sharing one mpv socket; or detect + warn loudly
 5. **Controlled repro** — deliberate dual `tunes-player` launch; NAS album + cache staging; TIDAL append burst
 6. **Root fix** — only after trigger confirmed
 
 ### Commands at failure time
 
 ```bash
-pgrep -a tunes-player    # >1 line → strong multi-process suspect
-pgrep -a mpv
+pgrep -af 'bin/tunes-player$'   # >1 line → multi-process suspect
+pgrep -x mpv
+ls -lt ~/.local/share/tunes-player/mpv-playback-disconnect-*.log 2>/dev/null | head
 tail -40 ~/.local/share/tunes-player/tunes-player.log
 tail -60 ~/.local/share/tunes-player/mpv-playback.log
 ```
+
+Look for lines **immediately before** `IPC disconnected`:
+
+- `mpv client quit requested` → intentional Tunes quit (compare `client_id`)
+- `Resetting playback engine` → engine reset path
+- `Terminating stale mpv` → stale cleanup / second instance suspect
+- *(none of the above)* → external quit or mpv self-exit; check archived mpv log
 
 ### Out of scope (do not treat as #34 fix)
 
@@ -181,7 +247,7 @@ Review existing `load()` retry on disconnect — may mask root cause during init
 |------|------|
 | `tunes_player/engines/playback_client.py` | IPC read loop, `_mark_ipc_disconnected`, `_start_process`, `_terminate_stale_mpv_instances`, `_LIVE_CLIENTS`, `quit()` |
 | `tunes_player/core/services.py` | `_build_playlist_worker` (append loop), `_ensure_engine_locked`, `_reset_engine_unlocked`, `_playback_load_active`, `_playback_target_for_engine` |
-| `tunes_player/core/playback/mpv_logging.py` | Log path, CLI args, tail helper |
+| `tunes_player/core/playback/mpv_logging.py` | Log path, CLI args, tail, provenance, snapshot, archive |
 | `tunes_player/core/playback/mpv_cli.py` | mpv argv construction |
 | `tunes_player/core/playback/buffer_policy.py` | Demuxer/cache policy; `.mpd` → `local` class (dropout suspect) |
 | `tunes_player/core/playback/network_playback_cache.py` | NAS staging (background; not main-thread blocker) |
@@ -214,18 +280,17 @@ Review existing `load()` retry on disconnect — may mask root cause during init
 
 ```bash
 cd devel-work.git
-.venv/bin/python -m pytest tests/test_mpv_logging.py tests/test_playback_ipc.py -q
+.venv/bin/python -m unittest tests.test_mpv_logging -q
 .venv/bin/tunes-player
 ```
-
-No pytest in venv was noted in one session — install if missing: `.venv/bin/pip install pytest`
 
 ---
 
 ## Suggested first steps for new agent
 
 1. Read issue [#34](https://github.com/mbrennwa/tunes-player/issues/34) and owner comment on workarounds.
-2. Read `playback_client._log_ipc_disconnect_diagnostics` and `_terminate_stale_mpv_instances`.
-3. Implement **quit provenance logging** (small, high signal).
-4. Reproduce **dual-process** hypothesis: two `.venv/bin/tunes-player` instances, watch `tunes-player.log` + `mpv-playback.log`.
-5. Only then propose a structural fix (single-instance lock or per-process socket namespace).
+2. On next **unexpected** IPC disconnect, read `tunes-player.log` for quit/reset/stale lines **before** the disconnect warning; check `mpv-playback-disconnect-*.log`.
+3. Reproduce **dual-process** hypothesis: two `.venv/bin/tunes-player` instances, watch logs.
+4. Only then propose a structural fix (single-instance lock or per-process socket namespace).
+
+**Root cause status:** still **unconfirmed**. Best hypothesis remains shared socket + multi-process or undlogged quit sender. Phase-2 logging is meant to answer “who sent quit?” on the next incident.

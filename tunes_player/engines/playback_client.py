@@ -27,6 +27,9 @@ from tunes_player.core.playback.buffer_policy import (
 )
 from tunes_player.core.playback.mpv_cli import base_audio_options, mpv_cli_args_from_options
 from tunes_player.core.playback.mpv_logging import (
+    archive_mpv_log,
+    describe_process_snapshot,
+    format_action_provenance,
     mpv_log_path_for_socket,
     mpv_logging_cli_args,
     prepare_mpv_log_file,
@@ -243,6 +246,11 @@ class MpvPlaybackClient:
             _LOG.error("mpv IPC disconnected (%s)", details)
         else:
             _LOG.warning("mpv IPC disconnected before subprocess exit (%s)", details)
+        _LOG.warning(
+            "mpv IPC disconnect process snapshot: %s client_id=%s",
+            describe_process_snapshot(),
+            id(self),
+        )
         tail = tail_mpv_log(log_path)
         if tail:
             _LOG.warning(
@@ -253,6 +261,9 @@ class MpvPlaybackClient:
             )
         else:
             _LOG.warning("mpv log empty or unreadable: %s", log_path)
+        archived = archive_mpv_log(log_path)
+        if archived is not None:
+            _LOG.warning("Preserved mpv log for disconnect diagnosis: %s", archived)
 
     def _start_process(self) -> None:
         self._socket_path.parent.mkdir(parents=True, exist_ok=True)
@@ -311,6 +322,13 @@ class MpvPlaybackClient:
             daemon=True,
         )
         self._reader.start()
+        _LOG.info(
+            "mpv subprocess ready pid=%s client_id=%s socket=%s log=%s",
+            self._proc.pid if self._proc is not None else None,
+            id(self),
+            self._socket_path,
+            self._mpv_log_path,
+        )
         self.command("enable_event", "end-file", 1)
         self.command("enable_event", "start-file", 1)
 
@@ -452,7 +470,12 @@ class MpvPlaybackClient:
         for pid in pids:
             if pid in protected:
                 continue
-            _LOG.warning("Terminating stale mpv process %s matching %s", pid, pattern)
+            _LOG.warning(
+                "Terminating stale mpv process %s matching %s (%s)",
+                pid,
+                pattern,
+                format_action_provenance(skip=1),
+            )
             try:
                 os.kill(pid, signal.SIGTERM)
             except ProcessLookupError:
@@ -1309,6 +1332,15 @@ class MpvPlaybackClient:
     def quit(self) -> None:
         if self._shutdown:
             return
+        proc = self._proc
+        mpv_pid = proc.pid if proc is not None and hasattr(proc, "pid") else None
+        _LOG.info(
+            "mpv client quit requested mpv_pid=%s client_id=%s socket=%s (%s)",
+            mpv_pid,
+            id(self),
+            self._socket_path,
+            format_action_provenance(skip=1),
+        )
         self._shutdown = True
         self._loaded_uri = None
         self._track_end_signaled = False

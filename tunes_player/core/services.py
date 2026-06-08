@@ -1843,13 +1843,10 @@ class PlayerService:
             active = self._active_endpoint_id()
             if is_alsa_endpoint_id(active):
                 from tunes_player.platform.linux.alsa_mixer import (
-                    alsa_card_from_endpoint_id,
-                    alsa_mixer_adjustable,
+                    alsa_mixer_adjustable_for_endpoint,
                 )
 
-                card = alsa_card_from_endpoint_id(active)
-                if card is not None:
-                    return alsa_mixer_adjustable(card)
+                return alsa_mixer_adjustable_for_endpoint(active)
         return controller.uses_device_volume
 
     def _active_endpoint_id(self) -> str | None:
@@ -2335,8 +2332,21 @@ class PlayerService:
             log.debug("Playback engine reset failed", exc_info=True)
 
     def _reset_engine_unlocked(self) -> None:
-        self._release_exclusive_session()
         engine = self._engine
+        from tunes_player.core.playback.mpv_logging import format_action_provenance
+
+        mpv_pid = None
+        if engine is not None:
+            proc = getattr(engine, "_proc", None)
+            if proc is not None and hasattr(proc, "pid"):
+                mpv_pid = proc.pid
+        log.info(
+            "Resetting playback engine mpv_pid=%s engine_id=%s (%s)",
+            mpv_pid,
+            id(engine) if engine is not None else None,
+            format_action_provenance(skip=1),
+        )
+        self._release_exclusive_session()
         if engine is not None:
             engine.quit()
         self._engine = None
@@ -2465,8 +2475,15 @@ class PlayerService:
 
     def _ensure_engine_locked(self) -> PlaybackEngine | None:
         with self._engine_init_lock:
+            from tunes_player.core.playback.mpv_logging import format_action_provenance
+
             engine = self._engine
             if engine is not None and not self._engine_is_available(engine):
+                log.info(
+                    "Replacing unavailable playback engine engine_id=%s (%s)",
+                    id(engine),
+                    format_action_provenance(skip=1),
+                )
                 self._engine = None
                 try:
                     engine.quit()
@@ -2492,6 +2509,9 @@ class PlayerService:
         )
 
     def _create_playback_engine(self) -> PlaybackEngine | None:
+        from tunes_player.core.playback.mpv_logging import format_action_provenance
+
+        socket_path = self._config_manager.data_dir / "mpv-playback.sock"
         try:
             from tunes_player.engines.factory import create_playback_engine
 
@@ -2505,12 +2525,18 @@ class PlayerService:
                 use_device_output=self._device_volume and not profile.direct_alsa,
                 output_profile=profile,
                 on_event=self._on_engine_event,
-                ipc_socket_path=self._config_manager.data_dir / "mpv-playback.sock",
+                ipc_socket_path=socket_path,
                 endpoint_id=self._active_endpoint_id(),
             )
         except RuntimeError as exc:
             self._report_error(str(exc), exc=exc)
             return None
+        log.info(
+            "Created playback engine engine_id=%s socket=%s (%s)",
+            id(self._engine),
+            socket_path,
+            format_action_provenance(skip=1),
+        )
         return self._engine
 
     def _sync_exclusive_session_for_profile(self, profile: PlaybackOutputProfile) -> None:
