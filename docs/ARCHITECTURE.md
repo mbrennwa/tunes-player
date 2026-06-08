@@ -328,7 +328,7 @@ sync fragility ([#34](https://github.com/mbrennwa/tunes-player/issues/34), [#44]
 **Unwind ([#46](https://github.com/mbrennwa/tunes-player/issues/46)):** `devel` restored
 **in-process libmpv** (`engines/mpv.py`) and removed subprocess IPC, NFS staging cache,
 USB IRQ pinning, and the stall watchdog. **Kept:** bit-perfect output policy, volume modes,
-`#44` queue advance rules, minimal buffer policy, ALSA xrun **diagnostics** (log only),
+`#44` queue advance rules, minimal buffer policy,
 and a single **ao-reload → full-reload** retry on direct-ALSA `playback_error`.
 
 **Current architecture:**
@@ -850,7 +850,7 @@ Trackable open items. Ordered milestones are in [Roadmap](#roadmap-ordered) abov
 - [x] **`output_profile.py` policy** — format match, unity gain, honest resample labels.
 - [x] **`PlaybackPathInfo` from engine** — Now Playing path line from mpv/ALSA ground truth.
 - [x] **Slim stability stack** — drop NFS cache, USB IRQ, stall watchdog; minimal ALSA
-  error recovery + xrun diagnostics.
+  error recovery (`alsa_xrun_monitor` kept for benchmarks only).
 - [ ] **Bare-metal parity pass** — sign-off checklist above on physical hardware.
 
 Spike / reference: branch `spike/issue-29` (subprocess experiment).

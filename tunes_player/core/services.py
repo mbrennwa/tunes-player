@@ -190,7 +190,6 @@ class PlayerService:
         self._engine: PlaybackEngine | None = None
         self._engine_error: str | None = None
         self._engine_events: Queue[EngineEvent] = Queue()
-        self._alsa_xrun_monitor = self._create_alsa_xrun_monitor()
         self._playback_intended = False
         self._direct_alsa_recovery_at = 0.0
         self._direct_alsa_recovery_attempts = 0
@@ -1695,34 +1694,7 @@ class PlayerService:
             self._maybe_auto_advance_queue()
 
     def poll_playback_health(self) -> None:
-        """ALSA xrun diagnostics only (#46 — stall watchdog removed)."""
-        self._poll_alsa_xrun_monitor()
-
-    @staticmethod
-    def _create_alsa_xrun_monitor():
-        try:
-            from tunes_player.platform.linux.alsa_xrun_monitor import AlsaXrunMonitor
-        except ImportError:
-            return None
-        return AlsaXrunMonitor()
-
-    def _poll_alsa_xrun_monitor(self) -> None:
-        monitor = self._alsa_xrun_monitor
-        engine = self._engine
-        if monitor is None or not self._is_playing or engine is None:
-            return
-        if getattr(engine, "load_in_progress", False):
-            return
-        endpoint_id = self._active_endpoint_id()
-        if not is_alsa_endpoint_id(endpoint_id):
-            return
-        try:
-            monitor.poll(
-                mpv_audio_device=self._mpv_audio_device(),
-                endpoint_id=endpoint_id,
-            )
-        except OSError:
-            log.debug("ALSA xrun monitor poll failed", exc_info=True)
+        """Reserved for future playback health hooks (ALSA xrun polling disabled)."""
 
     def shutdown(self) -> None:
         self._pending_scan_jobs.clear()
@@ -1732,8 +1704,6 @@ class PlayerService:
         self._terminate_active_scan()
         self._current_scan_job = None
         self._release_exclusive_session()
-        if self._alsa_xrun_monitor is not None:
-            self._alsa_xrun_monitor.reset()
         engine = self._engine
         self._engine = None
         while True:
@@ -3065,8 +3035,6 @@ class PlayerService:
 
     def _handle_engine_event(self, event: EngineEvent) -> None:
         if event == "track_started":
-            if self._alsa_xrun_monitor is not None:
-                self._alsa_xrun_monitor.reset()
             self._on_engine_track_started()
             return
         if event == "track_eof":

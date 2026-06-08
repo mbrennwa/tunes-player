@@ -1,6 +1,7 @@
 """Poll ALSA PCM status for xrun counter increases (Linux direct output).
 
-Diagnostics only — logs ALSA XRUNs; does not trigger playback recovery (#46).
+Used by ``scripts/engine_stress_benchmark.py``. Not wired into the GTK app
+until track-boundary false positives are sorted out.
 """
 
 from __future__ import annotations
