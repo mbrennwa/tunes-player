@@ -12,11 +12,13 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
-from tunes_player.core.services import PlayerService
+from tunes_player.core.services import PlaybackState, PlayerService
 from tunes_player.ui.gtk.art import ArtLoader
 from tunes_player.ui.gtk.util import format_duration, join_detail, source_label
 
 _TIME_LABEL_CHARS = 7  # wide enough for "0:00:00"
+# Keep UI seeks inside mpv-safe range (see playback_client._SEEK_END_MARGIN_SEC).
+_SEEK_END_MARGIN_SEC = 1.0
 _ART_PIXEL_SIZE = 48
 _VOLUME_SLIDER_WIDTH = 180
 _CONTROLS_WIDTH = 388  # prev · play · next · volume · queue + spacing
@@ -226,13 +228,11 @@ class NowPlayingBar(Gtk.Box):
         self._pending_volume: float | None = None
         self._volume_apply_id: int | None = None
         self._seeking = False
-        self._seek_duration: float | None = None
         self._pending_seek: float | None = None
         self._seek_apply_id: int | None = None
-        self._progress_duration_sec: float | None = None
         service.subscribe(self._on_service_event)
         self._sync_from_service()
-        GLib.timeout_add(250, self._tick_progress)
+        GLib.timeout_add(100, self._tick_progress)
 
     def set_queue_handler(self, handler: Callable[[], None]) -> None:
         self._queue_handler = handler
@@ -303,7 +303,17 @@ class NowPlayingBar(Gtk.Box):
 
     def _begin_seek_drag(self) -> None:
         self._seeking = True
-        self._seek_duration = self._progress_duration_sec
+
+    def _playback_duration(self, state: PlaybackState) -> float | None:
+        duration = state.duration_sec
+        if duration is None or duration <= 0:
+            return None
+        return duration
+
+    def _clamp_seek_position(self, position_sec: float, duration_sec: float) -> float:
+        position_sec = max(0.0, min(position_sec, duration_sec))
+        safe_end = max(0.0, duration_sec - _SEEK_END_MARGIN_SEC)
+        return min(position_sec, safe_end)
 
     def _end_seek_drag(self) -> None:
         if self._seek_apply_id is not None:
@@ -313,7 +323,6 @@ class NowPlayingBar(Gtk.Box):
             self._apply_seek(self._pending_seek)
             self._pending_seek = None
         self._seeking = False
-        self._seek_duration = None
 
     def _on_progress_change_value(
         self,
@@ -323,8 +332,8 @@ class NowPlayingBar(Gtk.Box):
     ) -> bool:
         if self._updating_progress or self._seeking:
             return True
-        duration = self._progress_duration_sec
-        if duration is None or duration <= 0:
+        duration = self._playback_duration(self._service.get_playback_state())
+        if duration is None:
             return True
         self._apply_seek(value * duration)
         return True
@@ -332,19 +341,25 @@ class NowPlayingBar(Gtk.Box):
     def _on_progress_value_changed(self, scale: Gtk.Scale) -> None:
         if self._updating_progress or not self._seeking:
             return
-        duration = self._seek_duration or self._progress_duration_sec
-        if duration is None or duration <= 0:
+        duration = self._playback_duration(self._service.get_playback_state())
+        if duration is None:
             return
-        position_sec = max(0.0, min(scale.get_value(), 1.0)) * duration
+        position_sec = self._clamp_seek_position(
+            max(0.0, min(scale.get_value(), 1.0)) * duration,
+            duration,
+        )
+        fraction = position_sec / duration
+        if abs(scale.get_value() - fraction) > 0.001:
+            self._set_progress_fraction(fraction)
         self._update_seek_labels(position_sec, duration)
         self._pending_seek = position_sec
         self._schedule_seek_apply()
 
     def _apply_seek(self, position_sec: float) -> None:
-        duration = self._seek_duration or self._progress_duration_sec
-        if duration is None or duration <= 0:
+        duration = self._playback_duration(self._service.get_playback_state())
+        if duration is None:
             return
-        position_sec = max(0.0, min(position_sec, duration))
+        position_sec = self._clamp_seek_position(position_sec, duration)
         self._service.seek(position_sec)
         self._set_progress_fraction(position_sec / duration)
         self._update_seek_labels(position_sec, duration)
@@ -469,6 +484,7 @@ class NowPlayingBar(Gtk.Box):
     def _tick_progress(self) -> bool:
         if self._seeking:
             return True
+        self._service.refresh_playback_position_for_ui()
         state = self._service.get_playback_state()
         track = state.current_track
         if track is None:
@@ -477,20 +493,16 @@ class NowPlayingBar(Gtk.Box):
             self._update_seek_labels(0.0, 1.0)
             return True
 
-        duration = state.duration_sec
-        if duration is None or duration <= 0:
-            duration = track.duration_sec if hasattr(track, "duration_sec") else None
-        if duration is None or duration <= 0:
+        duration = self._playback_duration(state)
+        if duration is None:
             if self._progress.get_sensitive():
                 self._progress.set_sensitive(False)
             return True
 
-        duration = float(duration)
-        self._progress_duration_sec = duration
+        position_sec = max(0.0, min(state.position_sec, duration))
         if not self._progress.get_sensitive():
             self._progress.set_sensitive(True)
 
-        position_sec = max(0.0, min(state.position_sec, duration))
         self._set_progress_fraction(position_sec / duration)
         self._update_seek_labels(position_sec, duration)
         return True

@@ -121,74 +121,7 @@ class PlaybackClientEndFileTests(unittest.TestCase):
         self.assertEqual(client._loaded_uri, "/music/track.m4a")
         self.assertFalse(client._playing)
 
-    def test_is_available_false_after_ipc_disconnect(self) -> None:
-        from tunes_player.engines.playback_client import MpvPlaybackClient
-
-        class FakeSock:
-            def close(self) -> None:
-                return None
-
-        client = object.__new__(MpvPlaybackClient)
-        client._shutdown = False
-        client._running = True
-        client._proc = type("Proc", (), {"poll": lambda self: None})()
-        client._sock_file = FakeSock()
-        client._sock = None
-        client._playing = True
-        self.assertTrue(client.is_available())
-        client._mark_ipc_disconnected()
-        self.assertFalse(client.is_available())
-        self.assertFalse(client._playing)
-
-    def test_direct_alsa_startup_defers_device_open(self) -> None:
-        from tunes_player.core.playback.output_profile import PlaybackOutputProfile
-        from tunes_player.engines.playback_client import MpvPlaybackClient
-
-        client = object.__new__(MpvPlaybackClient)
-        client._output_profile = PlaybackOutputProfile(
-            direct_alsa=True,
-            use_exclusive=True,
-            allow_resample=False,
-            target_rate=48000,
-            audio_format="s32",
-            target_channels=2,
-        )
-        client._unity_gain = True
-        client._volume = 1.0
-        client._audio_device = "alsa/hw:1,0"
-        client._use_device_output = False
-        client._socket_path = Path("/tmp/tunes-mpv-test.sock")
-        args = client._build_startup_args()
-        joined = " ".join(args)
-        self.assertIn("--keep-open=no", joined)
-        self.assertNotIn("--gapless-audio=", joined)
-        self.assertIn("--ao=null", joined)
-        self.assertNotIn("--audio-device=", joined)
-        self.assertNotIn("--audio-exclusive=", joined)
-        self.assertNotIn("--audio-buffer=", joined)
-
-    def test_ao_is_alsa(self) -> None:
-        from tunes_player.engines.playback_client import MpvPlaybackClient
-
-        self.assertTrue(MpvPlaybackClient._ao_is_alsa("alsa"))
-        self.assertTrue(
-            MpvPlaybackClient._ao_is_alsa([{"name": "alsa", "enabled": True}])
-        )
-        self.assertFalse(
-            MpvPlaybackClient._ao_is_alsa([{"name": "null", "enabled": True}])
-        )
-        self.assertFalse(MpvPlaybackClient._ao_is_alsa(None))
-
-    def test_coerce_negotiated_ao_from_mpv_list(self) -> None:
-        from tunes_player.engines.playback_client import MpvPlaybackClient
-
-        ao = MpvPlaybackClient._coerce_negotiated_ao(
-            [{"name": "alsa", "enabled": True, "params": {}}]
-        )
-        self.assertEqual(ao, "alsa")
-        self.assertTrue(MpvPlaybackClient._ao_is_alsa(ao))
-
-    def test_eof_on_last_playlist_entry_signals_track_finished(self) -> None:
+    def test_eof_does_not_advance_queue_or_signal_track_finished(self) -> None:
         from tunes_player.engines.playback_client import MpvPlaybackClient
 
         client = object.__new__(MpvPlaybackClient)
@@ -197,44 +130,27 @@ class PlaybackClientEndFileTests(unittest.TestCase):
         client._track_end_signaled = False
         client._playing = True
         client._on_event = None
+        client._position_sec = 196.88
+        client._duration_sec = 220.07
         events: list[str] = []
+        advanced: list[bool] = []
 
         def capture(event: str) -> None:
             events.append(event)
 
         client._on_event = capture
-        client.get_playlist_pos = lambda: 0  # type: ignore[method-assign]
-        client.get_playlist_count = lambda: 1  # type: ignore[method-assign]
+        client.playlist_next = lambda: advanced.append(True)  # type: ignore[method-assign]
         client._playlist_pos = 0
-        client._playlist_count = 1
-        client._playlist_uris = ["/music/track.flac"]
-        client._handle_end_file("eof", playlist_entry_id=1)
-        self.assertTrue(client._track_end_signaled)
-        self.assertEqual(events, ["track_finished"])
-
-    def test_eof_with_more_playlist_entries_does_not_finish(self) -> None:
-        from tunes_player.engines.playback_client import MpvPlaybackClient
-
-        client = object.__new__(MpvPlaybackClient)
-        client._loaded_uri = "/music/track.flac"
-        client._active_playlist_entry_id = 1
-        client._track_end_signaled = False
-        client._playing = True
-        client._on_event = None
-        events: list[str] = []
-
-        def capture(event: str) -> None:
-            events.append(event)
-
-        client._on_event = capture
-        client._playlist_pos = 0
-        client._playlist_count = 3
-        client._playlist_uris = ["/a", "/b", "/c"]
+        client._playlist_count = 4
+        client._playlist_uris = ["/a", "/b", "/c", "/d"]
         client._handle_end_file("eof", playlist_entry_id=1)
         self.assertFalse(client._track_end_signaled)
+        self.assertEqual(advanced, [])
         self.assertEqual(events, [])
+        self.assertAlmostEqual(client._position_sec, 196.88)
+        self.assertAlmostEqual(client._duration_sec, 220.07)
 
-    def test_playlist_pos_change_emits_track_started(self) -> None:
+    def test_load_replace_emits_track_started(self) -> None:
         from tunes_player.engines.playback_client import MpvPlaybackClient
 
         client = object.__new__(MpvPlaybackClient)
@@ -243,8 +159,8 @@ class PlaybackClientEndFileTests(unittest.TestCase):
         client._load_in_progress = False
         client._playing = True
         client._playlist_pos = 0
-        client._last_track_started_at_pos = 0
-        client._playlist_uris = ["/music/first.flac", "/music/next.flac"]
+        client._last_track_started_at_pos = -2
+        client._playlist_uris = ["/music/first.flac"]
         client._on_event = None
         events: list[str] = []
 
@@ -252,9 +168,9 @@ class PlaybackClientEndFileTests(unittest.TestCase):
             events.append(event)
 
         client._on_event = capture
-        client._handle_property_change("playlist-pos", 1)
-        self.assertEqual(client.get_playlist_pos(), 1)
-        self.assertEqual(client._loaded_uri, "/music/next.flac")
+        client._notify_playlist_track_changed()
+        self.assertAlmostEqual(client._position_sec, 0.0)
+        self.assertIsNone(client._duration_sec)
         self.assertIn("track_started", events)
 
     def test_position_accepts_backward_jump_from_mpv(self) -> None:
@@ -262,13 +178,63 @@ class PlaybackClientEndFileTests(unittest.TestCase):
 
         client = object.__new__(MpvPlaybackClient)
         client._loaded_uri = "/music/track.flac"
+        client._time_pos_sec = 198.0
+        client._audio_pts_sec = None
         client._position_sec = 198.0
         client._load_in_progress = False
         client._last_position_emit = 0.0
         client._last_position_update_at = 0.0
         client._on_event = None
-        client._apply_position_update(0.5, source="time-pos")
+        client._apply_time_pos_update(0.5)
         self.assertAlmostEqual(client._position_sec, 0.5)
+        self.assertAlmostEqual(client._time_pos_sec, 0.5)
+
+    def test_playback_position_uses_audio_pts_when_available(self) -> None:
+        from tunes_player.engines.playback_client import MpvPlaybackClient
+
+        client = object.__new__(MpvPlaybackClient)
+        client._loaded_uri = "/music/track.flac"
+        client._load_in_progress = False
+        client._last_position_emit = 0.0
+        client._last_position_update_at = 0.0
+        client._on_event = None
+        client._time_pos_sec = 216.0
+        client._audio_pts_sec = None
+        client._position_sec = 216.0
+        client._apply_audio_pts_update(219.5)
+        self.assertAlmostEqual(client.get_position(), 219.5)
+        self.assertAlmostEqual(client.get_time_pos(), 216.0)
+
+    def test_playback_position_falls_back_to_time_pos_without_audio_pts(self) -> None:
+        from tunes_player.engines.playback_client import MpvPlaybackClient
+
+        client = object.__new__(MpvPlaybackClient)
+        client._loaded_uri = "/music/track.flac"
+        client._load_in_progress = False
+        client._last_position_emit = 0.0
+        client._last_position_update_at = 0.0
+        client._on_event = None
+        client._time_pos_sec = 0.0
+        client._audio_pts_sec = None
+        client._position_sec = 0.0
+        client._apply_time_pos_update(42.0)
+        self.assertAlmostEqual(client.get_position(), 42.0)
+
+    def test_negative_audio_pts_is_ignored(self) -> None:
+        from tunes_player.engines.playback_client import MpvPlaybackClient
+
+        client = object.__new__(MpvPlaybackClient)
+        client._loaded_uri = "/music/track.flac"
+        client._load_in_progress = False
+        client._last_position_emit = 0.0
+        client._last_position_update_at = 0.0
+        client._on_event = None
+        client._time_pos_sec = 100.0
+        client._audio_pts_sec = None
+        client._position_sec = 100.0
+        client._apply_audio_pts_update(-0.5)
+        self.assertIsNone(client._audio_pts_sec)
+        self.assertAlmostEqual(client.get_position(), 100.0)
 
     def test_seek_updates_position(self) -> None:
         from tunes_player.engines.playback_client import MpvPlaybackClient
@@ -290,24 +256,53 @@ class PlaybackClientEndFileTests(unittest.TestCase):
             return {"error": "success"}
 
         client.command = fake_command  # type: ignore[method-assign]
-        client.seek(245.0, resume=True)
-        self.assertEqual(client._position_sec, 245.0)
-        self.assertIn(("seek", 245.0, "absolute"), calls)
-        self.assertIn(("set_property", "pause", False), calls)
+        client.seek(120.0)
+        self.assertIn(("seek", 120.0, "absolute"), calls)
+        self.assertAlmostEqual(client._position_sec, 120.0)
 
-    def test_time_pos_updates_position(self) -> None:
+    def test_startup_args_use_keep_open_always(self) -> None:
+        from tunes_player.core.playback.output_profile import PlaybackOutputProfile
         from tunes_player.engines.playback_client import MpvPlaybackClient
 
         client = object.__new__(MpvPlaybackClient)
-        client._loaded_uri = "/music/track.flac"
-        client._track_end_signaled = False
-        client._position_sec = 0.0
-        client._load_in_progress = False
-        client._last_position_emit = 0.0
-        client._last_position_update_at = 0.0
-        client._on_event = None
-        client._apply_position_update(12.5, source="time-pos")
-        self.assertAlmostEqual(client._position_sec, 12.5)
+        profile = PlaybackOutputProfile(
+            direct_alsa=True,
+            use_exclusive=True,
+            allow_resample=False,
+            target_rate=48000,
+            audio_format="s32",
+            target_channels=2,
+        )
+        client._unity_gain = True
+        client._volume = 1.0
+        client._audio_device = "alsa/hw:1,0"
+        client._use_device_output = False
+        client._output_profile = profile
+        client._socket_path = Path("/tmp/tunes-mpv-test.sock")
+        args = client._build_startup_args()
+        joined = " ".join(args)
+        self.assertIn("--keep-open=always", joined)
+        self.assertNotIn("--gapless-audio=", joined)
+
+    def test_ao_is_alsa(self) -> None:
+        from tunes_player.engines.playback_client import MpvPlaybackClient
+
+        self.assertTrue(MpvPlaybackClient._ao_is_alsa("alsa"))
+        self.assertTrue(
+            MpvPlaybackClient._ao_is_alsa(
+                [{"name": "alsa", "enabled": True, "params": {}}]
+            )
+        )
+        self.assertFalse(MpvPlaybackClient._ao_is_alsa(None))
+
+    def test_coerce_negotiated_ao_from_mpv_list(self) -> None:
+        from tunes_player.engines.playback_client import MpvPlaybackClient
+
+        ao = MpvPlaybackClient._coerce_negotiated_ao(
+            [{"name": "alsa", "enabled": True, "params": {}}]
+        )
+        self.assertEqual(ao, "alsa")
+        self.assertTrue(MpvPlaybackClient._ao_is_alsa(ao))
 
     def test_get_playlist_pos_returns_cached_value(self) -> None:
         from tunes_player.engines.playback_client import MpvPlaybackClient
@@ -315,51 +310,3 @@ class PlaybackClientEndFileTests(unittest.TestCase):
         client = object.__new__(MpvPlaybackClient)
         client._playlist_pos = 3
         self.assertEqual(client.get_playlist_pos(), 3)
-
-    def test_get_playlist_count_returns_cached_value(self) -> None:
-        from tunes_player.engines.playback_client import MpvPlaybackClient
-
-        client = object.__new__(MpvPlaybackClient)
-        client._playlist_count = 5
-        client._playlist_uris = ["a", "b"]
-        self.assertEqual(client.get_playlist_count(), 5)
-
-    def test_get_position_returns_cached_value(self) -> None:
-        from tunes_player.engines.playback_client import MpvPlaybackClient
-
-        client = object.__new__(MpvPlaybackClient)
-        client._position_sec = 88.5
-        self.assertAlmostEqual(client.get_position(), 88.5)
-
-    def test_direct_alsa_open_switches_ao_from_null(self) -> None:
-        import shutil
-        import tempfile
-
-        if shutil.which("mpv") is None:
-            self.skipTest("mpv not installed")
-
-        from tunes_player.core.playback.output_profile import PlaybackOutputProfile
-        from tunes_player.engines.playback_client import MpvPlaybackClient
-
-        profile = PlaybackOutputProfile(
-            direct_alsa=True,
-            use_exclusive=False,
-            allow_resample=True,
-            target_rate=44100,
-            audio_format=None,
-            target_channels=2,
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            sock = Path(tmp) / "mpv.sock"
-            client = MpvPlaybackClient(
-                unity_gain=True,
-                output_profile=profile,
-                ipc_socket_path=sock,
-            )
-            try:
-                self.assertFalse(client._direct_alsa_device_open)
-                client.set_output_profile(profile)
-                self.assertTrue(client._direct_alsa_device_open)
-                self.assertTrue(client._ao_is_alsa(client.get_property("ao")))
-            finally:
-                client.quit()

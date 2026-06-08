@@ -53,12 +53,25 @@ if TYPE_CHECKING:
 EngineCallback = Callable[[EngineEvent], None]
 
 _LOG = logging.getLogger(__name__)
+_TIMELINE_LOG = logging.getLogger("tunes_player.playback.timeline")
 _CONNECT_TIMEOUT_SEC = 5.0
 _COMMAND_TIMEOUT_SEC = 5.0
 _POSITION_INTERVAL_SEC = 0.25
+# Seeking at or past decode EOF makes mpv emit end-file; queue advance is Tunes-owned.
+_SEEK_END_MARGIN_SEC = 1.0
+# Playback position for UI and queue logic: mpv audio-pts when valid, else time-pos.
+# Never blend or extrapolate — see _resolve_playback_position_sec().
 _LIVE_CLIENTS: weakref.WeakSet = weakref.WeakSet()
 
 LoadFileMode = Literal["replace", "append", "append-play"]
+
+
+def _short_uri(uri: str | None) -> str:
+    if not uri:
+        return ""
+    if len(uri) <= 72:
+        return uri
+    return "..." + uri[-69:]
 
 
 def _descendant_pids(root_pid: int | None = None) -> set[int]:
@@ -149,6 +162,8 @@ class MpvPlaybackClient:
         self._command_lock = threading.Lock()
 
         self._loaded_uri: str | None = None
+        self._time_pos_sec = 0.0
+        self._audio_pts_sec: float | None = None
         self._position_sec = 0.0
         self._duration_sec: float | None = None
         self._playing = False
@@ -182,7 +197,7 @@ class MpvPlaybackClient:
         profile = self._output_profile
         args = [
             "--idle=yes",
-            "--keep-open=no",
+            "--keep-open=always",
             f"--input-ipc-server={self._socket_path}",
             "--input-default-bindings=no",
             "--input-vo-keyboard=no",
@@ -381,9 +396,7 @@ class MpvPlaybackClient:
         self.command("observe_property", 7, "audio-format")
         self.command("observe_property", 8, "alsa-resample")
         self.command("observe_property", 9, "audio-channels")
-        self.command("observe_property", 10, "audio-pts")
-        self.command("observe_property", 11, "playlist-pos")
-        self.command("observe_property", 12, "playlist-count")
+        self.command("observe_property", 12, "audio-pts")
 
     def _read_loop(self) -> None:
         assert self._sock_file is not None
@@ -482,6 +495,33 @@ class MpvPlaybackClient:
                 continue
         time.sleep(0.2)
 
+    def _timeline_remaining_sec(self) -> float | None:
+        duration = getattr(self, "_duration_sec", None)
+        if duration is None or duration <= 0:
+            return None
+        return max(0.0, duration - getattr(self, "_position_sec", 0.0))
+
+    def _timeline_snapshot(self) -> str:
+        duration = getattr(self, "_duration_sec", None)
+        position = getattr(self, "_position_sec", 0.0)
+        time_pos = getattr(self, "_time_pos_sec", 0.0)
+        audio_pts = getattr(self, "_audio_pts_sec", None)
+        pts = f"{audio_pts:.2f}s" if audio_pts is not None else "?"
+        remaining = self._timeline_remaining_sec()
+        rem = f"{remaining:.2f}s" if remaining is not None else "?"
+        dur = f"{duration:.2f}s" if duration is not None else "?"
+        playlist_pos = getattr(self, "_playlist_pos", -1)
+        playlist_uris = getattr(self, "_playlist_uris", [])
+        playlist_count = getattr(self, "_playlist_count", 0)
+        count = max(playlist_count, len(playlist_uris))
+        playlist = f"{playlist_pos + 1}/{count}" if count > 0 and playlist_pos >= 0 else "n/a"
+        playing = getattr(self, "_playing", False)
+        return (
+            f"pos={position:.2f}s time-pos={time_pos:.2f}s audio-pts={pts} "
+            f"dur={dur} rem={rem} playlist={playlist} playing={playing} "
+            f"uri={_short_uri(getattr(self, '_loaded_uri', None))!r}"
+        )
+
     def _handle_property_change(self, name: str | None, data: object) -> None:
         if name in {
             "ao",
@@ -497,14 +537,16 @@ class MpvPlaybackClient:
                 self._emit("playback_path_changed")
             return
 
-        if name in ("time-pos", "audio-pts"):
+        if name == "time-pos":
             if data is None:
                 return
             try:
                 pos = float(data)
             except (TypeError, ValueError):
                 return
-            self._apply_position_update(pos, source=name)
+            self._apply_time_pos_update(pos)
+        elif name == "audio-pts":
+            self._apply_audio_pts_update(data)
         elif name == "duration":
             if data is None:
                 return
@@ -514,7 +556,15 @@ class MpvPlaybackClient:
                 return
             if duration <= 0:
                 return
+            previous = self._duration_sec
             self._duration_sec = duration
+            if previous is not None and abs(duration - previous) > 0.5:
+                _TIMELINE_LOG.info(
+                    "duration %.2f -> %.2f %s",
+                    previous,
+                    duration,
+                    self._timeline_snapshot(),
+                )
             if self._load_in_progress:
                 return
             self._emit("duration_changed")
@@ -526,30 +576,23 @@ class MpvPlaybackClient:
             paused = data is True or data == "yes"
             self._playing = not paused and self._loaded_uri is not None
             self._emit("playing_changed")
-        elif name == "playlist-pos":
-            try:
-                pos = int(data) if data is not None else -1
-            except (TypeError, ValueError):
-                pos = -1
-            if pos != self._playlist_pos:
-                self._playlist_pos = pos
-                self._sync_loaded_uri_from_cached_playlist()
-                if pos >= 0:
-                    self._notify_playlist_track_changed()
-        elif name == "playlist-count":
-            try:
-                self._playlist_count = int(data) if data is not None else 0
-            except (TypeError, ValueError):
-                pass
 
     def _notify_playlist_track_changed(self) -> None:
         pos = self._playlist_pos
         if pos == self._last_track_started_at_pos:
             return
+        _TIMELINE_LOG.info(
+            "track_started emit playlist_index=%s %s",
+            pos,
+            self._timeline_snapshot(),
+        )
         self._last_track_started_at_pos = pos
         self._track_end_signaled = False
         self._load_in_progress = False
+        self._seed_playback_position(0.0)
+        self._duration_sec = None
         self._emit("track_started")
+        self._emit("position_changed")
         self._emit("duration_changed")
         self._emit("playing_changed")
 
@@ -559,6 +602,12 @@ class MpvPlaybackClient:
                 self._active_playlist_entry_id = int(playlist_entry_id)
             except (TypeError, ValueError):
                 pass
+        _TIMELINE_LOG.info(
+            "start-file entry=%s active=%s %s",
+            playlist_entry_id,
+            self._active_playlist_entry_id,
+            self._timeline_snapshot(),
+        )
         self._load_in_progress = False
 
     def _sync_loaded_uri_from_cached_playlist(self) -> None:
@@ -573,24 +622,38 @@ class MpvPlaybackClient:
         file_error: object = None,
         playlist_entry_id: object = None,
     ) -> None:
+        snapshot = self._timeline_snapshot()
         if not end_file_applies_to_playlist_entry(
             active_entry_id=self._active_playlist_entry_id,
             event_entry_id=playlist_entry_id,
         ):
+            _TIMELINE_LOG.debug(
+                "end-file ignored (stale entry) reason=%s event_entry=%s active_entry=%s %s",
+                reason,
+                playlist_entry_id,
+                self._active_playlist_entry_id,
+                snapshot,
+            )
             return
         if end_file_triggers_playback_error(reason):
             detail = f": {file_error}" if file_error else ""
             _LOG.warning("mpv end-file reason=%s%s", reason, detail)
+            _TIMELINE_LOG.warning(
+                "end-file error reason=%s event_entry=%s %s%s",
+                reason,
+                playlist_entry_id,
+                snapshot,
+                detail,
+            )
             self._playing = False
             self._emit("playback_error")
             return
-        if not end_file_triggers_track_finished(reason):
-            return
-        pos = self._playlist_pos
-        count = max(self._playlist_count, len(self._playlist_uris))
-        if count > 0 and pos < count - 1:
-            return
-        self._signal_track_finished()
+        if end_file_triggers_track_finished(reason):
+            _TIMELINE_LOG.debug(
+                "end-file demuxer eof (ignored for queue) event_entry=%s %s",
+                playlist_entry_id,
+                snapshot,
+            )
 
     def command(self, *args: object, timeout: float = _COMMAND_TIMEOUT_SEC) -> dict[str, Any]:
         if self._sock_file is None:
@@ -899,7 +962,7 @@ class MpvPlaybackClient:
                 self._playlist_count = 1
                 self._last_track_started_at_pos = -2
                 self._track_end_signaled = False
-                self._position_sec = max(0.0, start_sec)
+                self._seed_playback_position(max(0.0, start_sec))
                 self._duration_sec = None
                 self._last_position_emit = 0.0
                 self._last_position_update_at = time.monotonic()
@@ -1109,7 +1172,7 @@ class MpvPlaybackClient:
                 self._reload_direct_alsa_output(stop_first=False)
                 if resume_sec > 0.0:
                     self.command("seek", resume_sec, "absolute")
-                    self._position_sec = resume_sec
+                    self._seed_playback_position(resume_sec)
                 self._touch_position_clock()
                 self.set_property("pause", False)
                 self._playing = True
@@ -1122,7 +1185,7 @@ class MpvPlaybackClient:
                 _LOG.warning("Light direct ALSA recovery for %s at %.2fs", preview, resume_sec)
                 if resume_sec > 0.0:
                     self.command("seek", resume_sec, "absolute")
-                    self._position_sec = resume_sec
+                    self._seed_playback_position(resume_sec)
                 self._touch_position_clock()
                 self.set_property("pause", False)
                 self._playing = True
@@ -1142,8 +1205,9 @@ class MpvPlaybackClient:
                 self.command("loadfile", uri, "replace")
             if resume_sec > 0.5:
                 self.command("seek", resume_sec, "absolute")
-                self._position_sec = resume_sec
-            self._touch_position_clock()
+                self._seed_playback_position(resume_sec)
+            else:
+                self._touch_position_clock()
             self.set_property("pause", False)
             self._playing = True
             self._emit("playing_changed")
@@ -1191,8 +1255,9 @@ class MpvPlaybackClient:
                 self.command("loadfile", uri, "replace")
             if resume_sec > 0.5:
                 self.command("seek", resume_sec, "absolute")
-                self._position_sec = resume_sec
-            self._touch_position_clock()
+                self._seed_playback_position(resume_sec)
+            else:
+                self._touch_position_clock()
             self.set_property("pause", False)
             self._playing = True
             self._emit("playing_changed")
@@ -1242,23 +1307,36 @@ class MpvPlaybackClient:
         self._playlist_uris = []
         self._last_track_started_at_pos = -2
         self._playing = False
-        self._position_sec = 0.0
+        self._seed_playback_position(0.0)
         self._duration_sec = None
         self._emit("playing_changed")
         self._emit("position_changed")
         self._emit("duration_changed")
 
+    def max_seek_position_sec(self) -> float | None:
+        """Furthest absolute seek target that should not trigger mpv EOF."""
+        duration = self._duration_sec
+        if duration is None or duration <= 0:
+            return None
+        return max(0.0, duration - _SEEK_END_MARGIN_SEC)
+
     def seek(self, position_sec: float, *, resume: bool | None = None) -> None:
         if self._loaded_uri is None:
             return
         target = max(0.0, position_sec)
-        duration = self._duration_sec
-        if duration is not None and duration > 0:
-            target = min(target, max(0.0, duration - 0.05))
+        seek_cap = self.max_seek_position_sec()
+        if seek_cap is not None:
+            target = min(target, seek_cap)
+        _TIMELINE_LOG.info(
+            "seek requested=%.2f target=%.2f cap=%s %s",
+            position_sec,
+            target,
+            f"{seek_cap:.2f}" if seek_cap is not None else "none",
+            self._timeline_snapshot(),
+        )
         should_resume = self._playing if resume is None else resume
         self.command("seek", target, "absolute")
-        self._position_sec = target
-        self._touch_position_clock()
+        self._seed_playback_position(target)
         if should_resume:
             try:
                 self.set_property("pause", False)
@@ -1288,11 +1366,37 @@ class MpvPlaybackClient:
         gain = max(0.0, min(1.0, self._volume))
         self.set_property("volume", gain * 100.0)
 
-    def _apply_position_update(self, pos: float, *, source: str) -> None:
-        del source
-        pos = max(0.0, pos)
-        changed = abs(pos - self._position_sec) > 0.01
-        self._position_sec = pos
+    @staticmethod
+    def _coerce_optional_seconds(data: object) -> float | None:
+        if data is None:
+            return None
+        try:
+            value = float(data)
+        except (TypeError, ValueError):
+            return None
+        if value < 0:
+            return None
+        return value
+
+    def _resolve_playback_position_sec(self) -> float:
+        """Audible position: audio-pts when mpv provides it, otherwise time-pos."""
+        if self._audio_pts_sec is not None:
+            return self._audio_pts_sec
+        return self._time_pos_sec
+
+    def _seed_playback_position(self, position_sec: float) -> None:
+        """Set position after seek/load until mpv property updates arrive."""
+        position_sec = max(0.0, position_sec)
+        self._time_pos_sec = position_sec
+        self._audio_pts_sec = None
+        self._position_sec = position_sec
+        self._touch_position_clock()
+
+    def _publish_playback_position(self) -> None:
+        resolved = self._resolve_playback_position_sec()
+        previous = self._position_sec
+        changed = abs(resolved - previous) > 0.01
+        self._position_sec = resolved
         now = time.monotonic()
         self._last_position_update_at = now
         if self._load_in_progress:
@@ -1301,9 +1405,40 @@ class MpvPlaybackClient:
             self._last_position_emit = now
             self._emit("position_changed")
 
+    def _apply_time_pos_update(self, pos: float) -> None:
+        pos = max(0.0, pos)
+        previous = self._time_pos_sec
+        if not self._load_in_progress and previous > 1.0:
+            if pos < previous - 1.0:
+                remaining = self._timeline_remaining_sec()
+                _TIMELINE_LOG.warning(
+                    "time-pos backward %.2f -> %.2f rem=%s %s",
+                    previous,
+                    pos,
+                    f"{remaining:.2f}s" if remaining is not None else "?",
+                    self._timeline_snapshot(),
+                )
+            elif pos > previous + 8.0:
+                _TIMELINE_LOG.warning(
+                    "time-pos forward jump %.2f -> %.2f %s",
+                    previous,
+                    pos,
+                    self._timeline_snapshot(),
+                )
+        self._time_pos_sec = pos
+        self._publish_playback_position()
+
+    def _apply_audio_pts_update(self, data: object) -> None:
+        self._audio_pts_sec = self._coerce_optional_seconds(data)
+        self._publish_playback_position()
+
     def get_position(self) -> float:
-        """Return cached playback position; never blocks on mpv IPC."""
+        """Return cached playback position (audio-pts primary, time-pos fallback)."""
         return self._position_sec
+
+    def get_time_pos(self) -> float:
+        """Return cached mpv decode/sync timeline; for diagnostics only."""
+        return self._time_pos_sec
 
     @property
     def load_in_progress(self) -> bool:

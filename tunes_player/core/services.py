@@ -58,6 +58,8 @@ EventCallback = Callable[[str], None]
 Unsubscribe = Callable[[], None]
 
 log = logging.getLogger(__name__)
+_timeline_log = logging.getLogger("tunes_player.playback.timeline")
+_QUEUE_END_MARGIN_SEC = 1.0
 
 MainThreadHook: TypeAlias = Callable[[Callable[[], None]], None]
 
@@ -187,7 +189,6 @@ class PlayerService:
         self._output_profile: PlaybackOutputProfile | None = None
         self._exclusive_session: object | None = None
         self._position_sec = 0.0
-        self._position_synced_at: float | None = None
         self._duration_sec: float | None = None
         self._engine: PlaybackEngine | None = None
         self._engine_error: str | None = None
@@ -199,6 +200,8 @@ class PlayerService:
         self._direct_alsa_light_recovery_failures = 0
         self._direct_alsa_watchdog_pos = 0.0
         self._direct_alsa_watchdog_at = 0.0
+        self._queue_index = -1
+        self._auto_advanced_from_index: int | None = None
         self._scan_process: multiprocessing.Process | None = None
         self._scan_queue: multiprocessing.Queue | None = None
         self._scanning_folder: str | None = None
@@ -1299,7 +1302,7 @@ class PlayerService:
             no_volume_control=volume_mode == "fixed",
             volume_mode=volume_mode,
             output_using_fallback=self._output_using_fallback(),
-            position_sec=self._playback_position(),
+            position_sec=self._position_sec,
             duration_sec=self._duration_sec,
         )
 
@@ -1330,28 +1333,17 @@ class PlayerService:
     def _playlist_position(self) -> int:
         if not self._playlist_meta:
             return -1
-        engine = self._engine
-        if engine is None:
+        if self._queue_index < 0:
             return 0
-        pos_fn = getattr(engine, "get_playlist_pos", None)
-        if not callable(pos_fn):
-            return 0
-        pos = pos_fn()
-        return pos if pos >= 0 else 0
+        return min(self._queue_index, len(self._playlist_meta) - 1)
 
     def play_playlist_index(self, index: int) -> None:
         if index < 0 or index >= len(self._playlist_meta):
             return
-        engine = self._engine
-        if engine is None or self._playback_transport_blocked():
+        if self._playback_transport_blocked():
             return
-        play_index = getattr(engine, "playlist_play_index", None)
-        if not callable(play_index):
-            return
-        play_index(index)
-        self._playback_intended = True
-        self._is_playing = True
-        self._emit("playback_changed")
+        self._auto_advanced_from_index = None
+        self._play_queue_index(index)
 
     def play_track(self, track_id: str) -> None:
         if track_id.startswith("tidal:"):
@@ -1546,24 +1538,26 @@ class PlayerService:
     def skip_next(self) -> None:
         if not self._playlist_meta:
             return
-        engine = self._engine
-        if engine is None:
-            return
         pos = self._playlist_position()
-        count_fn = getattr(engine, "get_playlist_count", None)
-        count = count_fn() if callable(count_fn) else len(self._playlist_meta)
-        if pos + 1 >= count:
+        _timeline_log.info(
+            "skip_next requested queue[%s/%s] service_pos=%.2f dur=%s track=%s",
+            pos,
+            len(self._playlist_meta),
+            self._position_sec,
+            self._duration_sec,
+            self._current_track.id if self._current_track else None,
+        )
+        if pos + 1 >= len(self._playlist_meta):
+            engine = self._engine
+            if engine is not None:
+                engine.pause()
             self._playback_intended = False
-            engine.pause()
+            self._is_playing = False
             self._sync_from_engine()
             self._emit("playback_changed")
             return
-        next_fn = getattr(engine, "playlist_next", None)
-        if callable(next_fn):
-            next_fn()
-        self._playback_intended = True
-        self._sync_from_engine()
-        self._emit("playback_changed")
+        self._auto_advanced_from_index = None
+        self._play_queue_index(pos + 1)
 
     def skip_previous(self) -> None:
         if not self._playlist_meta:
@@ -1578,12 +1572,8 @@ class PlayerService:
             return
         pos = self._playlist_position()
         if pos > 0:
-            prev_fn = getattr(engine, "playlist_prev", None)
-            if callable(prev_fn):
-                prev_fn()
-            self._playback_intended = True
-            self._sync_from_engine()
-            self._emit("playback_changed")
+            self._auto_advanced_from_index = None
+            self._play_queue_index(pos - 1)
 
     def seek(self, position_sec: float) -> None:
         engine = self._engine
@@ -1592,6 +1582,11 @@ class PlayerService:
         if not self._engine_is_available(engine):
             return
         target = max(0.0, position_sec)
+        seek_cap_fn = getattr(engine, "max_seek_position_sec", None)
+        if callable(seek_cap_fn):
+            seek_cap = seek_cap_fn()
+            if seek_cap is not None:
+                target = min(target, seek_cap)
         was_playing = self._is_playing
         try:
             engine.seek(target, resume=was_playing)
@@ -1754,7 +1749,10 @@ class PlayerService:
 
     def _poll_alsa_xrun_monitor(self) -> None:
         monitor = self._alsa_xrun_monitor
-        if monitor is None or not self._is_playing or self._engine is None:
+        engine = self._engine
+        if monitor is None or not self._is_playing or engine is None:
+            return
+        if getattr(engine, "load_in_progress", False):
             return
         endpoint_id = self._active_endpoint_id()
         if not is_alsa_endpoint_id(endpoint_id):
@@ -2618,6 +2616,181 @@ class PlayerService:
             quality_hint=quality_hint,
         )
 
+    def _play_queue_index(self, index: int, *, resume: bool = True) -> None:
+        if not self._playlist_meta or index < 0 or index >= len(self._playlist_meta):
+            return
+        self._queue_index = index
+        track = self._playlist_meta[index]
+        prepared = self._playlist_prepared.get(track.id)
+        if (
+            prepared is not None
+            and prepared.error is None
+            and prepared.playback_target is not None
+            and prepared.profile is not None
+            and prepared.path_info is not None
+            and prepared.source is not None
+        ):
+            self._load_generation += 1
+            prepared = _PreparedTrackLoad(
+                generation=self._load_generation,
+                track=prepared.track,
+                resume=resume,
+                source=prepared.source,
+                profile=prepared.profile,
+                path_info=prepared.path_info,
+                playback_target=prepared.playback_target,
+                playback_note=prepared.playback_note,
+                release_id=prepared.release_id,
+                quality_hint=prepared.quality_hint,
+            )
+            self._load_prepared_queue_track(prepared, resume=resume)
+            return
+
+        self._playback_load_active = True
+        self._load_generation += 1
+        generation = self._load_generation
+
+        def worker() -> None:
+            built = self._build_prepared_track_load(
+                track,
+                resume=resume,
+                generation=generation,
+            )
+            if built.error is not None:
+                self._run_on_main_thread(lambda: self._fail_track_load(built))
+                return
+            self._playlist_prepared[track.id] = built
+            self._run_on_main_thread(
+                lambda: self._load_prepared_queue_track(built, resume=resume)
+            )
+
+        threading.Thread(
+            target=worker,
+            name="tunes-queue-load",
+            daemon=True,
+        ).start()
+
+    def _load_prepared_queue_track(
+        self,
+        prepared: _PreparedTrackLoad,
+        *,
+        resume: bool = True,
+    ) -> None:
+        if prepared.generation != self._load_generation:
+            return
+        if (
+            prepared.error is not None
+            or prepared.source is None
+            or prepared.profile is None
+            or prepared.path_info is None
+            or prepared.playback_target is None
+        ):
+            self._fail_track_load(prepared)
+            return
+
+        engine = self._ensure_engine()
+        if engine is None:
+            self._abort_prepared_track_load()
+            return
+
+        previous = self._current_track
+        if previous is not None and previous.id != prepared.track.id:
+            try:
+                self._record_playback(previous)
+            except Exception:
+                log.warning(
+                    "Could not record play history for %s",
+                    previous.id,
+                    exc_info=True,
+                )
+
+        self._playback_load_active = True
+        try:
+            self._sync_exclusive_session_for_profile(prepared.profile)
+            self._refresh_usb_playback_isolation()
+            self._configure_engine_playback_path(
+                engine, prepared.track, source=prepared.source
+            )
+            engine.load(
+                prepared.playback_target,
+                start_sec=0.0,
+                output_profile=prepared.profile,
+                mode="replace",
+            )
+        except (BrokenPipeError, ConnectionError, OSError) as exc:
+            log.warning("Playback engine disconnected during queue load", exc_info=True)
+            self._reset_engine()
+            self._abort_prepared_track_load(str(exc), exc=exc)
+            return
+        except Exception as exc:
+            self._abort_prepared_track_load(str(exc), exc=exc)
+            return
+
+        self._playlist_prepared[prepared.track.id] = prepared
+        self._apply_prepared_track_state(prepared, reset_position=True)
+        self._playback_load_active = False
+        self._playback_intended = resume
+        self._direct_alsa_recovery_attempts = 0
+        self._direct_alsa_light_recovery_failures = 0
+        self._direct_alsa_watchdog_at = time.monotonic()
+        self._direct_alsa_watchdog_pos = 0.0
+        self._is_playing = resume
+        self._auto_advanced_from_index = None
+        self._reset_playback_position(0.0)
+        self._duration_sec = None
+        self._emit("playback_changed", "queue_changed")
+
+    def _maybe_auto_advance_queue(self) -> None:
+        if (
+            not self._playback_intended
+            or self._playback_load_active
+            or not self._playlist_meta
+            or not self._is_playing
+        ):
+            return
+        duration = self._duration_sec
+        if duration is None or duration <= 0:
+            return
+        if self._position_sec < duration - _QUEUE_END_MARGIN_SEC:
+            return
+
+        index = self._playlist_position()
+        if self._auto_advanced_from_index == index:
+            return
+        self._auto_advanced_from_index = index
+
+        if index + 1 >= len(self._playlist_meta):
+            track = self._current_track
+            if track is not None:
+                try:
+                    self._record_playback(track)
+                except Exception:
+                    log.warning(
+                        "Could not record play history for %s",
+                        track.id,
+                        exc_info=True,
+                    )
+            engine = self._engine
+            if engine is not None:
+                engine.pause()
+            self._playback_intended = False
+            self._is_playing = False
+            self._emit("playback_changed")
+            return
+
+        engine = self._engine
+        time_pos = getattr(engine, "get_time_pos", None)
+        time_pos_sec = time_pos() if callable(time_pos) else None
+        _timeline_log.info(
+            "auto_advance queue[%s/%s] pos=%.2fs time-pos=%s dur=%.2fs",
+            index,
+            len(self._playlist_meta),
+            self._position_sec,
+            f"{time_pos_sec:.2f}s" if time_pos_sec is not None else "?",
+            duration,
+        )
+        self._play_queue_index(index + 1)
+
     def _start_playlist(self, tracks: list[Track], *, start_index: int = 0) -> None:
         if not tracks:
             return
@@ -2628,13 +2801,15 @@ class PlayerService:
         load_generation = self._load_generation
         self._playlist_meta = tracks
         self._playlist_prepared = {}
+        self._queue_index = start_index
+        self._auto_advanced_from_index = None
         track = tracks[start_index]
         self._playback_load_active = True
         self._playback_input_class = None
         self._engine_error = None
         self._current_track = track
         self._current_release_id = self._release_id_for_playback(track)
-        self._duration_sec = track.duration_sec
+        self._duration_sec = None
         self._reset_playback_position(0.0)
         self._is_playing = False
         self._emit("playback_changed", "queue_changed")
@@ -2742,13 +2917,12 @@ class PlayerService:
             if build_generation != self._playlist_build_generation:
                 return
 
-            append_fn = getattr(engine, "append", None)
-            if not callable(append_fn):
-                return
             for index in range(start_index + 1, len(tracks)):
                 if build_generation != self._playlist_build_generation:
                     return
                 track = tracks[index]
+                if track.id in self._playlist_prepared:
+                    continue
                 next_prepared = self._build_prepared_track_load(
                     track, resume=False, generation=load_generation
                 )
@@ -2759,20 +2933,12 @@ class PlayerService:
                     or next_prepared.playback_target is None
                 ):
                     log.warning(
-                        "Skipping playlist append for %s: %s",
+                        "Skipping playlist prepare for %s: %s",
                         track.id,
                         next_prepared.error or "missing playback target",
                     )
                     continue
                 self._playlist_prepared[track.id] = next_prepared
-                try:
-                    append_fn(next_prepared.playback_target)
-                except Exception:
-                    log.warning(
-                        "Could not append %s to mpv playlist",
-                        track.id,
-                        exc_info=True,
-                    )
         except Exception:
             log.exception("Background playlist build failed")
             if build_generation == self._playlist_build_generation:
@@ -2849,10 +3015,10 @@ class PlayerService:
         engine = self._engine
         if engine is None or not self._playlist_meta:
             return
-        pos = self._playlist_position()
-        if pos < 0 or pos >= len(self._playlist_meta):
+        index = self._queue_index
+        if index < 0 or index >= len(self._playlist_meta):
             return
-        track = self._playlist_meta[pos]
+        track = self._playlist_meta[index]
         previous = self._current_track
         if previous is not None and previous.id != track.id:
             try:
@@ -2868,11 +3034,22 @@ class PlayerService:
             self._apply_prepared_track_state(prepared, reset_position=False)
         elif self._current_track is None or self._current_track.id != track.id:
             self._set_current_track(track, reset_position=False)
+        if previous is None or previous.id != track.id:
+            self._reset_playback_position(0.0)
+            self._duration_sec = None
         self._playback_load_active = False
         self._direct_alsa_recovery_attempts = 0
         self._direct_alsa_light_recovery_failures = 0
         self._direct_alsa_watchdog_at = time.monotonic()
-        self._sync_from_engine()
+        self._auto_advanced_from_index = None
+        self._sync_duration_from_engine()
+        _timeline_log.info(
+            "service track_started queue[%s/%s] %s -> %s",
+            index,
+            len(self._playlist_meta),
+            previous.id if previous is not None else None,
+            track.id,
+        )
         self._emit("playback_changed", "queue_changed")
 
     def _record_playback(self, track: Track) -> None:
@@ -2986,50 +3163,49 @@ class PlayerService:
             self._quality_hint = format_playback_status(
                 base_hint, playback_note=self._playback_note
             )
-        self._duration_sec = track.duration_sec
+        self._duration_sec = None
         if reset_position:
             self._reset_playback_position(0.0)
 
     def _reset_playback_position(self, position_sec: float) -> None:
         self._position_sec = max(0.0, position_sec)
-        self._position_synced_at = time.monotonic()
 
-    def _playback_position(self) -> float:
+    def max_seek_position_sec(self) -> float | None:
         engine = self._engine
-        if engine is not None and self._is_playing:
-            pos = engine.get_position()
-            if abs(pos - self._position_sec) > 0.01:
-                self._apply_engine_position(pos)
-        return self._position_sec
+        if engine is None:
+            return None
+        cap_fn = getattr(engine, "max_seek_position_sec", None)
+        if not callable(cap_fn):
+            return None
+        return cap_fn()
 
     def _apply_engine_position(self, position_sec: float) -> None:
         self._position_sec = max(0.0, position_sec)
-        self._position_synced_at = time.monotonic()
+
+    def refresh_playback_position_for_ui(self) -> None:
+        """Pull the latest mpv playback position (audio-pts primary) for the seek bar."""
+        engine = self._engine
+        if engine is None:
+            return
+        self._apply_engine_position(engine.get_position())
 
     def _sync_playback_position_from_engine(self) -> None:
         engine = self._engine
         if engine is None:
             return
-        self._apply_engine_position(engine.get_position())
+        self.refresh_playback_position_for_ui()
+        self._maybe_auto_advance_queue()
 
     def _sync_duration_from_engine(self) -> None:
         engine = self._engine
         if engine is None:
             return
         duration = engine.get_duration()
-        if duration is not None:
-            track = self._current_track
-            catalog_duration = track.duration_sec if track is not None else None
-            if (
-                catalog_duration
-                and catalog_duration > 0
-                and duration < catalog_duration * 0.5
-            ):
-                # Manifest still looks like a short preview — keep catalog length for UI.
-                self._duration_sec = catalog_duration
-            else:
-                self._duration_sec = duration
+        if duration is not None and duration > 0:
+            self._duration_sec = duration
         self._is_playing = engine.is_playing()
+        self.refresh_playback_position_for_ui()
+        self._maybe_auto_advance_queue()
 
     def _sync_from_engine(self) -> None:
         self._sync_playback_position_from_engine()
@@ -3052,9 +3228,17 @@ class PlayerService:
 
     def _handle_engine_event(self, event: EngineEvent) -> None:
         if event == "track_started":
+            if self._alsa_xrun_monitor is not None:
+                self._alsa_xrun_monitor.reset()
             self._on_engine_track_started()
             return
         if event == "track_finished":
+            _timeline_log.info(
+                "service track_finished track=%s service_pos=%.2f dur=%s",
+                self._current_track.id if self._current_track else None,
+                self._position_sec,
+                self._duration_sec,
+            )
             track = self._current_track
             if track is not None:
                 try:
