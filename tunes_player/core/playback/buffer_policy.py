@@ -9,10 +9,10 @@ from urllib.parse import unquote, urlparse
 
 LOG = logging.getLogger(__name__)
 
-# mpv defaults are minimal; these values absorb brief NFS/HTTPS stalls on direct ALSA.
-_NETWORK_DEMUXER_READAHEAD_SEC = 30.0
-_NETWORK_CACHE_SEC = 120.0
-_NETWORK_DEMUXER_MAX_BYTES = 128 * 1024 * 1024
+# LAN NAS / streaming: modest demuxer cache for brief NFS or HTTPS stalls.
+_NETWORK_DEMUXER_READAHEAD_SEC = 8.0
+_NETWORK_CACHE_SEC = 30.0
+_NETWORK_DEMUXER_MAX_BYTES = 64 * 1024 * 1024
 _LOCAL_DEMUXER_READAHEAD_SEC = 1.0
 # Direct ALSA: hardware ALSA buffer for USB jitter; modest decoder queue for AAC
 # decode. Do not set mpv audio-buffer to multi-second values — that desyncs
@@ -20,8 +20,8 @@ _LOCAL_DEMUXER_READAHEAD_SEC = 1.0
 _DIRECT_ALSA_ALSA_BUFFER_TIME_US = 10_000_000
 _DIRECT_ALSA_ALSA_PERIODS = 8
 _DIRECT_ALSA_AD_QUEUE_MAX_SEC = 4.0
-_DIRECT_ALSA_CACHE_PAUSE_WAIT_SEC = 2.0
-_DIRECT_ALSA_DEMUXER_READAHEAD_SEC = 30.0
+_DIRECT_ALSA_CACHE_PAUSE_WAIT_SEC = 1.0
+_DIRECT_ALSA_DEMUXER_READAHEAD_SEC = 8.0
 
 
 class InputClass(str, Enum):

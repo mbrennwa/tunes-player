@@ -58,15 +58,16 @@ class BufferPolicyTests(unittest.TestCase):
     def test_mpv_options_network_file_direct_alsa(self) -> None:
         options = mpv_options_for_input(InputClass.NETWORK_FILE, direct_alsa=True)
         self.assertEqual(options["cache"], "yes")
-        self.assertGreater(options["demuxer_readahead_secs"], 10.0)
-        self.assertIn("demuxer_max_bytes", options)
+        self.assertEqual(options["cache_secs"], 30.0)
+        self.assertEqual(options["demuxer_readahead_secs"], 8.0)
+        self.assertEqual(options["demuxer_max_bytes"], 64 * 1024 * 1024)
         self.assertNotIn("audio_buffer", options)
         self.assertEqual(options["ad_queue_max_secs"], 4.0)
         self.assertEqual(options["alsa_buffer_time"], 10_000_000)
         self.assertEqual(options["alsa_periods"], 8)
         self.assertEqual(options["demuxer_thread"], "yes")
         self.assertEqual(options["cache_pause_initial"], "yes")
-        self.assertEqual(options["cache_pause_wait"], 2.0)
+        self.assertEqual(options["cache_pause_wait"], 1.0)
 
     def test_mpv_options_local_direct_alsa(self) -> None:
         options = mpv_options_for_input(InputClass.LOCAL, direct_alsa=True)
