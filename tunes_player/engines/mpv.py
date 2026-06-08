@@ -17,6 +17,10 @@ from tunes_player.core.playback.buffer_policy import (
     mpv_options_for_input,
 )
 from tunes_player.core.playback.engine import EngineEvent
+from tunes_player.core.playback.mpv_events import (
+    end_file_triggers_playback_error,
+    end_file_triggers_track_finished,
+)
 from tunes_player.core.playback.mpv_cli import base_audio_options
 from tunes_player.core.playback.playback_path import (
     NegotiatedPlaybackState,
@@ -607,6 +611,24 @@ class MpvEngine:
 
     def _update_audible_position(self) -> None:
         self._position_sec = self._resolve_audible_position_sec()
+        if self._near_track_end(self._position_sec, margin=_SEEK_END_MARGIN_SEC):
+            self._emit("position_changed")
+
+    def _snap_positions_to_track_end(self) -> None:
+        """Align cached timelines at demuxer EOF so queue advance can fire."""
+        duration = self._duration_sec
+        if duration is None or duration <= 0:
+            return
+        end_pos = max(
+            self._resolve_audible_position_sec(),
+            self._cached_time_pos(),
+            duration - 0.01,
+        )
+        end_pos = min(end_pos, duration)
+        self._set_cached_time_pos(end_pos)
+        self._audio_pts_sec = end_pos
+        self._position_sec = end_pos
+        self._ui_position_sec = end_pos
 
     def _near_track_end(self, position_sec: float, *, margin: float = 3.0) -> bool:
         duration = self._duration_sec
@@ -655,7 +677,6 @@ class MpvEngine:
 
     def _register_observers(self) -> None:
         player = self._player
-        end_file = self._mpv_module.MpvEventEndFile
 
         @player.property_observer("time-pos")
         def _on_time_pos(_name: str, value: float | None) -> None:
@@ -711,12 +732,18 @@ class MpvEngine:
             end_data = getattr(event, "data", None)
             if end_data is None:
                 return
-            reason = int(end_data.reason)
-            if reason == end_file.ERROR:
+            reason = getattr(end_data, "reason", None)
+            if end_file_triggers_playback_error(reason):
                 self._playing = False
                 self._emit("playback_error")
-            elif reason == end_file.EOF:
-                _TIMELINE_LOG.debug("end-file demuxer eof (ignored for queue)")
+            elif end_file_triggers_track_finished(reason):
+                _TIMELINE_LOG.debug("end-file demuxer eof — snap position for queue")
+                self._update_audible_position()
+                self._snap_positions_to_track_end()
+                self._playing = False
+                self._emit("track_eof")
+                self._emit("position_changed")
+                self._emit("playing_changed")
 
     def _emit(self, event: EngineEvent) -> None:
         if self._shutting_down or self._terminated or self._on_event is None:

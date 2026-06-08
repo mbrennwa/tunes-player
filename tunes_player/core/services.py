@@ -1684,6 +1684,15 @@ class PlayerService:
             except Empty:
                 break
             self._handle_engine_event(event)
+        if (
+            self._playback_intended
+            and self._playlist_meta
+            and not self._playback_load_active
+            and self._engine is not None
+        ):
+            self._sync_duration_from_engine()
+            self._sync_audible_position_from_engine()
+            self._maybe_auto_advance_queue()
 
     def poll_playback_health(self) -> None:
         """ALSA xrun diagnostics only (#46 — stall watchdog removed)."""
@@ -2532,24 +2541,37 @@ class PlayerService:
         self._duration_sec = None
         self._emit("playback_changed", "queue_changed")
 
+    def _effective_playback_duration_sec(self) -> float | None:
+        duration = self._duration_sec
+        engine = self._engine
+        if (duration is None or duration <= 0) and engine is not None:
+            duration = engine.get_duration()
+            if duration is not None and duration > 0:
+                self._duration_sec = duration
+        if duration is None or duration <= 0:
+            return None
+        return duration
+
     def _maybe_auto_advance_queue(self) -> None:
         if (
             not self._playback_intended
             or self._playback_load_active
             or not self._playlist_meta
-            or not self._is_playing
         ):
             return
-        duration = self._duration_sec
-        if duration is None or duration <= 0:
+        duration = self._effective_playback_duration_sec()
+        if duration is None:
             return
         engine = self._engine
         time_pos = self._engine_time_pos_sec(engine) if engine is not None else 0.0
         end_threshold = duration - _QUEUE_END_MARGIN_SEC
-        if (
-            self._audible_position_sec < end_threshold
-            or time_pos < end_threshold
-        ):
+        audible = self._audible_position_sec
+        if self._is_playing:
+            # While audio is still playing, both timelines must agree (#44).
+            if audible < end_threshold or time_pos < end_threshold:
+                return
+        elif max(audible, time_pos) < end_threshold:
+            # mpv often pauses at EOF before we advance.
             return
 
         index = self._playlist_position()
@@ -3047,6 +3069,12 @@ class PlayerService:
                 self._alsa_xrun_monitor.reset()
             self._on_engine_track_started()
             return
+        if event == "track_eof":
+            self._is_playing = False
+            self._sync_duration_from_engine()
+            self._sync_audible_position_from_engine()
+            self._maybe_auto_advance_queue()
+            return
         if event == "track_finished":
             _timeline_log.info(
                 "service track_finished track=%s ui_pos=%.2f audible=%.2f dur=%s",
@@ -3101,6 +3129,7 @@ class PlayerService:
             engine = self._engine
             if engine is not None:
                 self._is_playing = engine.is_playing()
+            self._sync_duration_from_engine()
             self._sync_playback_position_from_engine()
             self._emit("playback_changed")
         elif event == "playback_path_changed":

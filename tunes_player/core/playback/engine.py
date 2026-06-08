@@ -12,6 +12,7 @@ EngineEvent = Literal[
     "duration_changed",
     "playing_changed",
     "track_started",
+    "track_eof",
     "track_finished",
     "playback_error",
     "playback_path_changed",

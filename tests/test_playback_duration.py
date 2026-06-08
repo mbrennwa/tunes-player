@@ -165,6 +165,54 @@ class PlaybackDurationTests(unittest.TestCase):
         self._service._sync_audible_position_from_engine()
         self.assertAlmostEqual(self._service._audible_position_sec, 99.0)
 
+    def test_auto_advance_uses_engine_duration_when_service_cache_empty(self) -> None:
+        track_a = self._track(duration_sec=240.0)
+        track_b = self._track(duration_sec=200.0)
+        self._service._playlist_meta = [track_a, track_b]
+        self._service._queue_index = 0
+        self._service._playback_intended = True
+        self._service._is_playing = False
+        self._service._duration_sec = None
+        self._service._audible_position_sec = 239.6
+        self._service._engine = _DurationEngine(
+            duration=240.0,
+            position=239.6,
+            time_pos=239.6,
+            playing=False,
+        )
+        self._service._play_queue_index = lambda index, **kwargs: setattr(  # type: ignore[method-assign]
+            self._service, "_queue_index", index
+        )
+        self._service._maybe_auto_advance_queue()
+        self.assertEqual(self._service._queue_index, 1)
+        self.assertAlmostEqual(self._service._duration_sec, 240.0)
+
+    def test_auto_advance_when_paused_at_eof_with_lagging_time_pos(self) -> None:
+        class _PausedEndEngine(_DurationEngine):
+            def __init__(self) -> None:
+                super().__init__(
+                    duration=240.0,
+                    position=239.6,
+                    time_pos=233.0,
+                    playing=False,
+                )
+
+        track_a = self._track(duration_sec=240.0)
+        track_b = self._track(duration_sec=200.0)
+        self._service._playlist_meta = [track_a, track_b]
+        self._service._queue_index = 0
+        self._service._current_track = track_a
+        self._service._playback_intended = True
+        self._service._is_playing = False
+        self._service._duration_sec = 240.0
+        self._service._audible_position_sec = 239.6
+        self._service._engine = _PausedEndEngine()
+        self._service._play_queue_index = lambda index, **kwargs: setattr(  # type: ignore[method-assign]
+            self._service, "_queue_index", index
+        )
+        self._service._maybe_auto_advance_queue()
+        self.assertEqual(self._service._queue_index, 1)
+
     def test_auto_advance_does_not_fire_before_track_end(self) -> None:
         self._service._playlist_meta = [self._track(), self._track()]
         self._service._queue_index = 0

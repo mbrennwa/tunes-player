@@ -41,6 +41,16 @@ class MpvEngineTimelineTests(unittest.TestCase):
         self.assertIsNone(MpvEngine._coerce_optional_seconds(-0.5))
         self.assertIsNone(MpvEngine._coerce_optional_seconds(-0.0))
 
+    def test_snap_positions_to_track_end(self) -> None:
+        engine = self._engine()
+        engine._time_pos_sec = 233.0
+        engine._audio_pts_sec = 239.6
+        engine._position_sec = 239.6
+        engine._duration_sec = 240.0
+        engine._snap_positions_to_track_end()
+        self.assertAlmostEqual(engine._position_sec, 239.99, places=2)
+        self.assertAlmostEqual(engine._cached_time_pos(), 239.99, places=2)
+
     def test_seek_updates_position(self) -> None:
         engine = self._engine()
         engine._position_sec = 240.0
