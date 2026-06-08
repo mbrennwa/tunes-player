@@ -1799,7 +1799,7 @@ class PlayerService:
             return
 
         stall_age_fn = getattr(engine, "playback_stall_age_sec", None)
-        pos = engine.get_position()
+        pos = self._engine_time_pos_sec(engine)
         now = time.monotonic()
         if abs(pos - self._direct_alsa_watchdog_pos) >= 0.05:
             self._direct_alsa_watchdog_pos = pos
@@ -2082,7 +2082,15 @@ class PlayerService:
         if now - self._direct_alsa_recovery_at < 5.0:
             return False
 
-        pos_before = engine.get_position()
+        pos_before = self._engine_time_pos_sec(engine)
+        duration = self._duration_sec
+        if (
+            duration is not None
+            and duration > 0
+            and pos_before >= duration - _QUEUE_END_MARGIN_SEC - 2.0
+            and reason == "stall"
+        ):
+            return False
         usb = self._usb_direct_alsa_active()
         if usb:
             if reason == "error":
@@ -2106,7 +2114,7 @@ class PlayerService:
             self._direct_alsa_recovery_at = now
             self._direct_alsa_recovery_attempts += 1
             self._direct_alsa_watchdog_at = now
-            self._direct_alsa_watchdog_pos = engine.get_position()
+            self._direct_alsa_watchdog_pos = self._engine_time_pos_sec(engine)
             self._sync_from_engine()
             self._emit("playback_changed")
             log.warning(
@@ -2122,7 +2130,7 @@ class PlayerService:
                     self._direct_alsa_recovery_at = now
                     self._direct_alsa_recovery_attempts += 1
                     self._direct_alsa_watchdog_at = now
-                    self._direct_alsa_watchdog_pos = engine.get_position()
+                    self._direct_alsa_watchdog_pos = self._engine_time_pos_sec(engine)
                     self._sync_from_engine()
                     self._emit("playback_changed")
                     return True
@@ -2130,7 +2138,7 @@ class PlayerService:
                 self._direct_alsa_recovery_at = now
                 self._direct_alsa_recovery_attempts += 1
                 self._direct_alsa_watchdog_at = now
-                self._direct_alsa_watchdog_pos = engine.get_position()
+                self._direct_alsa_watchdog_pos = self._engine_time_pos_sec(engine)
                 self._sync_from_engine()
                 self._emit("playback_changed")
                 return True
@@ -2147,7 +2155,7 @@ class PlayerService:
                 self._direct_alsa_recovery_attempts += 1
                 self._direct_alsa_light_recovery_failures = 0
                 self._direct_alsa_watchdog_at = now
-                self._direct_alsa_watchdog_pos = engine.get_position()
+                self._direct_alsa_watchdog_pos = self._engine_time_pos_sec(engine)
                 self._sync_from_engine()
                 self._emit("playback_changed")
                 return True
@@ -2157,7 +2165,7 @@ class PlayerService:
             self._direct_alsa_light_recovery_failures += 1
             return False
 
-        pos_after = engine.get_position()
+        pos_after = self._engine_time_pos_sec(engine)
         if abs(pos_after - pos_before) < 0.25:
             self._direct_alsa_light_recovery_failures += 1
         elif full_reload:
@@ -2785,7 +2793,13 @@ class PlayerService:
         duration = self._duration_sec
         if duration is None or duration <= 0:
             return
-        if self._audible_position_sec < duration - _QUEUE_END_MARGIN_SEC:
+        engine = self._engine
+        time_pos = self._engine_time_pos_sec(engine) if engine is not None else 0.0
+        end_threshold = duration - _QUEUE_END_MARGIN_SEC
+        if (
+            self._audible_position_sec < end_threshold
+            or time_pos < end_threshold
+        ):
             return
 
         index = self._playlist_position()
@@ -2812,15 +2826,12 @@ class PlayerService:
             self._emit("playback_changed")
             return
 
-        engine = self._engine
-        time_pos = getattr(engine, "get_time_pos", None)
-        time_pos_sec = time_pos() if callable(time_pos) else None
         _timeline_log.info(
-            "auto_advance queue[%s/%s] audible=%.2fs time-pos=%s dur=%.2fs",
+            "auto_advance queue[%s/%s] audible=%.2fs time-pos=%.2fs dur=%.2fs",
             index,
             len(self._playlist_meta),
             self._audible_position_sec,
-            f"{time_pos_sec:.2f}s" if time_pos_sec is not None else "?",
+            time_pos,
             duration,
         )
         self._play_queue_index(index + 1)
@@ -3214,6 +3225,16 @@ class PlayerService:
         if not callable(cap_fn):
             return None
         return cap_fn()
+
+    @staticmethod
+    def _engine_time_pos_sec(engine: PlaybackEngine) -> float:
+        query_fn = getattr(engine, "query_time_pos", None)
+        if callable(query_fn):
+            return max(0.0, query_fn())
+        get_fn = getattr(engine, "get_time_pos", None)
+        if callable(get_fn):
+            return max(0.0, get_fn())
+        return max(0.0, engine.get_position())
 
     def _apply_ui_position(self, position_sec: float, *, allow_backward: bool = False) -> None:
         position = max(0.0, position_sec)

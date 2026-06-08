@@ -111,6 +111,23 @@ class PlaybackDurationTests(unittest.TestCase):
         self._service._maybe_auto_advance_queue()
         self.assertEqual(self._service._queue_index, 1)
 
+    def test_auto_advance_waits_when_audible_ahead_of_time_pos(self) -> None:
+        class _SplitEngine(_DurationEngine):
+            def __init__(self) -> None:
+                super().__init__(duration=240.0, position=239.5, time_pos=233.0)
+
+        self._service._playlist_meta = [self._track(), self._track()]
+        self._service._queue_index = 0
+        self._service._playback_intended = True
+        self._service._is_playing = True
+        self._service._duration_sec = 240.0
+        self._service._audible_position_sec = 239.5
+        self._service._engine = _SplitEngine()
+        advanced: list[int] = []
+        self._service._play_queue_index = lambda index, **kwargs: advanced.append(index)  # type: ignore[method-assign]
+        self._service._maybe_auto_advance_queue()
+        self.assertEqual(advanced, [])
+
     def test_auto_advance_waits_until_audible_position_reaches_end(self) -> None:
         self._service._playlist_meta = [self._track(), self._track()]
         self._service._queue_index = 0

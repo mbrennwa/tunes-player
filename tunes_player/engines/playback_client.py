@@ -1325,8 +1325,16 @@ class MpvPlaybackClient:
             return False
         if self._recovering_direct_alsa:
             return False
-        resume_sec = self.get_position()
+        resume_sec = self.query_time_pos()
         preview = uri if len(uri) <= 120 else f"{uri[:117]}..."
+        if (
+            self._duration_sec is not None
+            and self._duration_sec > 0
+            and resume_sec >= self._duration_sec - 3.0
+            and not full_reload
+            and not ao_reload_only
+        ):
+            return False
         self._recovering_direct_alsa = True
         try:
             if ao_reload_only:
@@ -1396,7 +1404,7 @@ class MpvPlaybackClient:
         uri = self._loaded_uri
         if stable_device is None or profile is None or uri is None or not profile.direct_alsa:
             return False
-        resume_sec = self.get_position()
+        resume_sec = self.query_time_pos()
         preview = uri if len(uri) <= 120 else f"{uri[:117]}..."
         _LOG.warning(
             "Switching USB playback to plughw/non-exclusive ALSA (%s) at %.2fs",

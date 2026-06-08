@@ -357,6 +357,10 @@ class MpvEngine:
     def get_time_pos(self) -> float:
         return self.query_time_pos()
 
+    def _resume_position_sec(self) -> float:
+        """Playback position for ALSA recovery seeks (time-pos, not audio-pts)."""
+        return self.query_time_pos()
+
     def get_duration(self) -> float | None:
         duration = self._player.duration
         if duration is not None and duration > 0:
@@ -400,7 +404,9 @@ class MpvEngine:
             return False
         if self._recovering_direct_alsa:
             return False
-        resume_sec = self.get_position()
+        resume_sec = self._resume_position_sec()
+        if self._near_track_end(resume_sec) and not full_reload and not ao_reload_only:
+            return False
         self._recovering_direct_alsa = True
         try:
             if ao_reload_only:
@@ -438,7 +444,7 @@ class MpvEngine:
         uri = self._loaded_uri
         if stable_device is None or profile is None or uri is None or not profile.direct_alsa:
             return False
-        resume_sec = self.get_position()
+        resume_sec = self._resume_position_sec()
         self._stable_output_active = True
         self._audio_device = stable_device
         self._recovering_direct_alsa = True
@@ -663,9 +669,13 @@ class MpvEngine:
         self._touch_position_clock()
 
     def _update_audible_position(self) -> None:
-        resolved = self._resolve_audible_position_sec()
-        self._position_sec = resolved
-        self._last_position_update_at = time.monotonic()
+        self._position_sec = self._resolve_audible_position_sec()
+
+    def _near_track_end(self, position_sec: float, *, margin: float = 3.0) -> bool:
+        duration = self._duration_sec
+        if duration is None or duration <= 0:
+            return False
+        return position_sec >= duration - margin
 
     def _publish_ui_position(self) -> None:
         resolved = self._cached_time_pos()
@@ -673,6 +683,8 @@ class MpvEngine:
         changed = abs(resolved - previous) > 0.01
         self._ui_position_sec = resolved
         now = time.monotonic()
+        if changed:
+            self._touch_position_clock()
         if self._load_in_progress:
             return
         if changed and now - self._last_position_emit >= _POSITION_INTERVAL_SEC:
