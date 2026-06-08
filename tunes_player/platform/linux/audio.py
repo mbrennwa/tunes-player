@@ -10,7 +10,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import replace
 
-from tunes_player.core.audio_labels import classify_sink_potential
+from tunes_player.core.audio_labels import classify_sink_potential, endpoint_is_digital_output
 from tunes_player.core.config import AppConfig
 from tunes_player.core.volume import (
     SYSTEM_DEFAULT_SINK_ID,
@@ -436,10 +436,22 @@ class LinuxOutputController:
 
         return alsa_mixer_available_for_endpoint(endpoint_id)
 
+    def _active_endpoint(self) -> VolumeEndpoint | None:
+        active = self.get_active_endpoint_id()
+        if active is None:
+            return None
+        for endpoint in self.list_endpoints():
+            if endpoint.id == active:
+                return endpoint
+        return None
+
     @property
     def uses_device_volume(self) -> bool:
         active = self.get_active_endpoint_id()
         if active is None or active == SYSTEM_DEFAULT_SINK_ID:
+            return False
+        endpoint = self._active_endpoint()
+        if endpoint is not None and endpoint_is_digital_output(endpoint):
             return False
         if is_alsa_endpoint_id(active):
             return self._alsa_has_hardware_volume()

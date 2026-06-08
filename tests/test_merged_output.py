@@ -92,6 +92,25 @@ class MergedOutputTests(unittest.TestCase):
                 controller.set_active_endpoint("alsa:hw:0:0")
                 self.assertTrue(controller.uses_device_volume)
 
+    def test_hdmi_pipewire_sink_has_no_device_volume(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ConfigManager(Path(tmp) / "config.json")
+            config.load()
+            controller = LinuxOutputController(config.config)
+            hdmi = VolumeEndpoint(
+                id="pw:Raptor Lake-P/U/H cAVS HDMI / DisplayPort 1 Output",
+                name="alsa_output.pci-0000_00_1f.3.HiFi__HDMI__sink",
+                description="Raptor Lake-P/U/H cAVS HDMI / DisplayPort 1 Output",
+                bit_perfect_potential="capable",
+                control_id="103",
+            )
+            with (
+                patch.object(controller, "_alsa_volume_endpoints", return_value=[]),
+                patch.object(controller, "_list_sink_endpoints", return_value=[hdmi]),
+            ):
+                controller.set_active_endpoint(hdmi.id)
+                self.assertFalse(controller.uses_device_volume)
+
     def test_uses_software_volume_when_alsa_has_no_mixer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = ConfigManager(Path(tmp) / "config.json")

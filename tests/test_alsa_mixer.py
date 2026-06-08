@@ -146,7 +146,7 @@ Simple mixer control 'PCM',0
     def test_hdmi_endpoint_has_no_hardware_volume(self) -> None:
         clear_alsa_mixer_cache()
         with patch(
-            "tunes_player.platform.linux.alsa_mixer._pcm_device_is_digital_output",
+            "tunes_player.platform.linux.alsa_mixer.alsa_pcm_device_is_digital_output",
             return_value=True,
         ):
             self.assertIsNone(

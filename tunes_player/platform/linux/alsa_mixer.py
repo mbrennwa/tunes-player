@@ -185,7 +185,7 @@ def alsa_set_level(card: int, level: float) -> None:
     _write_normalized_level(card, control, max(0.0, min(1.0, level)))
 
 
-def _pcm_device_is_digital_output(card: int, device: int) -> bool:
+def alsa_pcm_device_is_digital_output(card: int, device: int) -> bool:
     from tunes_player.platform.linux.audio_probe import _parse_aplay_playback_devices
 
     for entry in _parse_aplay_playback_devices():
@@ -214,7 +214,7 @@ def _discover_output_volume_control(
     device: int | None,
     verify: bool,
 ) -> AlsaVolumeControl | None:
-    if device is not None and _pcm_device_is_digital_output(card, device):
+    if device is not None and alsa_pcm_device_is_digital_output(card, device):
         return None
     if shutil.which("amixer") is None:
         return None
