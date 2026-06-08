@@ -176,6 +176,7 @@ class MergedOutputTests(unittest.TestCase):
             ):
                 controller.set_active_endpoint("alsa:hw:1:0")
                 self.assertTrue(controller.exclusive_access_supported())
+                self.assertEqual(controller.active_alsa_card(), 1)
 
     def test_exclusive_access_supported_for_pci_alsa(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

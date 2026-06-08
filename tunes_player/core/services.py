@@ -2722,7 +2722,7 @@ class PlayerService:
                 except Exception as exc:
                     self._run_on_main_thread(
                         lambda err=exc: self._abort_prepared_track_load(
-                            str(err), exc=exc
+                            str(err), exc=err
                         ),
                     )
                     return

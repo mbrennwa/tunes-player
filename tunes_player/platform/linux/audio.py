@@ -633,7 +633,12 @@ class LinuxOutputController:
         return is_alsa_endpoint_id(self.get_active_endpoint_id())
 
     def active_alsa_card(self) -> int | None:
-        return self._active_alsa_card()
+        endpoint_id = self._active_alsa_endpoint_id()
+        if endpoint_id is None:
+            return None
+        from tunes_player.platform.linux.alsa_mixer import alsa_card_from_endpoint_id
+
+        return alsa_card_from_endpoint_id(endpoint_id)
 
 
 class NullVolumeController:
