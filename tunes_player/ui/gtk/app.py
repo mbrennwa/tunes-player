@@ -1338,4 +1338,13 @@ def run() -> int:
     GLib.timeout_add(100, _poll_playback)
     GLib.timeout_add(1000, _poll_playback_health)
     GLib.timeout_add(500, _poll_scan)
+
+    import signal
+
+    def _quit_on_signal(*_args: object) -> bool:
+        app.quit()
+        return False
+
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, _quit_on_signal)
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, _quit_on_signal)
     return app.run(None)

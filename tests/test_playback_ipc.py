@@ -236,6 +236,50 @@ class PlaybackClientEndFileTests(unittest.TestCase):
         self.assertIsNone(client._audio_pts_sec)
         self.assertAlmostEqual(client.get_position(), 100.0)
 
+    def test_negative_zero_audio_pts_is_ignored(self) -> None:
+        from tunes_player.engines.playback_client import MpvPlaybackClient
+
+        client = object.__new__(MpvPlaybackClient)
+        client._loaded_uri = "/music/track.flac"
+        client._load_in_progress = False
+        client._last_position_emit = 0.0
+        client._last_position_update_at = 0.0
+        client._on_event = None
+        client._time_pos_sec = 100.0
+        client._audio_pts_sec = None
+        client._position_sec = 100.0
+        client._apply_audio_pts_update(-0.0)
+        self.assertIsNone(client._audio_pts_sec)
+        self.assertAlmostEqual(client.get_position(), 100.0)
+
+    def test_query_time_pos_falls_back_to_cache_during_load(self) -> None:
+        from tunes_player.engines.playback_client import MpvPlaybackClient
+
+        client = object.__new__(MpvPlaybackClient)
+        client._loaded_uri = "/music/track.flac"
+        client._shutdown = False
+        client._load_in_progress = True
+        client._playing = False
+        client._time_pos_sec = 12.5
+        client._queried_time_pos_sec = 99.0
+        client._ui_time_pos_lock = __import__("threading").Lock()
+        self.assertAlmostEqual(client.query_time_pos(), 12.5)
+
+    def test_query_time_pos_prefers_polled_value_while_playing(self) -> None:
+        import threading
+
+        from tunes_player.engines.playback_client import MpvPlaybackClient
+
+        client = object.__new__(MpvPlaybackClient)
+        client._loaded_uri = "/music/track.flac"
+        client._shutdown = False
+        client._load_in_progress = False
+        client._playing = True
+        client._time_pos_sec = 10.0
+        client._queried_time_pos_sec = 12.5
+        client._ui_time_pos_lock = threading.Lock()
+        self.assertAlmostEqual(client.query_time_pos(), 12.5)
+
     def test_seek_updates_position(self) -> None:
         from tunes_player.engines.playback_client import MpvPlaybackClient
 

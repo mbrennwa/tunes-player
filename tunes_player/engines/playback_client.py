@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import shutil
 import signal
@@ -56,11 +57,13 @@ _LOG = logging.getLogger(__name__)
 _TIMELINE_LOG = logging.getLogger("tunes_player.playback.timeline")
 _CONNECT_TIMEOUT_SEC = 5.0
 _COMMAND_TIMEOUT_SEC = 5.0
+_UI_TIME_POS_POLL_INTERVAL_SEC = 0.05
+_UI_TIME_POS_QUERY_TIMEOUT_SEC = 0.2
 _POSITION_INTERVAL_SEC = 0.25
 # Seeking at or past decode EOF makes mpv emit end-file; queue advance is Tunes-owned.
 _SEEK_END_MARGIN_SEC = 1.0
-# Playback position for UI and queue logic: mpv audio-pts when valid, else time-pos.
-# Never blend or extrapolate — see _resolve_playback_position_sec().
+# Audible position (queue advance): audio-pts when valid, else time-pos — see
+# _resolve_audible_position_sec(). UI uses query_time_pos() (live mpv time-pos).
 _LIVE_CLIENTS: weakref.WeakSet = weakref.WeakSet()
 
 LoadFileMode = Literal["replace", "append", "append-play"]
@@ -153,6 +156,10 @@ class MpvPlaybackClient:
         self._proc: subprocess.Popen[bytes] | None = None
         self._sock: socket.socket | None = None
         self._sock_file: Any = None
+        self._query_sock: socket.socket | None = None
+        self._query_sock_file: Any = None
+        self._query_lock = threading.Lock()
+        self._query_request_id = 0
         self._reader: threading.Thread | None = None
         self._running = False
         self._request_id = 0
@@ -165,6 +172,10 @@ class MpvPlaybackClient:
         self._time_pos_sec = 0.0
         self._audio_pts_sec: float | None = None
         self._position_sec = 0.0
+        self._queried_time_pos_sec = 0.0
+        self._ui_time_pos_lock = threading.Lock()
+        self._ui_time_pos_poll_stop = threading.Event()
+        self._ui_time_pos_poll_thread: threading.Thread | None = None
         self._duration_sec: float | None = None
         self._playing = False
         self._track_end_signaled = False
@@ -331,12 +342,14 @@ class MpvPlaybackClient:
             self._proc = None
             raise
         self._running = True
+        self._connect_query_socket()
         self._reader = threading.Thread(
             target=self._read_loop,
             name="mpv-ipc-reader",
             daemon=True,
         )
         self._reader.start()
+        self._start_ui_time_pos_poll()
         _LOG.info(
             "mpv subprocess ready pid=%s client_id=%s socket=%s log=%s",
             self._proc.pid if self._proc is not None else None,
@@ -377,6 +390,28 @@ class MpvPlaybackClient:
         self._sock = sock
         self._sock_file = sock.makefile("rwb")
 
+    def _connect_query_socket(self) -> None:
+        """Dedicated IPC client for UI time-pos polls (no property observe)."""
+        self._close_query_socket()
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(str(self._socket_path))
+        self._query_sock = sock
+        self._query_sock_file = sock.makefile("rwb")
+
+    def _close_query_socket(self) -> None:
+        if self._query_sock_file is not None:
+            try:
+                self._query_sock_file.close()
+            except OSError:
+                pass
+            self._query_sock_file = None
+        if self._query_sock is not None:
+            try:
+                self._query_sock.close()
+            except OSError:
+                pass
+            self._query_sock = None
+
     def _configure_stream_demuxer(self) -> None:
         try:
             self.set_property(
@@ -387,7 +422,7 @@ class MpvPlaybackClient:
             _LOG.warning("Could not set mpv stream-lavf-o for HTTPS streaming")
 
     def _observe_properties(self) -> None:
-        self.command("observe_property", 1, "time-pos")
+        # time-pos is polled on a dedicated IPC connection for smooth UI updates.
         self.command("observe_property", 2, "duration")
         self.command("observe_property", 3, "pause")
         self.command("observe_property", 4, "ao")
@@ -655,6 +690,136 @@ class MpvPlaybackClient:
                 snapshot,
             )
 
+    def _start_ui_time_pos_poll(self) -> None:
+        if self._ui_time_pos_poll_thread is not None:
+            return
+        self._ui_time_pos_poll_stop.clear()
+        self._ui_time_pos_poll_thread = threading.Thread(
+            target=self._ui_time_pos_poll_loop,
+            name="mpv-ui-time-pos",
+            daemon=True,
+        )
+        self._ui_time_pos_poll_thread.start()
+
+    def _stop_ui_time_pos_poll(self) -> None:
+        self._ui_time_pos_poll_stop.set()
+        thread = self._ui_time_pos_poll_thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=0.5)
+        self._ui_time_pos_poll_thread = None
+
+    def _query_time_pos_ipc(self) -> float | None:
+        """Read time-pos on the dedicated query socket (not shared with events)."""
+        with self._query_lock:
+            sock_file = self._query_sock_file
+            if sock_file is None:
+                return None
+            self._query_request_id += 1
+            request_id = self._query_request_id
+            payload = json.dumps(
+                {"command": ["get_property", "time-pos"], "request_id": request_id},
+                separators=(",", ":"),
+            ).encode("utf-8") + b"\n"
+            try:
+                sock_file.write(payload)
+                sock_file.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                self._close_query_socket()
+                return None
+            deadline = time.monotonic() + _UI_TIME_POS_QUERY_TIMEOUT_SEC
+            while time.monotonic() < deadline:
+                try:
+                    line = sock_file.readline()
+                except OSError:
+                    self._close_query_socket()
+                    return None
+                if not line:
+                    self._close_query_socket()
+                    return None
+                try:
+                    message = json.loads(line.decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if message.get("request_id") != request_id:
+                    continue
+                if message.get("error") != "success":
+                    return None
+                data = message.get("data")
+                if data is None:
+                    return None
+                try:
+                    return max(0.0, float(data))
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    def _note_time_pos_jump(self, previous: float, pos: float) -> None:
+        if self._load_in_progress or previous <= 1.0:
+            return
+        if pos < previous - 1.0:
+            remaining = self._timeline_remaining_sec()
+            _TIMELINE_LOG.warning(
+                "time-pos backward %.2f -> %.2f rem=%s %s",
+                previous,
+                pos,
+                f"{remaining:.2f}s" if remaining is not None else "?",
+                self._timeline_snapshot(),
+            )
+        elif pos > previous + 8.0:
+            duration = self._duration_sec
+            near_end = (
+                duration is not None and duration > 0 and pos >= duration - 2.0
+            )
+            log_fn = _TIMELINE_LOG.debug if near_end else _TIMELINE_LOG.warning
+            log_fn(
+                "time-pos forward jump %.2f -> %.2f %s",
+                previous,
+                pos,
+                self._timeline_snapshot(),
+            )
+
+    def _apply_polled_time_pos(self, pos: float) -> None:
+        previous = self._time_pos_sec
+        self._note_time_pos_jump(previous, pos)
+        self._time_pos_sec = pos
+        lock = getattr(self, "_ui_time_pos_lock", None)
+        if lock is not None:
+            with lock:
+                self._queried_time_pos_sec = pos
+        if self._audio_pts_sec is None:
+            audible_previous = self._position_sec
+            self._position_sec = pos
+            changed = abs(pos - audible_previous) > 0.01
+            now = time.monotonic()
+            self._touch_position_clock()
+            if (
+                not self._load_in_progress
+                and changed
+                and now - self._last_position_emit >= _POSITION_INTERVAL_SEC
+            ):
+                self._last_position_emit = now
+                self._emit("position_changed")
+
+    def _ui_time_pos_poll_loop(self) -> None:
+        while not self._ui_time_pos_poll_stop.wait(_UI_TIME_POS_POLL_INTERVAL_SEC):
+            if (
+                self._shutdown
+                or not self._playing
+                or self._load_in_progress
+                or self._loaded_uri is None
+                or not self.is_available()
+            ):
+                continue
+            pos = self._query_time_pos_ipc()
+            if pos is None:
+                if self._query_sock_file is None and self.is_available():
+                    try:
+                        self._connect_query_socket()
+                    except OSError:
+                        pass
+                continue
+            self._apply_polled_time_pos(pos)
+
     def command(self, *args: object, timeout: float = _COMMAND_TIMEOUT_SEC) -> dict[str, Any]:
         if self._sock_file is None:
             raise OSError("mpv IPC connection closed")
@@ -707,6 +872,7 @@ class MpvPlaybackClient:
             except OSError:
                 pass
             self._sock = None
+        self._close_query_socket()
         if not self._shutdown:
             self._log_ipc_disconnect_diagnostics()
 
@@ -716,9 +882,9 @@ class MpvPlaybackClient:
         if response.get("error") != "success":
             raise RuntimeError(f"mpv rejected property {flag}: {response.get('error')}")
 
-    def get_property(self, name: str) -> object:
+    def get_property(self, name: str, *, timeout: float = _COMMAND_TIMEOUT_SEC) -> object:
         flag = name.replace("_", "-")
-        response = self.command("get_property", flag)
+        response = self.command("get_property", flag, timeout=timeout)
         if response.get("error") != "success":
             return None
         return response.get("data")
@@ -1374,15 +1540,22 @@ class MpvPlaybackClient:
             value = float(data)
         except (TypeError, ValueError):
             return None
-        if value < 0:
+        if math.copysign(1.0, value) < 0:
             return None
         return value
 
-    def _resolve_playback_position_sec(self) -> float:
-        """Audible position: audio-pts when mpv provides it, otherwise time-pos."""
+    def _resolve_audible_position_sec(self) -> float:
+        """Audible position for queue advance: audio-pts when valid, else time-pos."""
         if self._audio_pts_sec is not None:
             return self._audio_pts_sec
         return self._time_pos_sec
+
+    def _set_queried_time_pos(self, position_sec: float) -> None:
+        lock = getattr(self, "_ui_time_pos_lock", None)
+        if lock is None:
+            return
+        with lock:
+            self._queried_time_pos_sec = max(0.0, position_sec)
 
     def _seed_playback_position(self, position_sec: float) -> None:
         """Set position after seek/load until mpv property updates arrive."""
@@ -1390,10 +1563,11 @@ class MpvPlaybackClient:
         self._time_pos_sec = position_sec
         self._audio_pts_sec = None
         self._position_sec = position_sec
+        self._set_queried_time_pos(position_sec)
         self._touch_position_clock()
 
     def _publish_playback_position(self) -> None:
-        resolved = self._resolve_playback_position_sec()
+        resolved = self._resolve_audible_position_sec()
         previous = self._position_sec
         changed = abs(resolved - previous) > 0.01
         self._position_sec = resolved
@@ -1407,37 +1581,32 @@ class MpvPlaybackClient:
 
     def _apply_time_pos_update(self, pos: float) -> None:
         pos = max(0.0, pos)
-        previous = self._time_pos_sec
-        if not self._load_in_progress and previous > 1.0:
-            if pos < previous - 1.0:
-                remaining = self._timeline_remaining_sec()
-                _TIMELINE_LOG.warning(
-                    "time-pos backward %.2f -> %.2f rem=%s %s",
-                    previous,
-                    pos,
-                    f"{remaining:.2f}s" if remaining is not None else "?",
-                    self._timeline_snapshot(),
-                )
-            elif pos > previous + 8.0:
-                _TIMELINE_LOG.warning(
-                    "time-pos forward jump %.2f -> %.2f %s",
-                    previous,
-                    pos,
-                    self._timeline_snapshot(),
-                )
-        self._time_pos_sec = pos
-        self._publish_playback_position()
+        self._apply_polled_time_pos(pos)
+        if self._audio_pts_sec is not None:
+            self._publish_playback_position()
 
     def _apply_audio_pts_update(self, data: object) -> None:
         self._audio_pts_sec = self._coerce_optional_seconds(data)
         self._publish_playback_position()
 
     def get_position(self) -> float:
-        """Return cached playback position (audio-pts primary, time-pos fallback)."""
+        """Return cached audible position (audio-pts primary, time-pos fallback)."""
         return self._position_sec
 
+    def query_time_pos(self) -> float:
+        """Return current mpv time-pos for UI (polled off the event IPC connection)."""
+        if self._loaded_uri is None or self._shutdown:
+            return max(0.0, self._time_pos_sec)
+        if self._load_in_progress:
+            return max(0.0, self._time_pos_sec)
+        lock = getattr(self, "_ui_time_pos_lock", None)
+        if lock is None:
+            return max(0.0, self._time_pos_sec)
+        with lock:
+            return max(0.0, self._queried_time_pos_sec)
+
     def get_time_pos(self) -> float:
-        """Return cached mpv decode/sync timeline; for diagnostics only."""
+        """Return cached mpv time-pos; for diagnostics only."""
         return self._time_pos_sec
 
     @property
@@ -1477,6 +1646,8 @@ class MpvPlaybackClient:
             format_action_provenance(skip=1),
         )
         self._shutdown = True
+        self._stop_ui_time_pos_poll()
+        self._close_query_socket()
         self._loaded_uri = None
         self._track_end_signaled = False
         self._playing = False

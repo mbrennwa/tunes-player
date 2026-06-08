@@ -232,7 +232,7 @@ class NowPlayingBar(Gtk.Box):
         self._seek_apply_id: int | None = None
         service.subscribe(self._on_service_event)
         self._sync_from_service()
-        GLib.timeout_add(100, self._tick_progress)
+        GLib.timeout_add(50, self._tick_progress)
 
     def set_queue_handler(self, handler: Callable[[], None]) -> None:
         self._queue_handler = handler

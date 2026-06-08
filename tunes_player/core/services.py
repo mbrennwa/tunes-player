@@ -189,6 +189,7 @@ class PlayerService:
         self._output_profile: PlaybackOutputProfile | None = None
         self._exclusive_session: object | None = None
         self._position_sec = 0.0
+        self._audible_position_sec = 0.0
         self._duration_sec: float | None = None
         self._engine: PlaybackEngine | None = None
         self._engine_error: str | None = None
@@ -2751,7 +2752,7 @@ class PlayerService:
         duration = self._duration_sec
         if duration is None or duration <= 0:
             return
-        if self._position_sec < duration - _QUEUE_END_MARGIN_SEC:
+        if self._audible_position_sec < duration - _QUEUE_END_MARGIN_SEC:
             return
 
         index = self._playlist_position()
@@ -2782,10 +2783,10 @@ class PlayerService:
         time_pos = getattr(engine, "get_time_pos", None)
         time_pos_sec = time_pos() if callable(time_pos) else None
         _timeline_log.info(
-            "auto_advance queue[%s/%s] pos=%.2fs time-pos=%s dur=%.2fs",
+            "auto_advance queue[%s/%s] audible=%.2fs time-pos=%s dur=%.2fs",
             index,
             len(self._playlist_meta),
-            self._position_sec,
+            self._audible_position_sec,
             f"{time_pos_sec:.2f}s" if time_pos_sec is not None else "?",
             duration,
         )
@@ -3168,7 +3169,9 @@ class PlayerService:
             self._reset_playback_position(0.0)
 
     def _reset_playback_position(self, position_sec: float) -> None:
-        self._position_sec = max(0.0, position_sec)
+        position_sec = max(0.0, position_sec)
+        self._position_sec = position_sec
+        self._audible_position_sec = position_sec
 
     def max_seek_position_sec(self) -> float | None:
         engine = self._engine
@@ -3179,21 +3182,25 @@ class PlayerService:
             return None
         return cap_fn()
 
-    def _apply_engine_position(self, position_sec: float) -> None:
-        self._position_sec = max(0.0, position_sec)
-
     def refresh_playback_position_for_ui(self) -> None:
-        """Pull the latest mpv playback position (audio-pts primary) for the seek bar."""
+        """Pull live mpv time-pos for the seek bar."""
         engine = self._engine
         if engine is None:
             return
-        self._apply_engine_position(engine.get_position())
+        query_fn = getattr(engine, "query_time_pos", None)
+        if callable(query_fn):
+            self._position_sec = max(0.0, query_fn())
+        else:
+            self._position_sec = max(0.0, engine.get_position())
+
+    def _sync_audible_position_from_engine(self) -> None:
+        engine = self._engine
+        if engine is None:
+            return
+        self._audible_position_sec = max(0.0, engine.get_position())
 
     def _sync_playback_position_from_engine(self) -> None:
-        engine = self._engine
-        if engine is None:
-            return
-        self.refresh_playback_position_for_ui()
+        self._sync_audible_position_from_engine()
         self._maybe_auto_advance_queue()
 
     def _sync_duration_from_engine(self) -> None:
@@ -3204,7 +3211,7 @@ class PlayerService:
         if duration is not None and duration > 0:
             self._duration_sec = duration
         self._is_playing = engine.is_playing()
-        self.refresh_playback_position_for_ui()
+        self._sync_audible_position_from_engine()
         self._maybe_auto_advance_queue()
 
     def _sync_from_engine(self) -> None:
@@ -3234,9 +3241,10 @@ class PlayerService:
             return
         if event == "track_finished":
             _timeline_log.info(
-                "service track_finished track=%s service_pos=%.2f dur=%s",
+                "service track_finished track=%s ui_pos=%.2f audible=%.2f dur=%s",
                 self._current_track.id if self._current_track else None,
                 self._position_sec,
+                self._audible_position_sec,
                 self._duration_sec,
             )
             track = self._current_track
@@ -3275,7 +3283,9 @@ class PlayerService:
             self._report_error("Playback failed.")
             return
         if event == "position_changed":
-            self._sync_playback_position_from_engine()
+            self.refresh_playback_position_for_ui()
+            self._sync_audible_position_from_engine()
+            self._maybe_auto_advance_queue()
         elif event == "duration_changed":
             self._sync_duration_from_engine()
             self._emit("playback_changed")

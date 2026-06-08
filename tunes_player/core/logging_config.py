@@ -47,9 +47,18 @@ def configure_logging(data_dir: Path) -> Path:
 
     if sys.stderr.isatty():
         console_handler = logging.StreamHandler(sys.stderr)
-        console_handler.setLevel(logging.WARNING)
+        stderr_level = level
+        if os.environ.get("TUNES_LOG_STDERR", "").lower() not in ("1", "yes", "true"):
+            stderr_level = logging.WARNING
+        console_handler.setLevel(stderr_level)
         console_handler.setFormatter(formatter)
         app_logger.addHandler(console_handler)
+        print(
+            f"tunes-player: logging to {log_path} (level={level_name}"
+            + (", stderr enabled via TUNES_LOG_STDERR" if stderr_level == level else "")
+            + ")",
+            file=sys.stderr,
+        )
 
     _LOG.debug("Logging configured: %s (level=%s)", log_path, level_name)
     return log_path
