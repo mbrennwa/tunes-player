@@ -1,5 +1,10 @@
 # mpv playback work — agent handoff
 
+> **Superseded (June 2026):** [#46](https://github.com/mbrennwa/tunes-player/issues/46)
+> removed subprocess mpv + JSON IPC and restored in-process `MpvEngine`. [#34](https://github.com/mbrennwa/tunes-player/issues/34)
+> should be closed as eliminated by that unwind. This document is **historical context**
+> for the IPC disconnect investigation only.
+
 Handoff context for continuing **GitHub issue [#34](https://github.com/mbrennwa/tunes-player/issues/34)** (mpv IPC disconnect / unexpected quit) and related subprocess-mpv work from **#29**. Last updated 2026-06-08 on branch `devel`.
 
 ---

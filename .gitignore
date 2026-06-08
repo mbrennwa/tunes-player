@@ -25,6 +25,8 @@ venv/
 # App data (local dev)
 *.db
 .cache/
+mpv-playback-disconnect-*.log
+mpv-playback-disconnect-*.zip
 
 # Debian / packaging artifacts
 debian/*.log

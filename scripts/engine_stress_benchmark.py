@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Headless subprocess mpv benchmark under CPU stress (issue #29).
+"""Headless in-process mpv benchmark under CPU stress (#29 / #46).
 
-Plays local staged tracks on USB direct ALSA while ``cpu_load.py`` runs,
-logs phase markers to tunes-player.log, and prints xrun/error metrics.
+Plays local staged tracks on USB direct ALSA via ``MpvEngine`` while
+``cpu_load.py`` runs, logs phase markers to tunes-player.log, and prints
+xrun/error metrics.
 
 Example:
   python3 scripts/engine_stress_benchmark.py --load 0.80
@@ -199,7 +200,7 @@ def _run_phase(
     counter: _PhaseLogCounter,
 ) -> PhaseMetrics:
     _LOG.info(
-        "ENGINE_BENCHMARK session=%s phase=%s engine=subprocess start tracks=%d sec=%.0f",
+        "ENGINE_BENCHMARK session=%s phase=%s engine=inprocess start tracks=%d sec=%.0f",
         session,
         phase,
         len(tracks),
@@ -223,7 +224,6 @@ def _run_phase(
         use_device_output=True,
         output_profile=profile,
         on_event=on_event,
-        ipc_socket_path=ConfigManager().data_dir / f"benchmark-mpv-{session}.sock",
         endpoint_id=endpoint_id,
     )
 
@@ -243,14 +243,11 @@ def _run_phase(
                 time.sleep(0.15)
     finally:
         engine.quit()
-        sock = ConfigManager().data_dir / f"benchmark-mpv-{session}.sock"
-        if sock.exists():
-            sock.unlink(missing_ok=True)
 
     metrics = counter.metrics
     metrics.playback_errors = playback_errors
     _LOG.info(
-        "ENGINE_BENCHMARK session=%s phase=%s engine=subprocess end "
+        "ENGINE_BENCHMARK session=%s phase=%s engine=inprocess end "
         "alsa_xrun=%d end_file_error=%d playback_error=%d",
         session,
         phase,
@@ -273,9 +270,9 @@ def _parse_log_slice(log_path: Path, session: str) -> Counter[str]:
     for line in text.splitlines():
         if f"ENGINE_BENCHMARK session={session}" not in line:
             continue
-        if " engine=subprocess start" in line:
+        if " engine=inprocess start" in line or " engine=subprocess start" in line:
             in_phase = True
-        elif " engine=subprocess end " in line:
+        elif " engine=inprocess end " in line or " engine=subprocess end " in line:
             in_phase = False
             continue
         if not in_phase:
@@ -372,7 +369,7 @@ def main() -> int:
     print()
     print(f"Benchmark session {session}  log: {log_path}")
     print(f"Device: {mpv_device}  CPU stress: {'yes' if not args.skip_stress else 'no'}  load={args.load}")
-    print(f"{args.seconds:.0f}s × {len(tracks)} tracks (subprocess mpv IPC)\n")
+    print(f"{args.seconds:.0f}s × {len(tracks)} tracks (in-process MpvEngine)\n")
     header = f"{'alsa_xrun':>10} {'end_file_err':>13} {'playback_err':>13}"
     print(header)
     print("-" * len(header))

@@ -1,4 +1,4 @@
-"""mpv subprocess log file helpers."""
+"""mpv log file and playback diagnostic helpers (#46)."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def mpv_logging_cli_args(*, log_path: Path) -> list[str]:
 
 
 def prepare_mpv_log_file(log_path: Path) -> None:
-    """Truncate any previous mpv log so each subprocess starts with a fresh file."""
+    """Truncate any previous mpv log so each engine session starts with a fresh file."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text("", encoding="utf-8")
 
@@ -111,7 +111,7 @@ def describe_process_snapshot() -> str:
 
 
 def archive_mpv_log(log_path: Path) -> Path | None:
-    """Preserve the current mpv log after an unexpected disconnect."""
+    """Preserve the current mpv log after an unexpected playback failure."""
     try:
         if not log_path.is_file() or log_path.stat().st_size == 0:
             return None

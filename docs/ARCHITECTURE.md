@@ -340,29 +340,26 @@ MpvEngine — in-process libmpv on GTK thread, property observers → EngineEven
 core/playback/* — policy only (buffer, path, output profile)
 ```
 
-**Principles (unchanged):**
+**Principles:**
 
 0. **Bit-perfect first, ALSA direct preferred** — see [Bit-perfect playback](#bit-perfect-playback-requirement).
 1. **One playback implementation** — `MpvEngine` behind `PlaybackEngine`.
 2. **Authoritative path labels** — negotiated mpv properties after load (`playback_path_changed`).
-4. **Output policy in the playback process** — per-track `PlaybackOutputProfile`
-   (rate/format/channels, exclusive when appropriate), USB buffer sizes, IRQ affinity,
-   keep-ALSA-open across same-format skips, format-change `ao-reload`. **Bit-perfect
-   constraints apply inside the child** the same as in-process mpv today.
-5. **Input staging stays in main (v1)** — resolve track → local path or URL → pass to
-   playback process (`file://` or HTTPS as today).
+3. **Output policy in `PlayerService` + engine** — per-track `PlaybackOutputProfile`
+   (rate/format/channels, exclusive when appropriate), minimal demuxer buffers,
+   keep-ALSA-open across same-format skips, format-change `ao-reload`.
+4. **Resolve then load** — `resolve_track()` → local path or stream URL → `engine.load()`.
 
-**Phased delivery:**
+**Bare-metal validation** ([#46](https://github.com/mbrennwa/tunes-player/issues/46) Phase 5;
+VM/emulated audio is out of scope for sign-off):
 
-| Phase | Scope |
-|-------|--------|
-| 1 | IPC skeleton + `PlaybackEngine` client; launch mpv child from `PlayerService` |
-| 2 | Port **`PlaybackOutputProfile` / bit-perfect policy** over IPC (direct ALSA hw, format match, device volume — parity with today); **playback path status** (`PlaybackPathInfo`) **reported from playback process** after each load |
-| 3 | USB direct-ALSA **stability** tuning inside playback process (buffers, isolation); **validated** #29 repro (NFS + Holo, ~80% CPU, no stutter) **without** compromising bit-perfect |
-| 4 | ~~Remove in-process libmpv from playback path~~ **Done** — spike branch for reference only |
+- Direct ALSA bit-perfect on USB DAC; PipeWire sink fallback
+- Volume modes (hardware / software / fixed) and ALSA hw volume ([#39](https://github.com/mbrennwa/tunes-player/issues/39))
+- TIDAL/Qobuz streaming; queue advance near track end ([#44](https://github.com/mbrennwa/tunes-player/issues/44))
+- Seek bar smoothness; device change; exclusive-session contention
+- Optional stress: `scripts/cpu_load.py` + `scripts/engine_stress_benchmark.py` (~80% CPU)
 
-**Reference:** branch `spike/issue-29` preserves the experimental code and benchmark
-scripts (`scripts/cpu_load.py`, `scripts/engine_stress_benchmark.py`).
+**Reference:** branch `spike/issue-29` preserves the subprocess experiment for comparison.
 
 ### Bit-perfect playback (requirement)
 
@@ -479,7 +476,7 @@ bit-perfect mpv profile only for **direct ALSA** endpoints.
   shares storage).
 - A **renderer adapter** (e.g. `platform/linux/upnp.py` or `engines/upnp_renderer.py`)
   implements play/pause/seek/volume against the device’s UPnP services, not mpv PCM output.
-- **PlayerService** chooses engine by selected output: **local** → subprocess mpv client; **UPnP**
+- **PlayerService** chooses engine by selected output: **local** → `MpvEngine`; **UPnP**
   → renderer adapter. Queue and library logic stay in `core/`.
 - **Bit-perfect** on renderers is *best-effort*: send lossless sources without transcoding
   in Tunes; document that the device may still resample or apply DSP.
@@ -774,7 +771,7 @@ See [License rationale](#license-rationale).
 
 | Dependency | License | Note |
 |------------|---------|------|
-| mpv (subprocess) | GPLv2+ | Playback engine |
+| mpv / python-mpv (in-process) | GPLv2+ | Playback engine |
 | mutagen | GPLv2+ | Tags / local metadata |
 | GTK / Libadwaita | LGPL | OK inside GPL app |
 | tidalapi | LGPL-3.0 | TIDAL backend |
@@ -844,22 +841,19 @@ Trackable open items. Ordered milestones are in [Roadmap](#roadmap-ordered) abov
   Builds on `VolumeController.subscribe()` and MPRIS/D-Bus. See
   [External control interface](#external-control-interface-requirement).
 
-### Playback process ([#29](https://github.com/mbrennwa/tunes-player/issues/29))
+### Playback stack ([#46](https://github.com/mbrennwa/tunes-player/issues/46))
 
-- [x] **Out-of-process mpv** — single `PlaybackEngine` client; child mpv service (see
-  [Playback process redesign](#playback-process-redesign-issue-29)). **Must preserve
-  bit-perfect direct ALSA** when selected; PipeWire only when user chooses a sink.
-- [x] **IPC contract** — commands/events; unit tests with mocked socket / client helpers.
-- [x] **Port `output_profile.py` policy over IPC** — format match, unity gain, honest
-  resample labels; no silent fallback to mixed/resampled output on hw endpoints.
-- [x] **`PlaybackPathInfo` from playback process** — Now Playing quality/path line
-  driven by mpv/ALSA ground truth in the child.
-- [x] **Remove in-process libmpv** from playback hot path after parity.
-- [x] **Validate** USB direct ALSA under `scripts/cpu_load.py` (~80%) + full GTK app
-  — NFS library, Holo USB DAC, direct ALSA: **no stutter ≤ ~80% CPU**; occasional
-  stutter at ~90% (June 2026).
+- [x] **In-process libmpv** — `MpvEngine` as sole `PlaybackEngine` (see
+  [Playback stability history](#playback-stability-history-issues-29-46)).
+- [x] **Remove subprocess IPC** — eliminates [#34](https://github.com/mbrennwa/tunes-player/issues/34)
+  disconnect class; unwind [#29](https://github.com/mbrennwa/tunes-player/issues/29) experiment.
+- [x] **`output_profile.py` policy** — format match, unity gain, honest resample labels.
+- [x] **`PlaybackPathInfo` from engine** — Now Playing path line from mpv/ALSA ground truth.
+- [x] **Slim stability stack** — drop NFS cache, USB IRQ, stall watchdog; minimal ALSA
+  error recovery + xrun diagnostics.
+- [ ] **Bare-metal parity pass** — sign-off checklist above on physical hardware.
 
-Spike / reference: branch `spike/issue-29`.
+Spike / reference: branch `spike/issue-29` (subprocess experiment).
 
 ### Bit-perfect playback (mpv output profile)
 

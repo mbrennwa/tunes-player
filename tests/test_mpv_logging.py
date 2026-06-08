@@ -1,4 +1,4 @@
-"""Tests for mpv subprocess logging helpers."""
+"""Tests for mpv logging and diagnostic helpers."""
 
 from __future__ import annotations
 
