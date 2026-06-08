@@ -65,6 +65,7 @@ apt_depends = [
 # Packages vendored as wheels in the .deb (built at package build time).
 pypi_wheelhouse = [
   "tidalapi",
+  "python-mpv",
 ]
 
 [tool.pytest.ini_options]
