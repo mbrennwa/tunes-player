@@ -227,10 +227,12 @@ class PlayerService:
         self._discover_fetch_lock = threading.Lock()
         self._engine_init_lock = threading.Lock()
         self._engine_prewarm_started = False
-        self._engine_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="tunes-mpv-owner",
-        )
+        self._engine_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        if self._engine_uses_worker_thread():
+            self._engine_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="tunes-mpv-owner",
+            )
         data_dir = self._config_manager.data_dir
         self._tidal = TidalClient(
             data_dir / "tidal-session.json",
@@ -241,12 +243,21 @@ class PlayerService:
         if prewarm_engine:
             self.schedule_prewarm()
 
+    @staticmethod
+    def _engine_uses_worker_thread() -> bool:
+        from tunes_player.engines.factory import playback_engine_uses_worker_thread
+
+        return playback_engine_uses_worker_thread()
+
     def schedule_prewarm(self) -> None:
         """Start subprocess mpv on the dedicated owner thread."""
+        if not self._engine_uses_worker_thread():
+            return
         if (
             self._engine is not None
             or self.playback_available() is not None
             or self._engine_prewarm_started
+            or self._engine_executor is None
         ):
             return
         self._engine_prewarm_started = True
@@ -1728,6 +1739,14 @@ class PlayerService:
 
     def poll_playback(self) -> None:
         """Drain mpv events on the GTK main thread."""
+        if self._engine_uses_worker_thread():
+            engine = self._engine
+            poll_fn = getattr(engine, "poll_time_pos_cache", None) if engine is not None else None
+            if callable(poll_fn) and self._engine_executor is not None:
+                try:
+                    self._engine_executor.submit(poll_fn)
+                except Exception:
+                    pass
         while True:
             try:
                 event = self._engine_events.get_nowait()
@@ -1822,7 +1841,8 @@ class PlayerService:
                 break
         if engine is not None:
             engine.quit()
-        self._engine_executor.shutdown(wait=False, cancel_futures=True)
+        if self._engine_executor is not None:
+            self._engine_executor.shutdown(wait=False, cancel_futures=True)
         self._store.close()
 
     def subscribe(self, callback: EventCallback) -> Unsubscribe:
@@ -2322,8 +2342,13 @@ class PlayerService:
             engine.pause()
 
     def _reset_engine(self) -> None:
+        if not self._engine_uses_worker_thread():
+            self._reset_engine_unlocked()
+            return
         if threading.current_thread().name.startswith("tunes-mpv-owner"):
             self._reset_engine_unlocked()
+            return
+        if self._engine_executor is None:
             return
         try:
             self._engine_executor.submit(self._reset_engine_unlocked).result(timeout=5.0)
@@ -2459,8 +2484,12 @@ class PlayerService:
             return None
 
     def _ensure_engine(self) -> PlaybackEngine | None:
+        if not self._engine_uses_worker_thread():
+            return self._ensure_engine_locked()
         if threading.current_thread().name.startswith("tunes-mpv-owner"):
             return self._ensure_engine_locked()
+        if self._engine_executor is None:
+            return None
         try:
             return self._engine_executor.submit(self._ensure_engine_locked).result(
                 timeout=_ENGINE_CREATE_TIMEOUT_SEC,
@@ -2530,10 +2559,14 @@ class PlayerService:
         except RuntimeError as exc:
             self._report_error(str(exc), exc=exc)
             return None
+        from tunes_player.engines.factory import playback_engine_backend
+
+        backend = playback_engine_backend()
+        detail = f"socket={socket_path}" if backend == "subprocess" else "backend=inprocess"
         log.info(
-            "Created playback engine engine_id=%s socket=%s (%s)",
+            "Created playback engine engine_id=%s %s (%s)",
             id(self._engine),
-            socket_path,
+            detail,
             format_action_provenance(skip=1),
         )
         return self._engine
@@ -3182,16 +3215,36 @@ class PlayerService:
             return None
         return cap_fn()
 
+    def _apply_ui_position(self, position_sec: float, *, allow_backward: bool = False) -> None:
+        position = max(0.0, position_sec)
+        if not allow_backward:
+            if self._is_playing:
+                if position < self._position_sec:
+                    return
+            elif position < self._position_sec:
+                return
+        self._position_sec = position
+
     def refresh_playback_position_for_ui(self) -> None:
         """Pull live mpv time-pos for the seek bar."""
         engine = self._engine
         if engine is None:
             return
+        if self._engine_uses_worker_thread():
+            poll_fn = getattr(engine, "poll_time_pos_cache", None)
+            if callable(poll_fn) and self._engine_executor is not None:
+                if threading.current_thread().name.startswith("tunes-mpv-owner"):
+                    poll_fn()
+                else:
+                    try:
+                        self._engine_executor.submit(poll_fn).result(timeout=0.03)
+                    except Exception:
+                        pass
         query_fn = getattr(engine, "query_time_pos", None)
         if callable(query_fn):
-            self._position_sec = max(0.0, query_fn())
+            self._apply_ui_position(query_fn())
         else:
-            self._position_sec = max(0.0, engine.get_position())
+            self._apply_ui_position(engine.get_position())
 
     def _sync_audible_position_from_engine(self) -> None:
         engine = self._engine
