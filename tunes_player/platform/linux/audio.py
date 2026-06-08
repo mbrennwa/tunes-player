@@ -422,21 +422,19 @@ class LinuxOutputController:
                 self._sink_backend = pactl
         self._software_level = 0.72
 
-    def _active_alsa_card(self) -> int | None:
+    def _active_alsa_endpoint_id(self) -> str | None:
         active = self.get_active_endpoint_id()
         if active is None or not is_alsa_endpoint_id(active):
             return None
-        from tunes_player.platform.linux.alsa_mixer import alsa_card_from_endpoint_id
-
-        return alsa_card_from_endpoint_id(active)
+        return active
 
     def _alsa_has_hardware_volume(self) -> bool:
-        card = self._active_alsa_card()
-        if card is None:
+        endpoint_id = self._active_alsa_endpoint_id()
+        if endpoint_id is None:
             return False
-        from tunes_player.platform.linux.alsa_mixer import alsa_mixer_available
+        from tunes_player.platform.linux.alsa_mixer import alsa_mixer_available_for_endpoint
 
-        return alsa_mixer_available(card)
+        return alsa_mixer_available_for_endpoint(endpoint_id)
 
     @property
     def uses_device_volume(self) -> bool:
@@ -451,22 +449,22 @@ class LinuxOutputController:
         return bool(self._alsa_volume_endpoints() or self._list_sink_endpoints())
 
     def get_level(self) -> float:
-        card = self._active_alsa_card()
-        if card is not None and self._alsa_has_hardware_volume():
-            from tunes_player.platform.linux.alsa_mixer import alsa_get_level
+        endpoint_id = self._active_alsa_endpoint_id()
+        if endpoint_id is not None and self._alsa_has_hardware_volume():
+            from tunes_player.platform.linux.alsa_mixer import alsa_get_level_for_endpoint
 
-            return alsa_get_level(card)
+            return alsa_get_level_for_endpoint(endpoint_id)
         if self.uses_device_volume and self._sink_backend is not None:
             return self._sink_backend.get_level()
         return self._software_level
 
     def set_level(self, level: float) -> None:
         clamped = max(0.0, min(1.0, level))
-        card = self._active_alsa_card()
-        if card is not None and self._alsa_has_hardware_volume():
-            from tunes_player.platform.linux.alsa_mixer import alsa_set_level
+        endpoint_id = self._active_alsa_endpoint_id()
+        if endpoint_id is not None and self._alsa_has_hardware_volume():
+            from tunes_player.platform.linux.alsa_mixer import alsa_set_level_for_endpoint
 
-            alsa_set_level(card, clamped)
+            alsa_set_level_for_endpoint(endpoint_id, clamped)
             return
         if self.uses_device_volume and self._sink_backend is not None:
             self._sink_backend.set_level(clamped)

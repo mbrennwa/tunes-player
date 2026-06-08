@@ -30,9 +30,10 @@ _USB_MIXER_INFO = re.compile(
     r"Info:.*channels=(\d+).*cmask=0x([0-9a-f]+)",
     re.IGNORECASE,
 )
+_DIGITAL_PCM_MARKERS = ("hdmi", "displayport", "iec958", "spdif")
 
 _AMIXER_TIMEOUT_SEC = 2.0
-_VOLUME_CONTROL_CACHE: dict[tuple[int, bool], AlsaVolumeControl | None] = {}
+_VOLUME_CONTROL_CACHE: dict[tuple[int, int | None, bool], AlsaVolumeControl | None] = {}
 
 
 @dataclass(frozen=True)
@@ -54,15 +55,12 @@ class _MixerCandidate:
     db_range: float
     playback_channels: int
     joined_volume: bool
-    playback_channels: int
-    joined_volume: bool
 
 
 @dataclass(frozen=True)
 class _ControlDetails:
     playback_channels: int
     db_range: float
-    joined_volume: bool
     joined_volume: bool
 
 
@@ -88,6 +86,13 @@ def alsa_card_from_endpoint_id(endpoint_id: str) -> int | None:
     return int(match.group(1))
 
 
+def alsa_device_from_endpoint_id(endpoint_id: str) -> int | None:
+    match = _ALSA_HW_ID.match(endpoint_id)
+    if match is None:
+        return None
+    return int(match.group(2))
+
+
 def clear_alsa_mixer_cache() -> None:
     _VOLUME_CONTROL_CACHE.clear()
 
@@ -95,19 +100,35 @@ def clear_alsa_mixer_cache() -> None:
 def discover_output_volume_control(
     card: int,
     *,
+    device: int | None = None,
     verify: bool = False,
 ) -> AlsaVolumeControl | None:
-    """Return the best main output volume control for this card, if any.
-
-    When ``verify`` is False (startup / UI probes), rank candidates from mixer
-    metadata only. When True (preferences refresh), also write-test the control.
-    """
-    cache_key = (card, verify)
+    """Return the best main output volume control for this card/device, if any."""
+    cache_key = (card, device, verify)
     if cache_key in _VOLUME_CONTROL_CACHE:
         return _VOLUME_CONTROL_CACHE[cache_key]
-    discovered = _discover_output_volume_control(card, verify=verify)
+    discovered = _discover_output_volume_control(card, device=device, verify=verify)
     _VOLUME_CONTROL_CACHE[cache_key] = discovered
     return discovered
+
+
+def discover_output_volume_control_for_endpoint(
+    endpoint_id: str,
+    *,
+    verify: bool = False,
+) -> AlsaVolumeControl | None:
+    card = alsa_card_from_endpoint_id(endpoint_id)
+    device = alsa_device_from_endpoint_id(endpoint_id)
+    if card is None or device is None:
+        return None
+    return discover_output_volume_control(card, device=device, verify=verify)
+
+
+def alsa_mixer_control_for_endpoint(endpoint_id: str) -> str | None:
+    control = discover_output_volume_control_for_endpoint(endpoint_id)
+    if control is None:
+        return None
+    return control.scontrol
 
 
 def alsa_mixer_control_for_card(card: int) -> str | None:
@@ -117,13 +138,37 @@ def alsa_mixer_control_for_card(card: int) -> str | None:
     return control.scontrol
 
 
+def alsa_mixer_available_for_endpoint(endpoint_id: str) -> bool:
+    return discover_output_volume_control_for_endpoint(endpoint_id) is not None
+
+
 def alsa_mixer_available(card: int) -> bool:
     return discover_output_volume_control(card) is not None
 
 
+def alsa_mixer_adjustable_for_endpoint(endpoint_id: str) -> bool:
+    return (
+        discover_output_volume_control_for_endpoint(endpoint_id, verify=True)
+        is not None
+    )
+
+
 def alsa_mixer_adjustable(card: int) -> bool:
-    """True when amixer can read and write a playback level on this card."""
     return discover_output_volume_control(card, verify=True) is not None
+
+
+def alsa_get_level_for_endpoint(endpoint_id: str) -> float:
+    control = discover_output_volume_control_for_endpoint(endpoint_id)
+    if control is None:
+        return 0.72
+    return _read_normalized_level(control.card, control)
+
+
+def alsa_set_level_for_endpoint(endpoint_id: str, level: float) -> None:
+    control = discover_output_volume_control_for_endpoint(endpoint_id)
+    if control is None:
+        return
+    _write_normalized_level(control.card, control, max(0.0, min(1.0, level)))
 
 
 def alsa_get_level(card: int) -> float:
@@ -140,6 +185,19 @@ def alsa_set_level(card: int, level: float) -> None:
     _write_normalized_level(card, control, max(0.0, min(1.0, level)))
 
 
+def _pcm_device_is_digital_output(card: int, device: int) -> bool:
+    from tunes_player.platform.linux.audio_probe import _parse_aplay_playback_devices
+
+    for entry in _parse_aplay_playback_devices():
+        if entry[0] != card or entry[3] != device:
+            continue
+        device_name = (entry[5] or entry[4] or "").casefold()
+        card_name = (entry[2] or entry[1] or "").casefold()
+        label = f"{card_name} {device_name}"
+        return any(marker in label for marker in _DIGITAL_PCM_MARKERS)
+    return False
+
+
 def _run_amixer(card: int, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["amixer", "-c", str(card), *args],
@@ -153,8 +211,11 @@ def _run_amixer(card: int, *args: str) -> subprocess.CompletedProcess[str]:
 def _discover_output_volume_control(
     card: int,
     *,
+    device: int | None,
     verify: bool,
 ) -> AlsaVolumeControl | None:
+    if device is not None and _pcm_device_is_digital_output(card, device):
+        return None
     if shutil.which("amixer") is None:
         return None
     candidates = _list_mixer_candidates(card)
@@ -167,25 +228,12 @@ def _discover_output_volume_control(
         reverse=True,
     )
     for candidate in ranked:
-        details = _control_details(card, candidate.scontrol)
-        if details is None:
-            continue
-        ranked_candidate = _MixerCandidate(
+        control = AlsaVolumeControl(
+            card=card,
             numid=candidate.numid,
-            element_name=candidate.element_name,
             scontrol=candidate.scontrol,
             min_val=candidate.min_val,
             max_val=candidate.max_val,
-            db_range=details.db_range,
-            playback_channels=details.playback_channels,
-            joined_volume=details.joined_volume,
-        )
-        control = AlsaVolumeControl(
-            card=card,
-            numid=ranked_candidate.numid,
-            scontrol=ranked_candidate.scontrol,
-            min_val=ranked_candidate.min_val,
-            max_val=ranked_candidate.max_val,
         )
         if not verify:
             return control
@@ -236,6 +284,12 @@ def _list_mixer_candidates(card: int) -> list[_MixerCandidate]:
             continue
 
         scontrol = current_name[: -len(" Playback Volume")]
+        details = _control_details(card, scontrol)
+        if details is None:
+            current_numid = None
+            current_name = None
+            continue
+
         candidates.append(
             _MixerCandidate(
                 numid=current_numid,
@@ -243,9 +297,9 @@ def _list_mixer_candidates(card: int) -> list[_MixerCandidate]:
                 scontrol=scontrol,
                 min_val=min_val,
                 max_val=max_val,
-                db_range=float(max_val - min_val),
-                playback_channels=1,
-                joined_volume=False,
+                db_range=details.db_range,
+                playback_channels=details.playback_channels,
+                joined_volume=details.joined_volume,
             )
         )
         current_numid = None
@@ -266,8 +320,6 @@ def _control_details(card: int, scontrol: str) -> _ControlDetails | None:
             capabilities = line.casefold()
             break
     if "pvolume" not in capabilities:
-        return None
-    if "cvolume" in capabilities:
         return None
     if "cvolume" in capabilities:
         return None
