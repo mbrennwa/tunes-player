@@ -158,7 +158,7 @@ class PlaybackPathNoteMergeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = ConfigManager(Path(tmp) / "config.toml")
             config.load()
-            service = PlayerService(config=config, prewarm_engine=False)
+            service = PlayerService(config=config)
             service._current_track = Track(
                 id="local:file:test",
                 title="Test",

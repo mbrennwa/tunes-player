@@ -18,7 +18,7 @@ from tunes_player.ui.gtk.art import ArtLoader
 from tunes_player.ui.gtk.util import format_duration, join_detail, source_label
 
 _TIME_LABEL_CHARS = 7  # wide enough for "0:00:00"
-# Keep UI seeks inside mpv-safe range (see playback_client._SEEK_END_MARGIN_SEC).
+# Keep UI seeks inside mpv-safe range (see engines/mpv._SEEK_END_MARGIN_SEC).
 _SEEK_END_MARGIN_SEC = 1.0
 _ART_PIXEL_SIZE = 48
 _VOLUME_SLIDER_WIDTH = 180

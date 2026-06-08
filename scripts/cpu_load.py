@@ -59,14 +59,6 @@ def _cpu_count() -> int:
 
 
 def _default_reserve_cpus() -> str:
-    try:
-        from tunes_player.platform.linux.usb_irq import xhci_irq_cpu
-
-        cpu = xhci_irq_cpu()
-        if cpu is not None:
-            return str(cpu)
-    except ImportError:
-        pass
     return "0"
 
 

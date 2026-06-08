@@ -1,32 +1,29 @@
-"""Playback engine factory backend selection (#46)."""
+"""Playback engine factory (#46)."""
 
 from __future__ import annotations
 
-import os
 import unittest
 from unittest.mock import patch
 
-from tunes_player.engines.factory import (
-    playback_engine_backend,
-    playback_engine_uses_worker_thread,
-)
+from tunes_player.engines.factory import create_playback_engine, probe_playback_engine
 
 
 class PlaybackFactoryTests(unittest.TestCase):
-    def test_default_backend_is_inprocess(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
-            os.environ.pop("TUNES_PLAYBACK_ENGINE", None)
-            self.assertEqual(playback_engine_backend(), "inprocess")
+    def test_probe_playback_engine_delegates_to_mpv(self) -> None:
+        with patch(
+            "tunes_player.engines.mpv.probe_playback_engine",
+            return_value=None,
+        ) as probe:
+            self.assertIsNone(probe_playback_engine())
+            probe.assert_called_once()
 
-    def test_subprocess_backend_from_env(self) -> None:
-        with patch.dict(os.environ, {"TUNES_PLAYBACK_ENGINE": "subprocess"}):
-            self.assertEqual(playback_engine_backend(), "subprocess")
+    def test_create_playback_engine_returns_mpv_engine(self) -> None:
+        with patch("tunes_player.engines.factory.MpvEngine") as mpv_cls:
+            mpv_cls.return_value = object()
+            engine = create_playback_engine(volume=0.5, on_event=None)
+            self.assertIs(engine, mpv_cls.return_value)
+            mpv_cls.assert_called_once()
 
-    def test_inprocess_does_not_use_worker_thread(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
-            os.environ.pop("TUNES_PLAYBACK_ENGINE", None)
-            self.assertFalse(playback_engine_uses_worker_thread())
 
-    def test_subprocess_uses_worker_thread(self) -> None:
-        with patch.dict(os.environ, {"TUNES_PLAYBACK_ENGINE": "subprocess"}):
-            self.assertTrue(playback_engine_uses_worker_thread())
+if __name__ == "__main__":
+    unittest.main()

@@ -120,7 +120,6 @@ class MpvEngine:
         self._opened_exclusive: bool | None = None
         self._last_output_format_key: tuple[object, ...] | None = None
         self._recovering_direct_alsa = False
-        self._stable_output_active = False
         self._keep_alsa_open_on_track_change = self._usb_keep_device_open()
 
         options: dict[str, object] = {
@@ -132,7 +131,7 @@ class MpvEngine:
             "input_vo_keyboard": False,
             "ytdl": False,
         }
-        # Direct ALSA opens on first track load — not at idle/prewarm (matches subprocess mpv).
+        # Direct ALSA opens on first track load — not at idle init.
         if output_profile is not None and output_profile.direct_alsa:
             options.update({"ao": "null", "replaygain": "no"})
         else:
@@ -329,20 +328,6 @@ class MpvEngine:
         """Audible timeline (audio-pts when available) for queue advance and watchdogs."""
         return self._position_sec
 
-    def poll_time_pos_cache(self) -> None:
-        """Refresh UI time-pos cache from libmpv (mpv owner thread only)."""
-        if (
-            self._shutting_down
-            or self._terminated
-            or self._loaded_uri is None
-            or self._load_in_progress
-        ):
-            return
-        pos = self._player.time_pos
-        if pos is None:
-            return
-        self._set_cached_time_pos(float(pos))
-
     def query_time_pos(self) -> float:
         """Return live mpv time-pos for the seek bar (call from the engine owner thread)."""
         if not self._shutting_down and not self._terminated:
@@ -378,16 +363,6 @@ class MpvEngine:
     @property
     def load_in_progress(self) -> bool:
         return self._load_in_progress
-
-    def playback_stall_age_sec(self) -> float | None:
-        if not self._playing or self._loaded_uri is None or self._terminated:
-            return None
-        if self._last_position_update_at <= 0.0:
-            return None
-        return time.monotonic() - self._last_position_update_at
-
-    def refresh_usb_playback_isolation(self) -> None:
-        """No-op for in-process engine (USB IRQ pinning removed in #46)."""
 
     def release_alsa_device_contention(self) -> None:
         """No-op for in-process engine."""
@@ -428,44 +403,6 @@ class MpvEngine:
             return True
         except Exception as exc:
             _LOG.warning("Direct ALSA playback recovery failed: %s", exc)
-            return False
-        finally:
-            self._recovering_direct_alsa = False
-
-    def switch_to_stable_alsa_output(self) -> bool:
-        if self._stable_output_active:
-            return False
-        try:
-            from tunes_player.platform.linux.alsa_playback import plughw_mpv_device
-        except ImportError:
-            return False
-        stable_device = plughw_mpv_device(self._audio_device)
-        profile = self._output_profile
-        uri = self._loaded_uri
-        if stable_device is None or profile is None or uri is None or not profile.direct_alsa:
-            return False
-        resume_sec = self._resume_position_sec()
-        self._stable_output_active = True
-        self._audio_device = stable_device
-        self._recovering_direct_alsa = True
-        try:
-            self._set_property("audio-exclusive", "no")
-            self._set_property("audio-device", stable_device)
-            self._reload_direct_alsa_output(stop_first=True)
-            self._apply_buffer_policy(uri, profile, warmup=False)
-            self._apply_track_format(profile)
-            self._player.play(uri)
-            if resume_sec > 0.5:
-                self._player.time_pos = resume_sec
-                self._seed_playback_position(resume_sec)
-            self._player.pause = False
-            self._playing = True
-            self._touch_position_clock()
-            self._emit("playing_changed")
-            return True
-        except Exception as exc:
-            _LOG.warning("Stable ALSA fallback failed: %s", exc)
-            self._stable_output_active = False
             return False
         finally:
             self._recovering_direct_alsa = False

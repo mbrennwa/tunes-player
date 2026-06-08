@@ -18,7 +18,7 @@ class PlaybackErrorRecoveryTests(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         config = ConfigManager(Path(self._tmpdir.name) / "config.toml")
         config.load()
-        self._service = PlayerService(config=config, prewarm_engine=False)
+        self._service = PlayerService(config=config)
         self._track = Track(
             id="local:file:one",
             title="Track",

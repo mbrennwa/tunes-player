@@ -1,6 +1,6 @@
 """Poll ALSA PCM status for xrun counter increases (Linux direct output).
 
-Diagnostics only — stall watchdog in PlayerService handles playback recovery.
+Diagnostics only — logs ALSA XRUNs; does not trigger playback recovery (#46).
 """
 
 from __future__ import annotations

@@ -49,7 +49,7 @@ def is_usb_alsa_playback(endpoint_id: str | None, mpv_device: str | None) -> boo
 
 
 def effective_mpv_alsa_device(raw_device: str | None) -> str | None:
-    """Keep hw: for USB; stability tuning is in subprocess mpv buffers and IRQ co-location."""
+    """Keep hw: for USB DACs; buffer policy is in core/playback/buffer_policy.py."""
     if not raw_device:
         return None
     if raw_device in _device_cache:

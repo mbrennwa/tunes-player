@@ -1,4 +1,4 @@
-"""Playback engine protocol — implemented by engines/mpv.py (default) or playback_client.py."""
+"""Playback engine protocol — implemented by engines/mpv.py."""
 
 from __future__ import annotations
 

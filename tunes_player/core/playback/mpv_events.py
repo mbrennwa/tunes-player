@@ -1,8 +1,8 @@
-"""mpv JSON IPC helpers (pure functions for tests)."""
+"""mpv end-file reason helpers (shared by in-process engine and tests)."""
 
 from __future__ import annotations
 
-# mpv client.h mpv_end_file_reason (numeric JSON IPC values).
+# mpv client.h mpv_end_file_reason (numeric property values).
 END_FILE_EOF = 0
 END_FILE_STOP = 2
 END_FILE_QUIT = 3

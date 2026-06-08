@@ -19,7 +19,7 @@ class FolderMonitorManagerTests(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self._config = ConfigManager(Path(self._tmpdir.name) / "config.json")
         self._config.load()
-        self._service = PlayerService(config=self._config, prewarm_engine=False)
+        self._service = PlayerService(config=self._config)
         self._folder = str(Path(self._tmpdir.name) / "music")
         Path(self._folder).mkdir()
         self._manager = FolderMonitorManager(self._service)

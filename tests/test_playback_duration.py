@@ -44,7 +44,7 @@ class PlaybackDurationTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.TemporaryDirectory()
         config = ConfigManager(Path(self._tmpdir.name) / "config.toml")
-        self._service = PlayerService(config=config, prewarm_engine=False)
+        self._service = PlayerService(config=config)
 
     def tearDown(self) -> None:
         self._tmpdir.cleanup()

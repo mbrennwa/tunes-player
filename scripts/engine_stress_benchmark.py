@@ -32,7 +32,7 @@ from tunes_player.core.config import ConfigManager
 from tunes_player.core.logging_config import configure_logging, diagnostics_log_path
 from tunes_player.core.playback.output_profile import PlaybackOutputProfile
 from tunes_player.engines.factory import create_playback_engine
-from tunes_player.engines.playback_ipc import END_FILE_ERROR
+from tunes_player.core.playback.mpv_events import END_FILE_ERROR
 from tunes_player.platform.linux.alsa_playback import effective_mpv_alsa_device
 from tunes_player.platform.linux.alsa_xrun_monitor import AlsaXrunMonitor, parse_card_from_mpv_device
 
@@ -236,9 +236,6 @@ def _run_phase(
                 label,
                 path.name,
             )
-            refresh = getattr(engine, "refresh_usb_playback_isolation", None)
-            if callable(refresh):
-                refresh()
             engine.load(str(path), output_profile=track_profile)
             deadline = time.monotonic() + seconds_per_track
             while time.monotonic() < deadline:

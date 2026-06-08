@@ -83,7 +83,7 @@ others) with rationale and collisions are in **[docs/NAMING.md](NAMING.md)**.
 | Local scan + SQLite index | Done (`core/library/`, multiprocessing scan worker) |
 | `Release` / `Track` models | Done — unified release across local + streaming |
 | `PlayableSource` + `resolve_track` | Done (`core/backends/`) |
-| `PlaybackEngine` + subprocess mpv (IPC) | Done — queue, skip, seek, events ([#29](https://github.com/mbrennwa/tunes-player/issues/29)) |
+| `PlaybackEngine` + in-process libmpv | Done — queue, skip, seek, events ([#46](https://github.com/mbrennwa/tunes-player/issues/46)) |
 | Device volume + bit-perfect profile | Done (Linux) — ALSA direct, format match, optional exclusive access, honest playback labels |
 | MPRIS + GDK media keys | Done |
 | GTK shell (search, New Releases, Suggest Music, source filter, queue sheet) | Done |
@@ -97,7 +97,7 @@ others) with rationale and collisions are in **[docs/NAMING.md](NAMING.md)**.
 | Minimized compact controller | Not started |
 | UPnP / AES67 output | Not started |
 | DEB packaging | Not started |
-| USB direct-ALSA under CPU load ([#29](https://github.com/mbrennwa/tunes-player/issues/29)) | Done — subprocess mpv; validated NFS + Holo direct ALSA clean to ~80% CPU (`scripts/cpu_load.py`) |
+| USB direct-ALSA under CPU load ([#29](https://github.com/mbrennwa/tunes-player/issues/29)) | Historical — subprocess experiment closed ([#46](https://github.com/mbrennwa/tunes-player/issues/46)); in-process mpv restored |
 
 ---
 
@@ -117,11 +117,12 @@ tunes_player/
 │   │   └── qobuz/     # in-tree REST client, convert, ids
 │   ├── library/       # db, store, scanner, scan_worker, release_logic, art_cache
 │   └── playback/
-│       ├── engine.py  # PlaybackEngine protocol
-│       └── mpv_cli.py # mpv CLI/property helpers (base_audio_options, …)
+│       ├── engine.py     # PlaybackEngine protocol
+│       ├── mpv_cli.py    # mpv CLI/property helpers (base_audio_options, …)
+│       └── mpv_events.py # end-file reason helpers
 ├── engines/
 │   ├── factory.py         # create_playback_engine()
-│   └── playback_client.py # MpvPlaybackClient — subprocess mpv via JSON IPC (#29)
+│   └── mpv.py             # MpvEngine — in-process libmpv (#46)
 ├── platform/
 │   └── linux/         # MPRIS, PipeWire/Pulse volume (audio.py)
 └── ui/
@@ -285,7 +286,7 @@ Same layering as GUI:
 |-------|----------------|
 | `core/backends/` | Resolve `Track` → `PlayableSource` (file path or HTTPS URL) |
 | `PlayerService` | Queue, play/pause/skip/seek, volume, federated search, home feeds |
-| `engines/playback_client.py` | `PlaybackEngine` — subprocess mpv via JSON IPC (load, play/pause/seek, events) |
+| `engines/mpv.py` | `PlaybackEngine` — in-process libmpv via python-mpv (load, play/pause/seek, events) |
 | `platform/linux/audio.py` | Output device list, **endpoint volume**, mpv audio-device mapping |
 | `platform/linux/mpris.py` | D-Bus controls from **PlayerService**, not from GTK or mpv |
 | `ui/gtk/` | Displays state; calls `PlayerService` only |
@@ -310,73 +311,40 @@ class PlayableSource:
 
 - Default and preferred **decoder/output** on **all** OSes (cross-platform).
 - Music-only: run **headless** (no video surface) — avoids embedding mpv in GTK/Qt.
-- **Today:** **subprocess mpv** runs in a dedicated child process; `MpvPlaybackClient`
-  in `engines/playback_client.py` speaks JSON IPC. `PlayerService` owns queue, device
-  profile, and transport; mpv property events post back to the UI thread
-  ([#29](https://github.com/mbrennwa/tunes-player/issues/29)).
-- **Removed:** in-process **python-mpv** / libmpv in the main Tunes process (phase 4).
+- **Today:** **in-process libmpv** via `python-mpv`; `MpvEngine` in `engines/mpv.py`
+  runs on the GTK main thread. `PlayerService` owns queue, device profile, and
+  transport; mpv property observers enqueue `EngineEvent`s drained on the UI thread
+  ([#46](https://github.com/mbrennwa/tunes-player/issues/46)).
+- **Removed:** subprocess mpv + JSON IPC (`playback_client.py`, dual sockets, prewarm
+  executor) — closed experiment from ([#29](https://github.com/mbrennwa/tunes-player/issues/29)).
 
-### Playback process redesign (issue #29)
+### Playback stability history (issues #29, #46)
 
-**Problem:** On USB direct ALSA (`alsa:hw:…`), audible dropouts appear when **system CPU
-load is high**. Built-in / PipeWire paths tolerate the same load. Investigation
-(June 2026) showed:
+**June 2026:** A subprocess mpv + JSON IPC stack ([#29](https://github.com/mbrennwa/tunes-player/issues/29))
+was merged to address USB direct-ALSA dropouts under CPU load. Retrospective: VM audio
+confounded much of the investigation; the IPC layer introduced ongoing disconnect and
+sync fragility ([#34](https://github.com/mbrennwa/tunes-player/issues/34), [#44](https://github.com/mbrennwa/tunes-player/issues/44)).
 
-- Root cause is **ALSA underrun / XRUN** when mpv’s output thread is delayed — not NFS
-  input alone, and not “Tunes CPU usage” in isolation.
-- **Headless mpv** (engine only, no GTK) stays clean even at ~80% CPU stress.
-- **Full app** under load: in-process libmpv stutters; **mpv in a separate process**
-  is much more stable (decode + ALSA isolated from Python/GTK/library work).
+**Unwind ([#46](https://github.com/mbrennwa/tunes-player/issues/46)):** `devel` restored
+**in-process libmpv** (`engines/mpv.py`) and removed subprocess IPC, NFS staging cache,
+USB IRQ pinning, and the stall watchdog. **Kept:** bit-perfect output policy, volume modes,
+`#44` queue advance rules, minimal buffer policy, ALSA xrun **diagnostics** (log only),
+and a single **ao-reload → full-reload** retry on direct-ALSA `playback_error`.
 
-An experimental mitigation stack was developed on branch `spike/issue-29` (commit
-`233d718`): buffer policy, NFS staging cache, USB IRQ pinning, optional subprocess mpv
-via `TUNES_MPV_SUBPROCESS=1`, duplicated engine logic in `mpv.py` and `mpv_ipc.py`.
-That spike is **not merged to `devel`**. It informed the design below but is too
-sprawling to maintain as-is.
-
-**Validation (June 2026, `devel`):** Full GTK app, **NFS library**, **Holo USB DAC**
-(`alsa:hw:…`, exclusive direct ALSA), CPU stress via `scripts/cpu_load.py`:
-
-- **≤ ~80% CPU:** no audible stuttering (acceptance target met).
-- **~90% CPU:** occasional stutter — expected at extreme scheduler load; direct ALSA +
-  USB isochronous output can still underrun when the whole machine is saturated.
-
-Spike / reference branch `spike/issue-29` remains for comparison only.
-
-**Target architecture:**
+**Current architecture:**
 
 ```text
-┌─────────────────────────────────────┐     IPC (JSON/socket)     ┌──────────────────┐
-│ Tunes main process                  │ ◄──────────────────────► │ mpv playback     │
-│  GTK · search · library · queue     │   load play pause seek   │  process         │
-│  PlayerService (remote control)     │   position eof error     │  ALSA / PW ao    │
-└─────────────────────────────────────┘                          └──────────────────┘
+PlayerService (queue, advance, output profile, volume)
+       ↓
+MpvEngine — in-process libmpv on GTK thread, property observers → EngineEvents
+core/playback/* — policy only (buffer, path, output profile)
 ```
 
-**Principles:**
+**Principles (unchanged):**
 
-0. **Bit-perfect first, ALSA direct preferred** — the playback-process redesign must
-   **preserve** today’s sample-accurate path, not trade it for stability. Where hardware
-   allows, audio reaches the DAC in the **original format** (rate, bit depth, channels)
-   with mpv unity gain and **no soft-volume DSP** (see
-   [Bit-perfect playback](#bit-perfect-playback-requirement)). **Direct ALSA `alsa:hw:…`**
-   is the **preferred** output route for local listening; PipeWire/Pulse remains a
-   mixed-desktop fallback only. Issue #29 is about **isolating** the existing direct-ALSA
-   bit-perfect pipeline in a child process — not relaxing format matching or defaulting
-   to resampled/mixed output.
-1. **One playback implementation** — subprocess mpv behind the existing
-   `PlaybackEngine` protocol (client in main process; service in child).
-2. **Main process never runs libmpv for playback** — optional check that `mpv` binary
-   exists at startup.
-3. **Explicit IPC contract** — commands (`load`, `play`, `pause`, `seek`, `stop`,
-   `set_property`) and events (`position`, `duration`, `playing`, `track_finished`,
-   `playback_error`, **`playback_path_changed`**). The **Now Playing** path label
-   (e.g. `ALSA bit-perfect`, resample notes, `via PipeWire`) must reflect **what the
-   playback process actually negotiated** (mpv properties, ALSA `hw_params`), not a
-   pre-compute in the main process alone. Today `PlayerService` derives
-   `PlaybackPathInfo` from file metadata + endpoint before load; after #29 the
-   **authoritative** label comes from the playback child (main may show intent until
-   load confirms).
+0. **Bit-perfect first, ALSA direct preferred** — see [Bit-perfect playback](#bit-perfect-playback-requirement).
+1. **One playback implementation** — `MpvEngine` behind `PlaybackEngine`.
+2. **Authoritative path labels** — negotiated mpv properties after load (`playback_path_changed`).
 4. **Output policy in the playback process** — per-track `PlaybackOutputProfile`
    (rate/format/channels, exclusive when appropriate), USB buffer sizes, IRQ affinity,
    keep-ALSA-open across same-format skips, format-change `ao-reload`. **Bit-perfect
@@ -436,7 +404,7 @@ hardware** entry for their DAC, not the PipeWire sink with the same name.
 - **Local FLAC/WAV** is the primary bit-perfect use case for v1 (ALSA hw only).
 
 Implement bit-perfect as an explicit **settings profile** applied when constructing
-the playback engine (`MpvPlaybackClient` / subprocess mpv), not
+the playback engine (`MpvEngine` / in-process mpv), not
 scattered mpv flags in UI code.
 
 **Not planned (v1):** PipeWire pro-audio / rate-matched sink bit-perfect. ALSA hw +
@@ -523,7 +491,7 @@ of stacks). Spec-only until someone needs it; do not block v1 local + UPnP work.
 
 ```text
 Settings → Output
-  ├── Local: PipeWire sink / ALSA device   → MpvPlaybackClient + VolumeController
+  ├── Local: PipeWire sink / ALSA device   → MpvEngine + VolumeController
   ├── Network: UPnP Media Renderer (list)  → RendererAdapter (URI push)
   └── (future) AES67 / Dante endpoint      → pro adapter
 ```

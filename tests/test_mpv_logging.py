@@ -65,20 +65,6 @@ class MpvLoggingTests(unittest.TestCase):
             log_path.write_text("line1\nline2\nline3\n", encoding="utf-8")
             self.assertEqual(tail_mpv_log(log_path, max_lines=2), ["line2", "line3"])
 
-    def test_build_startup_args_includes_log_file(self) -> None:
-        from tunes_player.engines.playback_client import MpvPlaybackClient
-
-        client = object.__new__(MpvPlaybackClient)
-        client._output_profile = None
-        client._unity_gain = True
-        client._volume = 1.0
-        client._audio_device = None
-        client._use_device_output = False
-        client._socket_path = Path("/tmp/tunes-data/mpv-playback.sock")
-        client._mpv_log_path = mpv_log_path_for_socket(client._socket_path)
-        joined = " ".join(client._build_startup_args())
-        self.assertIn("--log-file=/tmp/tunes-data/mpv-playback.log", joined)
-
     def test_format_action_provenance_includes_caller(self) -> None:
         def nested() -> str:
             return format_action_provenance(depth=2, skip=1)
