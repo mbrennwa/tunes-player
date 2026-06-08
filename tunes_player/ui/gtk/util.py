@@ -70,7 +70,7 @@ def join_detail(*parts: str | None) -> str:
 def format_duration(seconds: float | None) -> str:
     if seconds is None:
         return "—"
-    total = int(seconds)
+    total = round(seconds)
     minutes, secs = divmod(total, 60)
     hours, minutes = divmod(minutes, 60)
     if hours:
