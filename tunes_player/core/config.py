@@ -209,6 +209,9 @@ class ConfigManager:
         )
         app_id = raw.get("qobuz_app_id")
         app_secret = raw.get("qobuz_app_secret")
+        volume_control_mode = raw.get("volume_control_mode")
+        if volume_control_mode not in {None, "hardware", "software", "fixed"}:
+            volume_control_mode = None
         self._config = AppConfig(
             music_folders=folders,
             music_folder_added_at=added_at,
@@ -222,6 +225,7 @@ class ConfigManager:
             allow_software_volume_fallback=bool(
                 raw.get("allow_software_volume_fallback", True)
             ),
+            volume_control_mode=volume_control_mode,
             exclusive_device_access=bool(raw.get("exclusive_device_access", False)),
             qobuz_app_id=str(app_id).strip() if app_id else None,
             qobuz_app_secret=str(app_secret).strip() if app_secret else None,

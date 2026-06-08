@@ -165,6 +165,77 @@ class AudioPolicyTests(unittest.TestCase):
             self.assertEqual(state.volume_mode, "fixed")
             self.assertFalse(service.volume_adjustable())
 
+    def test_hardware_to_fixed_resets_sink_and_app_volume(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ConfigManager(Path(tmp) / "config.json")
+            config.load()
+            controller = _SinkVolumeController(config.config)
+            service = PlayerService(config=config, volume_controller=controller)
+            service.set_volume(0.5)
+            self.assertEqual(controller.get_level(), 0.5)
+
+            service.set_volume_mode("fixed")
+
+            self.assertEqual(controller.get_level(), 1.0)
+            self.assertEqual(service.get_playback_state().volume, 1.0)
+
+    def test_fixed_to_hardware_keeps_sink_at_full(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ConfigManager(Path(tmp) / "config.json")
+            config.load()
+            controller = _SinkVolumeController(config.config)
+            service = PlayerService(config=config, volume_controller=controller)
+            service.set_volume(0.5)
+            service.set_volume_mode("fixed")
+            self.assertEqual(controller.get_level(), 1.0)
+
+            service.set_volume_mode("hardware")
+
+            self.assertEqual(controller.get_level(), 1.0)
+
+    def test_hardware_to_software_resets_sink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ConfigManager(Path(tmp) / "config.json")
+            config.load()
+            controller = _SinkVolumeController(config.config)
+            service = PlayerService(config=config, volume_controller=controller)
+            service.set_volume(0.5)
+            self.assertEqual(controller.get_level(), 0.5)
+
+            service.set_volume_mode("software")
+
+            self.assertEqual(controller.get_level(), 1.0)
+
+    def test_software_to_hardware_pushes_volume_to_sink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ConfigManager(Path(tmp) / "config.json")
+            config.load()
+            config.config.volume_control_mode = "software"
+            config.config.allow_software_volume_fallback = True
+            config.save()
+            controller = _SinkVolumeController(config.config)
+            service = PlayerService(config=config, volume_controller=controller)
+            service.set_volume(0.4)
+            self.assertEqual(service.get_playback_state().volume, 0.4)
+
+            service.set_volume_mode("hardware")
+
+            self.assertAlmostEqual(controller.get_level(), 0.4, places=4)
+
+    def test_startup_fixed_mode_normalizes_sink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ConfigManager(Path(tmp) / "config.json")
+            config.load()
+            config.config.volume_control_mode = "fixed"
+            config.save()
+            controller = _SinkVolumeController(config.config)
+            controller.set_level(0.5)
+
+            service = PlayerService(config=config, volume_controller=controller)
+
+            self.assertEqual(controller.get_level(), 1.0)
+            self.assertEqual(service.get_playback_state().volume, 1.0)
+
     def test_set_volume_noop_when_fixed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = ConfigManager(Path(tmp) / "config.json")

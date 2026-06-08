@@ -225,6 +225,8 @@ class PlayerService:
         )
         self._qobuz = self._make_qobuz_client(data_dir)
         self._release_external_playback_contention()
+        if self._volume_mode() == "fixed":
+            self._apply_fixed_mode_hardware_output(reset_app_volume=True)
 
     def _release_external_playback_contention(self) -> None:
         device = self._mpv_audio_device()
@@ -1649,13 +1651,17 @@ class PlayerService:
     def set_volume_mode(self, mode: VolumeMode) -> None:
         if mode == "hardware" and not self._device_volume:
             return
+        prev_mode = self._volume_mode()
         cfg = self._config_manager.config
         cfg.volume_control_mode = None if mode == "hardware" else mode
         cfg.allow_software_volume_fallback = mode == "software"
         self._allow_software_volume_fallback = cfg.allow_software_volume_fallback
         self._config_manager.save()
         self._apply_engine_volume_policy()
+        volume_changed = self._sync_device_volume_after_mode_change(prev_mode)
         self._emit("playback_changed")
+        if volume_changed:
+            self._emit("volume_changed")
 
     def exclusive_access_supported(self) -> bool:
         controller = self._volume_controller
@@ -2072,6 +2078,46 @@ class PlayerService:
         if hasattr(engine, "set_bit_perfect"):
             engine.set_bit_perfect(self._unity_gain_profile())
         engine.set_volume(self._mpv_volume_level())
+
+    def _apply_fixed_mode_hardware_output(self, *, reset_app_volume: bool) -> bool:
+        """Restore sink to 100% for fixed mode; optionally sync in-app volume."""
+        if not self._device_volume or self._volume_controller is None:
+            return False
+        try:
+            self._volume_controller.set_level(1.0)
+        except OSError:
+            log.debug("Could not reset output volume for fixed mode", exc_info=True)
+        if not reset_app_volume:
+            return False
+        self._volume = 1.0
+        self._muted = False
+        return True
+
+    def _sync_device_volume_after_mode_change(self, prev_mode: VolumeMode) -> bool:
+        """Align hardware sink with the new volume mode; return True if in-app volume changed."""
+        new_mode = self._volume_mode()
+        if new_mode == "fixed":
+            return self._apply_fixed_mode_hardware_output(
+                reset_app_volume=prev_mode == "hardware",
+            )
+        if (
+            new_mode == "software"
+            and prev_mode == "hardware"
+            and self._device_volume
+            and self._volume_controller is not None
+        ):
+            try:
+                self._volume_controller.set_level(1.0)
+            except OSError:
+                log.debug(
+                    "Could not reset output volume for software mode",
+                    exc_info=True,
+                )
+            return False
+        if new_mode == "hardware" and prev_mode == "software":
+            self._push_volume_to_output(notify=False)
+            return False
+        return False
 
     def _rebuild_engine_for_output_change(self) -> None:
         self._device_volume = self._has_device_volume()
