@@ -1,3 +1,5 @@
+> **Superseded (June 2026):** [#46](https://github.com/mbrennwa/tunes-player/issues/46) removed subprocess mpv + JSON IPC. [#34](https://github.com/mbrennwa/tunes-player/issues/34) is resolved by that unwind. Historical context only.
+
 ## Summary
 
 mpv sometimes drops its JSON IPC socket without a kernel-visible crash. Tunes loses control of playback (audio stops, queue may stop advancing) and only logs warnings — no user-facing error. This is **not proven TIDAL-specific**; logs show it during album/playlist builds (often TIDAL) but also during prewarm and NAS/local playback. Observed on both USB direct ALSA and Pulse/HDMI output.

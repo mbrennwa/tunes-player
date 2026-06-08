@@ -803,7 +803,7 @@ Status as of current tree — see [Implementation status](#implementation-status
 1. ~~Local folder scan + SQLite library index.~~ **Done**
 2. ~~`PlaybackEngine` + `MpvEngine` + queue; GTK transport bar; **MPRIS + media keys**.~~ **Done** (minimized compact controller still open)
 3. ~~**Local output:** bit-perfect profile + output device selection + **`VolumeController`**.~~ **Done (Linux v1)** — ALSA hw bit-perfect path + PipeWire/Pulse sink volume; PW bit-perfect not planned (see [Bit-perfect playback](#bit-perfect-playback-requirement))
-4. ~~**Playback process** — out-of-process mpv service; Tunes as remote control ([#29](https://github.com/mbrennwa/tunes-player/issues/29)).~~ **Done** — see [Playback process redesign](#playback-process-redesign-issue-29); NFS + Holo validated to ~80% CPU
+4. ~~**In-process playback** — restore `MpvEngine`; unwind subprocess IPC ([#46](https://github.com/mbrennwa/tunes-player/issues/46), closes [#34](https://github.com/mbrennwa/tunes-player/issues/34)).~~ **Done** — see [Playback stability history](#playback-stability-history-issues-29-46); bare-metal sign-off open
 5. **External control interface** — inbound volume from device/stack → Tunes UI + MPRIS. **Partial** — outbound MPRIS done; inbound `VolumeController.subscribe()` not wired
 6. DEB package with declared depends (`python3-gi`, `gir1.2-adw-1`, `mpv`, …). **Not started**
 7. **UPnP / DLNA Media Renderer** output. **Not started**
