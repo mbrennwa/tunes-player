@@ -170,12 +170,7 @@ class NowPlayingBar(Gtk.Box):
         self._volume.set_hexpand(False)
         self._volume.set_size_request(_VOLUME_SLIDER_WIDTH, -1)
         self._volume.set_draw_value(False)
-        self._volume.connect("value-changed", self._on_volume_changed)
-        self._attach_drag_gesture(
-            self._volume,
-            self._begin_volume_drag,
-            self._end_volume_drag,
-        )
+        self._volume.connect("change-value", self._on_volume_change_value)
         self._volume_box.append(self._volume)
 
         queue_btn = Gtk.Button()
@@ -226,8 +221,8 @@ class NowPlayingBar(Gtk.Box):
         self._queue_handler: Callable[[], None] | None = None
         self._art_click_handler: Callable[[], None] | None = None
         self._volume_dragging = False
-        self._pending_volume: float | None = None
-        self._volume_apply_id: int | None = None
+        self._volume_drag_clear_id: int | None = None
+        self._updating_volume = False
         self._seeking = False
         self._pending_seek: float | None = None
         self._seek_apply_id: int | None = None
@@ -283,28 +278,6 @@ class NowPlayingBar(Gtk.Box):
         gesture.connect("drag-begin", lambda *_: on_begin())
         gesture.connect("drag-end", lambda *_: on_end())
         widget.add_controller(gesture)
-
-    def _begin_volume_drag(self) -> None:
-        self._volume_dragging = True
-
-    def _end_volume_drag(self) -> None:
-        self._volume_dragging = False
-        if self._volume_apply_id is not None:
-            GLib.source_remove(self._volume_apply_id)
-            self._volume_apply_id = None
-        if self._pending_volume is not None:
-            self._service.set_volume(self._pending_volume, notify=True)
-            self._pending_volume = None
-
-    def _schedule_volume_apply(self) -> None:
-        if self._volume_apply_id is None:
-            self._volume_apply_id = GLib.timeout_add(50, self._apply_pending_volume)
-
-    def _apply_pending_volume(self) -> bool:
-        self._volume_apply_id = None
-        if self._pending_volume is not None:
-            self._service.set_volume(self._pending_volume, notify=False)
-        return False
 
     def _begin_seek_drag(self) -> None:
         self._seeking = True
@@ -416,15 +389,27 @@ class NowPlayingBar(Gtk.Box):
         self._mute_btn.set_icon_name(icon)
         self._mute_btn.set_tooltip_text("Unmute" if state.muted else "Mute")
 
-    def _on_volume_changed(self, scale: Gtk.Scale) -> None:
-        if not self._service.volume_adjustable():
-            return
-        value = scale.get_value()
-        if self._volume_dragging:
-            self._pending_volume = value
-            self._schedule_volume_apply()
-            return
-        self._service.set_volume(value)
+    def _on_volume_change_value(
+        self,
+        _scale: Gtk.Scale,
+        _scroll_type: Gtk.ScrollType,
+        value: float,
+    ) -> bool:
+        if self._updating_volume or not self._service.volume_adjustable():
+            return False
+        self._volume_dragging = True
+        if self._volume_drag_clear_id is not None:
+            GLib.source_remove(self._volume_drag_clear_id)
+        self._volume_drag_clear_id = GLib.timeout_add(150, self._clear_volume_drag)
+        self._service.set_volume(value, notify=False)
+        return False
+
+    def _clear_volume_drag(self) -> bool:
+        self._volume_drag_clear_id = None
+        self._volume_dragging = False
+        if self._service.volume_adjustable():
+            self._service.set_volume(self._volume.get_value(), notify=True)
+        return False
 
     def _on_service_event(self, event: str) -> None:
         GLib.idle_add(self._sync_from_service, event)
@@ -476,9 +461,11 @@ class NowPlayingBar(Gtk.Box):
             "volume_changed",
             "playback_changed",
         ):
-            self._volume.handler_block_by_func(self._on_volume_changed)
+            self._updating_volume = True
+            self._volume.handler_block_by_func(self._on_volume_change_value)
             self._volume.set_value(state.volume)
-            self._volume.handler_unblock_by_func(self._on_volume_changed)
+            self._volume.handler_unblock_by_func(self._on_volume_change_value)
+            self._updating_volume = False
             self._sync_mute_button(state)
 
         return False

@@ -206,6 +206,16 @@ class AudioPolicyTests(unittest.TestCase):
 
             self.assertEqual(controller.get_level(), 1.0)
 
+    def test_software_mode_with_sink_uses_controller(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ConfigManager(Path(tmp) / "config.json")
+            config.load()
+            controller = _SinkVolumeController(config.config)
+            service = PlayerService(config=config, volume_controller=controller)
+            service.set_volume_mode("software")
+            service.set_volume(0.35)
+            self.assertAlmostEqual(controller.get_level(), 0.35, places=4)
+
     def test_software_to_hardware_pushes_volume_to_sink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = ConfigManager(Path(tmp) / "config.json")

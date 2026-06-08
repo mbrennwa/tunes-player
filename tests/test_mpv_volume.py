@@ -30,6 +30,17 @@ class MpvSoftwareVolumeTests(unittest.TestCase):
         self.assertTrue(engine._software_volume)
         engine._apply_software_volume.assert_called()
 
+    def test_set_bit_perfect_false_enables_software_volume_with_device_output(self) -> None:
+        engine = self._engine(unity_gain=True)
+        engine._use_device_output = True
+        engine._software_volume = False
+
+        engine.set_bit_perfect(False)
+        engine.set_volume(0.25)
+
+        self.assertTrue(engine._software_volume)
+        engine._apply_software_volume.assert_called()
+
     def test_direct_alsa_track_load_keeps_software_volume(self) -> None:
         engine = self._engine(unity_gain=False)
         profile = PlaybackOutputProfile(

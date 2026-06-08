@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import subprocess
-import threading
-import time
 from abc import ABC, abstractmethod
 from dataclasses import replace
 
@@ -23,6 +22,8 @@ from tunes_player.core.volume import (
 _SINK_LINE = re.compile(r"^\s*(?P<default>\*)?\s*(?P<id>\d+)\.\s+(?P<name>.+?)(?:\s+\[|$)")
 _PACTL_VOLUME = re.compile(r"(\d+)%")
 _WPCTL_VOLUME = re.compile(r"Volume:\s*([\d.]+)", re.IGNORECASE)
+
+log = logging.getLogger(__name__)
 _PACTL_SINK_SHORT = re.compile(r"^(?P<id>\d+)\s+(?P<name>\S+)\s+(?P<desc>.+)$")
 _WPCTL_TREE_CHARS = re.compile(r"[│├└─]")
 _NODE_NAME = re.compile(r'^\s*node\.name\s*=\s*"([^"]+)"')
@@ -232,9 +233,6 @@ class _SubprocessVolumeController(ABC):
     def __init__(self, config: AppConfig) -> None:
         self._config = config
         self._cached_endpoints: list[VolumeEndpoint] | None = None
-        self._volume_lock = threading.Lock()
-        self._pending_level: float | None = None
-        self._apply_thread: threading.Thread | None = None
 
     @property
     @abstractmethod
@@ -258,32 +256,10 @@ class _SubprocessVolumeController(ABC):
 
     def set_level(self, level: float) -> None:
         clamped = max(0.0, min(1.0, level))
-        with self._volume_lock:
-            self._pending_level = clamped
-            if self._apply_thread is not None and self._apply_thread.is_alive():
-                return
-            self._apply_thread = threading.Thread(
-                target=self._apply_pending_levels,
-                name=f"{self._command}-volume",
-                daemon=True,
-            )
-            self._apply_thread.start()
-
-    def _apply_pending_levels(self) -> None:
-        while True:
-            with self._volume_lock:
-                level = self._pending_level
-                self._pending_level = None
-            if level is None:
-                return
-            try:
-                self._run([self._command, *self._set_volume_args(level)], check=True)
-            except (OSError, subprocess.CalledProcessError):
-                return
-            time.sleep(0.025)
-            with self._volume_lock:
-                if self._pending_level is None:
-                    return
+        try:
+            self._run([self._command, *self._set_volume_args(clamped)], check=True)
+        except (OSError, subprocess.CalledProcessError):
+            log.debug("Could not set %s output volume", self._command, exc_info=True)
 
     def adjust_level(self, delta: float) -> None:
         self.set_level(self.get_level() + delta)

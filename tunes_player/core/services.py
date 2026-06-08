@@ -1567,17 +1567,23 @@ class PlayerService:
     def _output_volume_level(self) -> float:
         return 0.0 if self._muted else self._volume
 
+    def _routes_volume_to_sink(self) -> bool:
+        """True when the OS sink/mixer should carry attenuation (instant on PipeWire/ALSA)."""
+        if not self._device_volume:
+            return False
+        return self._volume_mode() in ("hardware", "software")
+
     def _push_volume_to_output(self, *, notify: bool = True) -> None:
         if not self.volume_adjustable():
             return
         level = self._output_volume_level()
-        mode = self._volume_mode()
-        if mode == "hardware" and self._device_volume and self._volume_controller is not None:
+        if self._routes_volume_to_sink() and self._volume_controller is not None:
             self._volume_controller.set_level(level)
-        elif mode == "software":
-            engine = self._engine
-            if engine is not None:
-                engine.set_volume(level)
+        engine = self._engine
+        if engine is not None:
+            if hasattr(engine, "set_bit_perfect"):
+                engine.set_bit_perfect(self._unity_gain_profile())
+            engine.set_volume(self._mpv_volume_level())
         if notify:
             self._emit("volume_changed")
 
@@ -2266,8 +2272,10 @@ class PlayerService:
         return self._volume_mode() == "software"
 
     def _unity_gain_profile(self) -> bool:
-        """mpv unity gain — no in-player attenuation (derived bit-perfect active)."""
-        return self._volume_mode() != "software"
+        """mpv unity gain — attenuation on the sink or via mpv soft volume only."""
+        return not (
+            self._volume_mode() == "software" and not self._device_volume
+        )
 
     def _no_volume_control(self) -> bool:
         return self._volume_mode() == "fixed"

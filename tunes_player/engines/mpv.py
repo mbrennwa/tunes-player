@@ -97,7 +97,7 @@ class MpvEngine:
         self._audio_device = audio_device
         self._use_device_output = use_device_output
         self._output_profile = output_profile
-        self._software_volume = not unity_gain and not use_device_output
+        self._software_volume = not unity_gain
         self._on_event = on_event
         self._endpoint_id = endpoint_id
         self._terminated = False
@@ -315,13 +315,13 @@ class MpvEngine:
 
     def set_volume(self, level: float) -> None:
         self._volume = max(0.0, min(1.0, level))
-        if self._unity_gain:
+        if not self._software_volume:
             return
         self._apply_software_volume()
 
     def set_bit_perfect(self, enabled: bool) -> None:
         self._unity_gain = enabled
-        self._software_volume = not enabled and not self._use_device_output
+        self._software_volume = not enabled
         self._set_property("replaygain", "no")
         if enabled or not self._software_volume:
             self._set_property("volume", 100)
@@ -561,7 +561,10 @@ class MpvEngine:
         if not self._software_volume:
             return
         gain = max(0.0, min(1.0, self._volume))
-        self._set_property("volume", gain * 100.0)
+        try:
+            self._player.volume = gain * 100.0
+        except (TypeError, AttributeError):
+            self._set_property("volume", gain * 100.0)
 
     def _refresh_negotiated_state(self) -> None:
         self._negotiated_state = read_negotiated_playback_state(self._get_property)
