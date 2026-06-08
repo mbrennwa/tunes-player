@@ -10,7 +10,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import replace
 
-from tunes_player.core.audio_labels import classify_sink_potential, endpoint_is_digital_output
+from tunes_player.core.audio_labels import classify_sink_potential
 from tunes_player.core.config import AppConfig
 from tunes_player.core.volume import (
     SYSTEM_DEFAULT_SINK_ID,
@@ -27,6 +27,8 @@ _PACTL_SINK_SHORT = re.compile(r"^(?P<id>\d+)\s+(?P<name>\S+)\s+(?P<desc>.+)$")
 _WPCTL_TREE_CHARS = re.compile(r"[│├└─]")
 _NODE_NAME = re.compile(r'^\s*node\.name\s*=\s*"([^"]+)"')
 _NODE_DESCRIPTION = re.compile(r'^\s*node\.description\s*=\s*"([^"]+)"')
+_ALSA_CARD = re.compile(r'^\s*alsa\.card\s*=\s*"(\d+)"')
+_ALSA_DEVICE = re.compile(r'^\s*alsa\.device\s*=\s*"(\d+)"')
 
 def _system_default_endpoint(*, description: str | None = None) -> VolumeEndpoint:
     return VolumeEndpoint(
@@ -63,6 +65,48 @@ def _wpctl_inspect_sink(sink_id: str) -> tuple[str | None, str | None]:
         if desc_match:
             node_description = desc_match.group(1)
     return node_name, node_description
+
+
+def _wpctl_inspect_alsa_pcm(sink_id: str) -> tuple[int, int] | None:
+    """Return (card, device) from wpctl inspect when the sink is ALSA-backed."""
+    if shutil.which("wpctl") is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["wpctl", "inspect", sink_id],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    card: int | None = None
+    device: int | None = None
+    for line in result.stdout.splitlines():
+        card_match = _ALSA_CARD.match(line)
+        if card_match is not None:
+            card = int(card_match.group(1))
+            continue
+        device_match = _ALSA_DEVICE.match(line)
+        if device_match is not None:
+            device = int(device_match.group(1))
+    if card is None or device is None:
+        return None
+    return card, device
+
+
+def resolve_alsa_hw_endpoint_id(endpoint: VolumeEndpoint) -> str | None:
+    """Map a listed endpoint to ``alsa:hw:C:D`` when the stack exposes that PCM."""
+    if is_alsa_endpoint_id(endpoint.id):
+        return endpoint.id
+    if endpoint.control_id is None:
+        return None
+    pcm = _wpctl_inspect_alsa_pcm(endpoint.control_id)
+    if pcm is None:
+        return None
+    card, device = pcm
+    return f"alsa:hw:{card}:{device}"
 
 
 def _parse_wpctl_sink_line(line: str) -> re.Match[str] | None:
@@ -445,14 +489,24 @@ class LinuxOutputController:
                 return endpoint
         return None
 
+    def _resolved_alsa_hw_endpoint_id(self) -> str | None:
+        endpoint = self._active_endpoint()
+        if endpoint is None:
+            return None
+        return resolve_alsa_hw_endpoint_id(endpoint)
+
     @property
     def uses_device_volume(self) -> bool:
         active = self.get_active_endpoint_id()
         if active is None or active == SYSTEM_DEFAULT_SINK_ID:
             return False
-        endpoint = self._active_endpoint()
-        if endpoint is not None and endpoint_is_digital_output(endpoint):
-            return False
+        resolved = self._resolved_alsa_hw_endpoint_id()
+        if resolved is not None:
+            from tunes_player.platform.linux.alsa_mixer import (
+                alsa_mixer_available_for_endpoint,
+            )
+
+            return alsa_mixer_available_for_endpoint(resolved)
         if is_alsa_endpoint_id(active):
             return self._alsa_has_hardware_volume()
         return self._sink_backend is not None

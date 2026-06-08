@@ -30,8 +30,6 @@ _USB_MIXER_INFO = re.compile(
     r"Info:.*channels=(\d+).*cmask=0x([0-9a-f]+)",
     re.IGNORECASE,
 )
-_DIGITAL_PCM_MARKERS = ("hdmi", "displayport", "iec958", "spdif")
-
 _AMIXER_TIMEOUT_SEC = 2.0
 _VOLUME_CONTROL_CACHE: dict[tuple[int, int | None, bool], AlsaVolumeControl | None] = {}
 
@@ -186,16 +184,13 @@ def alsa_set_level(card: int, level: float) -> None:
 
 
 def alsa_pcm_device_is_digital_output(card: int, device: int) -> bool:
-    from tunes_player.platform.linux.audio_probe import _parse_aplay_playback_devices
-
-    for entry in _parse_aplay_playback_devices():
-        if entry[0] != card or entry[3] != device:
-            continue
-        device_name = (entry[5] or entry[4] or "").casefold()
-        card_name = (entry[2] or entry[1] or "").casefold()
-        label = f"{card_name} {device_name}"
-        return any(marker in label for marker in _DIGITAL_PCM_MARKERS)
-    return False
+    """True when ALSA exposes this PCM as an HDMI/DP jack without local pvolume."""
+    try:
+        result = _run_amixer(card, "contents")
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+    needle = f"HDMI/DP,pcm={device} Jack"
+    return needle in result.stdout
 
 
 def _run_amixer(card: int, *args: str) -> subprocess.CompletedProcess[str]:

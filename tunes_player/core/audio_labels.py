@@ -9,25 +9,6 @@ from tunes_player.core.volume import (
 )
 
 _BIT_PERFECT_SUFFIX = " · bit perfect"
-_DIGITAL_OUTPUT_MARKERS = ("hdmi", "displayport", "iec958", "spdif")
-
-
-def endpoint_is_digital_output(endpoint: VolumeEndpoint) -> bool:
-    """True when the endpoint is a fixed-level digital output (no HW attenuation)."""
-    if is_alsa_endpoint_id(endpoint.id):
-        from tunes_player.platform.linux.alsa_mixer import (
-            alsa_card_from_endpoint_id,
-            alsa_device_from_endpoint_id,
-            alsa_pcm_device_is_digital_output,
-        )
-
-        card = alsa_card_from_endpoint_id(endpoint.id)
-        device = alsa_device_from_endpoint_id(endpoint.id)
-        if card is None or device is None:
-            return False
-        return alsa_pcm_device_is_digital_output(card, device)
-    text = f"{endpoint.name} {endpoint.description}".casefold()
-    return any(marker in text for marker in _DIGITAL_OUTPUT_MARKERS)
 
 
 def classify_sink_potential(*, name: str, description: str) -> BitPerfectPotential:

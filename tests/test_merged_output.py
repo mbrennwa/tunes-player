@@ -87,7 +87,10 @@ class MergedOutputTests(unittest.TestCase):
                     ],
                 ),
                 patch.object(controller, "_list_sink_endpoints", return_value=[]),
-                patch.object(controller, "_alsa_has_hardware_volume", return_value=True),
+                patch(
+                    "tunes_player.platform.linux.alsa_mixer.alsa_mixer_available_for_endpoint",
+                    return_value=True,
+                ),
             ):
                 controller.set_active_endpoint("alsa:hw:0:0")
                 self.assertTrue(controller.uses_device_volume)
@@ -99,7 +102,7 @@ class MergedOutputTests(unittest.TestCase):
             controller = LinuxOutputController(config.config)
             hdmi = VolumeEndpoint(
                 id="pw:Raptor Lake-P/U/H cAVS HDMI / DisplayPort 1 Output",
-                name="alsa_output.pci-0000_00_1f.3.HiFi__HDMI__sink",
+                name="alsa_output.pci-0000_00_1f.3.HiFi__HDMI1__sink",
                 description="Raptor Lake-P/U/H cAVS HDMI / DisplayPort 1 Output",
                 bit_perfect_potential="capable",
                 control_id="103",
@@ -107,6 +110,14 @@ class MergedOutputTests(unittest.TestCase):
             with (
                 patch.object(controller, "_alsa_volume_endpoints", return_value=[]),
                 patch.object(controller, "_list_sink_endpoints", return_value=[hdmi]),
+                patch(
+                    "tunes_player.platform.linux.audio.resolve_alsa_hw_endpoint_id",
+                    return_value="alsa:hw:0:3",
+                ),
+                patch(
+                    "tunes_player.platform.linux.alsa_mixer.alsa_mixer_available_for_endpoint",
+                    return_value=False,
+                ),
             ):
                 controller.set_active_endpoint(hdmi.id)
                 self.assertFalse(controller.uses_device_volume)
@@ -130,7 +141,10 @@ class MergedOutputTests(unittest.TestCase):
                     ],
                 ),
                 patch.object(controller, "_list_sink_endpoints", return_value=[]),
-                patch.object(controller, "_alsa_has_hardware_volume", return_value=False),
+                patch(
+                    "tunes_player.platform.linux.alsa_mixer.alsa_mixer_available_for_endpoint",
+                    return_value=False,
+                ),
             ):
                 controller.set_active_endpoint("alsa:hw:0:0")
                 self.assertFalse(controller.uses_device_volume)
