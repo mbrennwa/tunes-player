@@ -1204,6 +1204,21 @@ class LibraryScannerScopedTests(unittest.TestCase):
         self.assertEqual(last, (2, 5))
         self.assertEqual(notifications, [(2, 5)])
 
+    def test_in_scan_backfill_uses_limited_batch(self) -> None:
+        scanner = LibraryScanner(db_path=self._db_path, config=self._config)
+        with patch(
+            "tunes_player.core.library.art_cache.backfill_missing_album_art",
+            return_value=0,
+        ) as backfill:
+            added = scanner._backfill_missing_art_during_scan(connect(self._db_path))
+
+        self.assertEqual(added, 0)
+        backfill.assert_called_once()
+        self.assertEqual(
+            backfill.call_args.kwargs.get("limit"),
+            LibraryScanner._IN_SCAN_BACKFILL_BATCH_SIZE,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

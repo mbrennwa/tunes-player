@@ -204,6 +204,7 @@ class PlayerService:
         self._scan_queue: multiprocessing.Queue | None = None
         self._scanning_folder: str | None = None
         self._scan_progress: tuple[int, int, str] | None = None
+        self._scan_progress_pinned_total: int | None = None
         self._scan_finished_folder: str | None = None
         self._scan_last_result: ScanResult | None = None
         self._scan_last_error: str | None = None
@@ -692,6 +693,7 @@ class PlayerService:
                 self.notify_art_updated()
         finally:
             self._art_maintenance_running = False
+            self._run_on_main_thread(self._try_start_scan)
 
     def _maintain_library_art_blocking(self) -> tuple[int, int]:
         from tunes_player.core.library.art_cache import maintain_album_art
@@ -773,6 +775,7 @@ class PlayerService:
         self._scan_queue = None
         self._scanning_folder = None
         self._scan_progress = None
+        self._scan_progress_pinned_total = None
 
     def _cancel_scan_for_folder(self, folder: str) -> None:
         resolved = str(Path(folder).expanduser().resolve())
@@ -928,13 +931,23 @@ class PlayerService:
             remove_paths=tuple(sorted(removes)),
         )
 
+    def _any_folder_still_needs_scan(self) -> bool:
+        if self._pending_scan_jobs:
+            return True
+        for folder in self._config_manager.config.music_folders:
+            if not self._folder_scan_is_complete(folder):
+                return True
+            if self._folder_needs_scan_resume(folder):
+                return True
+        return False
+
     def _try_start_scan(self) -> None:
-        if self._catalog_reconcile_running:
+        if self._catalog_reconcile_running or self._art_maintenance_running:
             return
         if self._scan_queue is not None or not self._pending_scan_jobs:
             return
         with self._library_db_write_lock:
-            if self._catalog_reconcile_running:
+            if self._catalog_reconcile_running or self._art_maintenance_running:
                 return
             if self._scan_queue is not None or not self._pending_scan_jobs:
                 return
@@ -1067,10 +1080,46 @@ class PlayerService:
             )
             self._config_manager.set_folder_scan_checkpoint(folder, None)
 
+    def _apply_scan_progress_update(
+        self,
+        current: int,
+        total: int,
+        path: str,
+    ) -> None:
+        """Keep scan progress monotonic across worker lock retries and phase messages."""
+        pinned_total = self._scan_progress_pinned_total
+        if pinned_total is not None and pinned_total > 0:
+            total = max(total, pinned_total)
+        elif total > 0:
+            self._scan_progress_pinned_total = total
+            pinned_total = total
+
+        previous = self._scan_progress
+        if previous is not None:
+            previous_current, previous_total, previous_path = previous
+            if current == 0 and total == 0:
+                if previous_current > 0:
+                    self._scan_progress = (
+                        previous_current,
+                        max(previous_total, pinned_total or 0),
+                        path or previous_path,
+                    )
+                    return
+            else:
+                if previous_current > 0:
+                    current = max(current, previous_current)
+                if previous_total > 0:
+                    total = max(total, previous_total)
+                if pinned_total is not None:
+                    total = max(total, pinned_total)
+
+        self._scan_progress = (current, total, path)
+
     def _start_scan_job(self, job: _ScanJob) -> None:
         self._current_scan_job = job
         self._scanning_folder = job.folder
         self._scan_progress = None
+        self._scan_progress_pinned_total = None
         self._scan_finished_folder = None
         self._scan_last_result = None
         self._scan_last_error = None
@@ -1088,6 +1137,8 @@ class PlayerService:
         if expected_total is None or expected_total <= 0:
             indexed = self._count_indexed_files_snapshot(job.folder)
             expected_total = indexed if indexed > 0 else None
+        if expected_total is not None and expected_total > 0:
+            self._scan_progress_pinned_total = expected_total
         self._store.close()
         time.sleep(0.1)
         self._scan_process, self._scan_queue = create_scan_process(
@@ -1116,7 +1167,7 @@ class PlayerService:
 
             kind = message[0]
             if kind == "progress":
-                self._scan_progress = (message[1], message[2], message[3])
+                self._apply_scan_progress_update(message[1], message[2], message[3])
                 self._maybe_persist_scan_checkpoint()
                 self._emit("scan_progress")
             elif kind == "batch":
@@ -1240,6 +1291,7 @@ class PlayerService:
         self._scan_queue = None
         self._scanning_folder = None
         self._scan_progress = None
+        self._scan_progress_pinned_total = None
         self._current_scan_job = None
         self._store.reconnect()
         self._flush_deferred_plays()
@@ -1248,7 +1300,8 @@ class PlayerService:
             if coalesced is not None:
                 self._pending_scan_jobs.insert(0, coalesced)
         self._try_start_scan()
-        self._try_start_art_maintenance()
+        if not self._any_folder_still_needs_scan():
+            self._try_start_art_maintenance()
 
     def _flush_deferred_plays(self) -> None:
         pending = self._deferred_plays

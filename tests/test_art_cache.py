@@ -189,6 +189,30 @@ class ArtCacheMaintenanceTests(unittest.TestCase):
         )
         self.assertIsNotNone(find_cached_art_path(self._data_dir, album_id))
 
+    def test_backfill_missing_album_art_respects_limit(self) -> None:
+        album_ids = [
+            ids.release_id(f"Artist {index}", f"Album {index}")
+            for index in range(3)
+        ]
+        for index, album_id in enumerate(album_ids):
+            path = str((self._data_dir / f"track-{index}.flac").resolve())
+            _seed_track(self._connection, path=path, album_id=album_id)
+        self._connection.commit()
+
+        with patch(
+            "tunes_player.core.library.art_cache.extract_embedded_art",
+            return_value=(b"jpeg-bytes", "image/jpeg"),
+        ):
+            added = backfill_missing_album_art(
+                self._connection,
+                data_dir=self._data_dir,
+                limit=2,
+            )
+
+        self.assertEqual(added, 2)
+        rows = self._connection.execute("SELECT COUNT(*) FROM album_art").fetchone()[0]
+        self.assertEqual(rows, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

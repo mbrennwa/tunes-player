@@ -375,6 +375,54 @@ class FolderScanResumeServiceTests(unittest.TestCase):
 
         start_scan.assert_called_once()
 
+    def test_scan_progress_stays_monotonic_on_worker_retry(self) -> None:
+        self._service._scan_progress_pinned_total = 18_050
+        self._service._apply_scan_progress_update(5_000, 18_050, "/music/track.flac")
+        self._service._apply_scan_progress_update(0, 0, "Loading library index…")
+        self.assertEqual(
+            self._service.scan_progress,
+            (5_000, 18_050, "Loading library index…"),
+        )
+        self._service._apply_scan_progress_update(1, 18_050, "/music/first.flac")
+        self.assertEqual(
+            self._service.scan_progress,
+            (5_000, 18_050, "/music/first.flac"),
+        )
+        self._service._apply_scan_progress_update(5_001, 18_050, "/music/next.flac")
+        self.assertEqual(
+            self._service.scan_progress,
+            (5_001, 18_050, "/music/next.flac"),
+        )
+
+    def test_try_start_scan_waits_for_art_maintenance(self) -> None:
+        from tunes_player.core.services import _ScanJob
+
+        self._config.add_music_folder(self._folder, auto_monitor=True)
+        self._service._pending_scan_jobs = [_ScanJob(folder=str(Path(self._folder).resolve()))]
+        self._service._art_maintenance_running = True
+
+        with patch.object(self._service, "_start_scan_job") as start_scan:
+            self._service._try_start_scan()
+
+        start_scan.assert_not_called()
+
+    def test_cleanup_scan_defers_art_while_folder_still_needs_scan(self) -> None:
+        folder = str(Path(self._folder).resolve())
+        self._config.add_music_folder(self._folder, auto_monitor=True)
+        self._service._pending_startup_art_maintenance = True
+        self._service._scanning_folder = folder
+        self._service._scan_last_error = "database is locked"
+
+        with patch.object(self._service, "_try_start_scan") as try_start_scan, patch.object(
+            self._service,
+            "_any_folder_still_needs_scan",
+            return_value=True,
+        ), patch.object(self._service, "_try_start_art_maintenance") as try_art:
+            self._service._cleanup_scan()
+
+        try_start_scan.assert_called_once()
+        try_art.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

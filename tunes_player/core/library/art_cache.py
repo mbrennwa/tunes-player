@@ -106,18 +106,27 @@ def repair_stale_album_art(connection: sqlite3.Connection, *, data_dir: Path) ->
     return repaired
 
 
-def backfill_missing_album_art(connection: sqlite3.Connection, *, data_dir: Path) -> int:
+def backfill_missing_album_art(
+    connection: sqlite3.Connection,
+    *,
+    data_dir: Path,
+    limit: int | None = None,
+) -> int:
     """Extract embedded art for albums that have tracks but no cached cover yet."""
-    rows = connection.execute(
-        """
+    query = """
         SELECT t.album_id, t.album_artist, t.album, MIN(f.path) AS path
         FROM tracks AS t
         JOIN files AS f ON f.id = t.file_id
         LEFT JOIN album_art AS aa ON aa.album_id = t.album_id
         WHERE aa.album_id IS NULL
         GROUP BY t.album_id, t.album_artist, t.album
-        """,
-    ).fetchall()
+        ORDER BY t.album_id
+    """
+    params: tuple[object, ...] = ()
+    if limit is not None:
+        query += " LIMIT ?"
+        params = (max(int(limit), 0),)
+    rows = connection.execute(query, params).fetchall()
     indexed = 0
     for row in rows:
         album_id = str(row["album_id"])

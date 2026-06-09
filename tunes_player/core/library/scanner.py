@@ -111,6 +111,7 @@ class LibraryScanner:
     _DISCOVERY_PROGRESS_EVERY = 10_000
     _YIELD_EVERY = 32
     _IN_SCAN_BACKFILL_INTERVAL_SEC = 3.0
+    _IN_SCAN_BACKFILL_BATCH_SIZE = 25
     _IN_SCAN_ART_COMMIT_INTERVAL_SEC = 2.0
 
     def __init__(self, *, db_path: Path, config: AppConfig) -> None:
@@ -250,21 +251,6 @@ class LibraryScanner:
                         )
                         last_progress_at = now
 
-                now = time.monotonic()
-                if now - last_backfill_at >= self._IN_SCAN_BACKFILL_INTERVAL_SEC:
-                    added = self._backfill_missing_art_during_scan(connection)
-                    last_backfill_at = now
-                    if added > 0:
-                        art_indexed += added
-                        last_batch_notify = self._commit_scan_batch(
-                            connection,
-                            batch_notify=batch_notify,
-                            indexed=indexed,
-                            art_indexed=art_indexed,
-                            last_notified=last_batch_notify,
-                        )
-                        last_art_commit_at = now
-
                 outcome, path_str, wrote, art_added = self._process_candidate(
                     connection,
                     path,
@@ -306,6 +292,21 @@ class LibraryScanner:
                         last_notified=last_batch_notify,
                     )
                     last_art_commit_at = time.monotonic()
+
+                now = time.monotonic()
+                if now - last_backfill_at >= self._IN_SCAN_BACKFILL_INTERVAL_SEC:
+                    added = self._backfill_missing_art_during_scan(connection)
+                    last_backfill_at = now
+                    if added > 0:
+                        art_indexed += added
+                        last_batch_notify = self._commit_scan_batch(
+                            connection,
+                            batch_notify=batch_notify,
+                            indexed=indexed,
+                            art_indexed=art_indexed,
+                            last_notified=last_batch_notify,
+                        )
+                        last_art_commit_at = now
 
             if progress is not None and total > 0:
                 progress(total, max(estimated_total, total), "")
@@ -520,7 +521,11 @@ class LibraryScanner:
     def _backfill_missing_art_during_scan(self, connection: sqlite3.Connection) -> int:
         from tunes_player.core.library.art_cache import backfill_missing_album_art
 
-        return backfill_missing_album_art(connection, data_dir=self._data_dir)
+        return backfill_missing_album_art(
+            connection,
+            data_dir=self._data_dir,
+            limit=self._IN_SCAN_BACKFILL_BATCH_SIZE,
+        )
 
     @staticmethod
     def _record_file_error(
