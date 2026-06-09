@@ -119,6 +119,29 @@ class ArtCacheMaintenanceTests(unittest.TestCase):
         self.assertEqual(added, 1)
         self.assertIsNotNone(find_cached_art_path(self._data_dir, album_id))
 
+    def test_backfill_skips_when_cache_file_exists_without_db_row(self) -> None:
+        album_id = ids.release_id("Artist", "Album")
+        path = str((self._data_dir / "track.flac").resolve())
+        _seed_track(self._connection, path=path, album_id=album_id)
+        upsert_album_art(
+            self._connection,
+            data_dir=self._data_dir,
+            album_id=album_id,
+            art_data=b"jpeg-bytes",
+            mime_type="image/jpeg",
+        )
+        self._connection.execute("DELETE FROM album_art WHERE album_id = ?", (album_id,))
+        self._connection.commit()
+        self.assertIsNotNone(find_cached_art_path(self._data_dir, album_id))
+
+        with patch(
+            "tunes_player.core.library.art_cache.extract_embedded_art",
+        ) as extract_art:
+            added = backfill_missing_album_art(self._connection, data_dir=self._data_dir)
+
+        extract_art.assert_not_called()
+        self.assertEqual(added, 0)
+
     def test_maintain_album_art_runs_repair_then_backfill(self) -> None:
         stale_id = ids.release_id("Artist", "Stale")
         missing_id = ids.release_id("Artist", "Missing")

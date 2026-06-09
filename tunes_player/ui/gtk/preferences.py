@@ -361,6 +361,8 @@ class PreferencesWindow(Adw.PreferencesWindow):
             text = path or "Discovering files…"
         elif current == 0:
             text = path or f"Preparing to scan {total:,} files…"
+        elif not path:
+            text = f"Scanning {current:,}/{total:,} files…"
         else:
             name = path.rsplit("/", 1)[-1]
             text = f"Scanning {current:,}/{total:,}: {name}"

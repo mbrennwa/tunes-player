@@ -117,19 +117,22 @@ def backfill_missing_album_art(connection: sqlite3.Connection, *, data_dir: Path
     ).fetchall()
     indexed = 0
     for row in rows:
+        album_id = str(row["album_id"])
+        if find_cached_art_path(data_dir, album_id) is not None:
+            continue
         before = connection.execute(
             "SELECT 1 FROM album_art WHERE album_id = ?",
-            (row["album_id"],),
+            (album_id,),
         ).fetchone()
         index_album_art_for_file(
             connection,
             data_dir=data_dir,
             path=Path(str(row["path"])),
-            album_id=str(row["album_id"]),
+            album_id=album_id,
         )
         after = connection.execute(
             "SELECT 1 FROM album_art WHERE album_id = ?",
-            (row["album_id"],),
+            (album_id,),
         ).fetchone()
         if before is None and after is not None:
             indexed += 1

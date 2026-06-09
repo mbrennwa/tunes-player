@@ -23,6 +23,7 @@ def run_library_scan(
     add_paths: list[str] | None = None,
     remove_paths: list[str] | None = None,
     checkpoint_path: str | None = None,
+    expected_total: int | None = None,
 ) -> None:
     """Worker entry point — must remain a top-level function for spawn."""
 
@@ -47,6 +48,7 @@ def run_library_scan(
                 scan_folders=list(scan_folders),
                 progress=progress,
                 checkpoint_path=checkpoint_path,
+                expected_total=expected_total,
             )
     except Exception as exc:
         queue.put(("error", str(exc)))
@@ -76,6 +78,7 @@ def create_scan_process(
     add_paths: list[str] | None = None,
     remove_paths: list[str] | None = None,
     checkpoint_path: str | None = None,
+    expected_total: int | None = None,
 ) -> tuple[multiprocessing.Process, multiprocessing.Queue]:
     ctx = multiprocessing.get_context("spawn")
     queue: multiprocessing.Queue = ctx.Queue()
@@ -92,6 +95,7 @@ def create_scan_process(
             "add_paths": list(add_paths) if add_paths else None,
             "remove_paths": list(remove_paths) if remove_paths else None,
             "checkpoint_path": checkpoint_path,
+            "expected_total": expected_total,
         },
         name="tunes-library-scan",
         daemon=True,

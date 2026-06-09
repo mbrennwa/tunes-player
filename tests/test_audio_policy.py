@@ -169,28 +169,6 @@ class AudioPolicyTests(unittest.TestCase):
             self.assertEqual(state.volume, 1.0)
             self.assertEqual(controller.get_level(), 1.0)
 
-    def test_volume_control_toggle_reads_current_hardware_level(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            config = ConfigManager(Path(tmp) / "config.json")
-            config.load()
-            controller = _SinkVolumeController(config.config)
-            controller.set_level(0.6)
-            service = PlayerService(config=config, volume_controller=controller)
-            service.set_volume_control_enabled(False)
-            controller.set_level(0.35)
-            service.set_volume_control_enabled(True)
-            self.assertEqual(service.get_playback_state().volume, 0.35)
-
-    def test_legacy_software_override_migrates_to_auto(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            config = ConfigManager(Path(tmp) / "config.json")
-            config.load()
-            config.config.volume_control_mode = "software"
-            config.save()
-            service = PlayerService(config=config, volume_controller=_SinkVolumeController(config.config))
-            self.assertIsNone(config.config.volume_control_mode)
-            self.assertEqual(service.get_playback_state().volume_mode, "hardware")
-
     def test_hardware_to_fixed_resets_sink_and_app_volume(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = ConfigManager(Path(tmp) / "config.json")
@@ -219,7 +197,7 @@ class AudioPolicyTests(unittest.TestCase):
 
             self.assertEqual(controller.get_level(), 1.0)
 
-    def test_hardware_to_software_resets_sink(self) -> None:
+    def test_hardware_to_software_legacy_noop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = ConfigManager(Path(tmp) / "config.json")
             config.load()
@@ -230,7 +208,29 @@ class AudioPolicyTests(unittest.TestCase):
 
             service.set_volume_mode("software")
 
-            self.assertEqual(controller.get_level(), 1.0)
+            self.assertEqual(controller.get_level(), 0.5)
+
+    def test_volume_control_toggle_reads_current_hardware_level(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ConfigManager(Path(tmp) / "config.json")
+            config.load()
+            controller = _SinkVolumeController(config.config)
+            controller.set_level(0.6)
+            service = PlayerService(config=config, volume_controller=controller)
+            service.set_volume_control_enabled(False)
+            controller.set_level(0.35)
+            service.set_volume_control_enabled(True)
+            self.assertEqual(service.get_playback_state().volume, 0.35)
+
+    def test_legacy_software_override_migrates_to_auto(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ConfigManager(Path(tmp) / "config.json")
+            config.load()
+            config.config.volume_control_mode = "software"
+            config.save()
+            service = PlayerService(config=config, volume_controller=_SinkVolumeController(config.config))
+            self.assertIsNone(config.config.volume_control_mode)
+            self.assertEqual(service.get_playback_state().volume_mode, "hardware")
 
     def test_software_mode_with_sink_uses_controller(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

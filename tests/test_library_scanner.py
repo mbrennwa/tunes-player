@@ -6,13 +6,21 @@ import sqlite3
 import tempfile
 import time
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import patch
 
 from tunes_player.core.config import AppConfig
 from tunes_player.core.library import ids
 from tunes_player.core.library.db import connect
-from tunes_player.core.library.scanner import LibraryScanner, ScanResult, _ParsedTrack
+from tunes_player.core.library.scanner import (
+    ExistingFileIndex,
+    LibraryScanner,
+    ScanResult,
+    _ParsedTrack,
+    _UnsupportedTier1Path,
+    _parse_file,
+)
 
 
 class LibraryScannerScopedTests(unittest.TestCase):
@@ -747,7 +755,7 @@ class LibraryScannerScopedTests(unittest.TestCase):
         def progress(current: int, total: int, path: str) -> None:
             progress_calls.append((current, total, path))
 
-        with patch.object(LibraryScanner, "_PROGRESS_INTERVAL_SEC", 0.0):
+        with patch.object(LibraryScanner, "_DISCOVERY_PROGRESS_INTERVAL_SEC", 0.0):
             discovery = self._scanner._collect_candidates(
                 roots=[str(scan_root.resolve())],
                 progress=progress,
@@ -802,15 +810,355 @@ class LibraryScannerScopedTests(unittest.TestCase):
             scanner.scan(scan_folders=[str(scan_root.resolve())], progress=progress)
 
         transition = next(
-            (call for call in progress_calls if call[0] > 0 and call[1] == 2),
+            (call for call in progress_calls if call[0] > 0 and call[1] > 0 and call[2]),
             None,
         )
         self.assertIsNotNone(transition)
         assert transition is not None
         self.assertIn(".flac", transition[2])
-        self.assertTrue(
-            any(call[0] > 0 and call[1] == 2 for call in progress_calls),
+        self.assertEqual(transition[0], 1)
+        self.assertEqual(transition[1], 1)
+        self.assertEqual(
+            next((call for call in progress_calls if call[0] == 2 and call[1] == 2), None),
+            (2, 2, ""),
         )
+
+    def test_scan_progress_uses_expected_total(self) -> None:
+        scan_root = self._folder_a / "progress_total"
+        scan_root.mkdir()
+        (scan_root / "one.flac").write_bytes(b"")
+        (scan_root / "two.flac").write_bytes(b"")
+
+        progress_calls: list[tuple[int, int, str]] = []
+
+        def progress(current: int, total: int, path: str) -> None:
+            progress_calls.append((current, total, path))
+
+        config = AppConfig(music_folders=[str(scan_root.resolve())])
+        scanner = LibraryScanner(db_path=self._db_path, config=config)
+        with (
+            patch("tunes_player.core.library.scanner._parse_file") as parse_file,
+            patch("tunes_player.core.library.scanner.maintain_album_art", return_value=(0, 0)),
+        ):
+            parse_file.side_effect = AssertionError("unexpected parse during skip")
+            scanner.scan(
+                scan_folders=[str(scan_root.resolve())],
+                progress=progress,
+                expected_total=10_000,
+            )
+
+        scanning = [call for call in progress_calls if call[0] > 0 and call[1] > 0]
+        self.assertTrue(scanning)
+        self.assertEqual(scanning[0][:2], (1, 10_000))
+        self.assertEqual(scanning[-1], (2, 10_000, ""))
+
+    def test_lookup_matches_absolute_path_without_resolve(self) -> None:
+        track = self._folder_a / "indexed.flac"
+        track.write_bytes(b"data")
+        path_str = str(track.resolve())
+        stat = track.stat()
+        connection = connect(self._db_path)
+        try:
+            connection.execute(
+                "INSERT INTO files(path, mtime_ns, size_bytes, indexed_at_ns) VALUES (?, ?, ?, ?)",
+                (path_str, stat.st_mtime_ns, stat.st_size, time.time_ns()),
+            )
+            connection.commit()
+            existing = LibraryScanner._load_existing_files_metadata(
+                connection,
+                [str(self._folder_a.resolve())],
+            )
+            resolve_calls: list[str] = []
+            original_resolve = Path.resolve
+
+            def tracking_resolve(self, *args, **kwargs):
+                resolve_calls.append(str(self))
+                return original_resolve(self, *args, **kwargs)
+
+            with patch.object(Path, "resolve", tracking_resolve):
+                with patch("tunes_player.core.library.scanner._parse_file") as parse_file:
+                    outcome, result_path, wrote = self._scanner._process_candidate(
+                        connection,
+                        track,
+                        file_errors=[],
+                        existing_files=existing,
+                    )
+        finally:
+            connection.close()
+
+        parse_file.assert_not_called()
+        self.assertEqual(outcome, "skipped")
+        self.assertEqual(result_path, path_str)
+        self.assertFalse(wrote)
+        self.assertEqual(resolve_calls, [])
+
+    def test_rescan_skips_symlinked_path_without_stat(self) -> None:
+        scan_root = self._folder_a / "symlink_case"
+        real_dir = scan_root / "real"
+        real_dir.mkdir(parents=True)
+        track = real_dir / "track.flac"
+        track.write_bytes(b"data")
+        link_dir = scan_root / "link"
+        link_dir.symlink_to(real_dir, target_is_directory=True)
+        walk_path = link_dir / "track.flac"
+        db_path_str = str(track.resolve())
+
+        connection = connect(self._db_path)
+        try:
+            connection.execute(
+                "INSERT INTO files(path, mtime_ns, size_bytes, indexed_at_ns) VALUES (?, ?, ?, ?)",
+                (db_path_str, 1, 1, time.time_ns()),
+            )
+            connection.commit()
+            existing = LibraryScanner._load_existing_files_metadata(
+                connection,
+                [str(scan_root.resolve())],
+            )
+            with patch.object(Path, "stat") as stat_mock:
+                outcome, result_path, wrote = self._scanner._process_candidate(
+                    connection,
+                    walk_path,
+                    file_errors=[],
+                    existing_files=existing,
+                )
+        finally:
+            connection.close()
+
+        stat_mock.assert_not_called()
+        self.assertEqual(outcome, "skipped")
+        self.assertEqual(result_path, db_path_str)
+        self.assertFalse(wrote)
+
+    def test_load_existing_files_metadata_avoids_realpath(self) -> None:
+        track = self._folder_a / "indexed.flac"
+        track.write_bytes(b"data")
+        path_str = str(track.resolve())
+        root = str(self._folder_a.resolve())
+        stat = track.stat()
+        connection = connect(self._db_path)
+        try:
+            connection.execute(
+                "INSERT INTO files(path, mtime_ns, size_bytes, indexed_at_ns) VALUES (?, ?, ?, ?)",
+                (path_str, stat.st_mtime_ns, stat.st_size, time.time_ns()),
+            )
+            connection.commit()
+            with patch("tunes_player.core.library.scanner.os.path.realpath") as realpath:
+                existing = LibraryScanner._load_existing_files_metadata(
+                    connection,
+                    [root],
+                )
+        finally:
+            connection.close()
+
+        realpath.assert_not_called()
+        self.assertIsNotNone(existing.get(path_str))
+
+    def test_existing_file_index_normcase_lookup(self) -> None:
+        canonical = str((self._folder_a / "track.flac").resolve())
+        connection = connect(self._db_path)
+        try:
+            connection.execute(
+                "INSERT INTO files(path, mtime_ns, size_bytes, indexed_at_ns) VALUES (?, ?, ?, ?)",
+                (canonical, 1, 1, 1),
+            )
+            connection.commit()
+            row = connection.execute(
+                """
+                SELECT id, path, mtime_ns, size_bytes, indexed_at_ns
+                FROM files WHERE path = ?
+                """,
+                (canonical,),
+            ).fetchone()
+        finally:
+            connection.close()
+
+        index = ExistingFileIndex(
+            by_path={canonical: row},
+            by_normcase={"shared-normcase-key": canonical},
+            by_normpath={},
+        )
+        with patch(
+            "tunes_player.core.library.scanner.os.path.normcase",
+            return_value="shared-normcase-key",
+        ):
+            hit = index.get("/walk/path/track.flac")
+
+        self.assertIsNotNone(hit)
+        assert hit is not None
+        self.assertEqual(hit[0], canonical)
+        self.assertEqual(int(hit[1]["id"]), int(row["id"]))
+
+    def test_lookup_normcase_index_matches_case_variant(self) -> None:
+        canonical = str((self._folder_a / "Track.flac").resolve())
+        walk_variant = str(self._folder_a / "track.flac")
+        if os.path.normcase(canonical) != os.path.normcase(walk_variant):
+            self.skipTest("platform normcase does not fold path case")
+
+        (self._folder_a / "Track.flac").write_bytes(b"")
+        connection = connect(self._db_path)
+        try:
+            connection.execute(
+                "INSERT INTO files(path, mtime_ns, size_bytes, indexed_at_ns) VALUES (?, ?, ?, ?)",
+                (canonical, 1, 1, time.time_ns()),
+            )
+            connection.commit()
+            existing = LibraryScanner._load_existing_files_metadata(
+                connection,
+                [str(self._folder_a.resolve())],
+            )
+            path_str, row = self._scanner._lookup_existing_file(
+                Path(walk_variant),
+                existing,
+                connection,
+            )
+        finally:
+            connection.close()
+
+        self.assertIsNotNone(row)
+        self.assertEqual(path_str, canonical)
+
+    def test_rescan_skips_m4a_probe_for_indexed_file(self) -> None:
+        track = self._folder_a / "indexed.m4a"
+        track.write_bytes(b"data")
+        path_str = str(track.resolve())
+        stat = track.stat()
+        connection = connect(self._db_path)
+        try:
+            connection.execute(
+                "INSERT INTO files(path, mtime_ns, size_bytes, indexed_at_ns) VALUES (?, ?, ?, ?)",
+                (path_str, stat.st_mtime_ns, stat.st_size, time.time_ns()),
+            )
+            connection.commit()
+            existing = LibraryScanner._load_existing_files_metadata(
+                connection,
+                [str(self._folder_a.resolve())],
+            )
+            with patch("tunes_player.core.library.scanner._parse_file") as parse_file:
+                outcome, result_path, wrote = self._scanner._process_candidate(
+                    connection,
+                    track,
+                    file_errors=[],
+                    existing_files=existing,
+                )
+        finally:
+            connection.close()
+
+        parse_file.assert_not_called()
+        self.assertEqual(outcome, "skipped")
+        self.assertEqual(result_path, path_str)
+        self.assertFalse(wrote)
+
+    def test_scan_skips_art_maintenance_when_unchanged(self) -> None:
+        scan_root = self._folder_a / "unchanged"
+        scan_root.mkdir()
+        track = scan_root / "track.flac"
+        track.write_bytes(b"x")
+        path_str = str(track.resolve())
+        stat = track.stat()
+        connection = connect(self._db_path)
+        try:
+            connection.execute(
+                "INSERT INTO files(path, mtime_ns, size_bytes, indexed_at_ns) VALUES (?, ?, ?, ?)",
+                (path_str, stat.st_mtime_ns, stat.st_size, time.time_ns()),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        config = AppConfig(music_folders=[str(scan_root.resolve())])
+        scanner = LibraryScanner(db_path=self._db_path, config=config)
+        with patch("tunes_player.core.library.scanner.maintain_album_art") as maintain:
+            result = scanner.scan(scan_folders=[str(scan_root.resolve())])
+
+        maintain.assert_not_called()
+        self.assertEqual(result.indexed, 0)
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(result.removed, 0)
+        self.assertEqual(result.art_indexed, 0)
+
+    def test_iter_audio_candidates_skips_junk_directories(self) -> None:
+        scan_root = self._folder_a / "prune"
+        scan_root.mkdir()
+        music_dir = scan_root / "Artist"
+        music_dir.mkdir()
+        (music_dir / "track.flac").write_bytes(b"")
+        junk = scan_root / "@eaDir"
+        junk.mkdir()
+        (junk / "hidden.flac").write_bytes(b"")
+
+        discovery = list(
+            self._scanner._iter_audio_candidates(roots=[str(scan_root.resolve())]),
+        )
+
+        self.assertEqual(len(discovery), 1)
+        self.assertEqual(discovery[0].name, "track.flac")
+
+    def test_new_file_scan_indexes_without_prior_row(self) -> None:
+        scan_root = self._folder_a / "fresh"
+        scan_root.mkdir()
+        track = scan_root / "new.flac"
+        track.write_bytes(b"data")
+
+        def fake_parse(path: Path, mtime_ns: int, size_bytes: int) -> _ParsedTrack:
+            path_str = str(path.resolve())
+            return _ParsedTrack(
+                path=path_str,
+                mtime_ns=mtime_ns,
+                size_bytes=size_bytes,
+                codec="flac",
+                duration_sec=None,
+                sample_rate=None,
+                bit_depth=None,
+                channels=None,
+                title=path.stem,
+                artist="Artist",
+                album_artist="Artist",
+                album="Album",
+                release_id=ids.release_id("Artist", "Album"),
+                is_synthetic=False,
+                disc_number=None,
+                track_number=None,
+                year=None,
+                genre=None,
+                total_tracks=None,
+                release_type_tag=None,
+            )
+
+        config = AppConfig(music_folders=[str(scan_root.resolve())])
+        scanner = LibraryScanner(db_path=self._db_path, config=config)
+        with (
+            patch("tunes_player.core.library.scanner._parse_file", side_effect=fake_parse),
+            patch("tunes_player.core.library.scanner.maintain_album_art", return_value=(0, 0)),
+        ):
+            result = scanner.scan(scan_folders=[str(scan_root.resolve())])
+
+        connection = connect(self._db_path)
+        try:
+            count = connection.execute("SELECT COUNT(*) AS n FROM files").fetchone()["n"]
+        finally:
+            connection.close()
+
+        self.assertEqual(result.indexed, 1)
+        self.assertEqual(count, 1)
+
+    def test_parse_m4a_opens_mp4_once(self) -> None:
+        track = self._folder_a / "song.m4a"
+        track.write_bytes(b"not-a-real-m4a")
+
+        with patch("mutagen.mp4.MP4") as mp4_cls:
+            instance = mp4_cls.return_value
+            instance.info.codec = "mp4a"
+            instance.tags = {"\xa9nam": ["Song"]}
+            parsed = _parse_file(track, 1, 1)
+            self.assertEqual(mp4_cls.call_count, 1)
+            self.assertEqual(parsed.codec, "aac")
+
+        with patch("mutagen.mp4.MP4") as mp4_cls:
+            instance = mp4_cls.return_value
+            instance.info.codec = "unknown"
+            instance.tags = {}
+            with self.assertRaises(_UnsupportedTier1Path):
+                _parse_file(track, 1, 1)
 
 
 if __name__ == "__main__":
