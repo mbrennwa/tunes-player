@@ -122,7 +122,7 @@ class AppConfig:
     music_folder_scan_checkpoint: dict[str, str] = field(default_factory=dict)
     output_sink_id: str | None = None
     allow_software_volume_fallback: bool = True
-    # None = auto (hardware when available); software/fixed override user choice.
+    # None = volume control on (hardware when available, else software); fixed = off.
     volume_control_mode: str | None = None
     exclusive_device_access: bool = False
     qobuz_app_id: str | None = None

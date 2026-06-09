@@ -155,6 +155,7 @@ class PlayerService:
         self._allow_software_volume_fallback = (
             self._config_manager.config.allow_software_volume_fallback
         )
+        self._normalize_volume_control_config()
         self._device_volume = self._has_device_volume()
         if self._device_volume and self._volume_controller is not None:
             try:
@@ -1261,6 +1262,9 @@ class PlayerService:
     def volume_mode(self) -> VolumeMode:
         return self._volume_mode()
 
+    def volume_control_enabled(self) -> bool:
+        return self._volume_mode() != "fixed"
+
     def volume_adjustable(self) -> bool:
         return self._volume_mode() != "fixed"
 
@@ -1275,12 +1279,9 @@ class PlayerService:
         was_device_volume = self._device_volume
         detected = self._has_device_volume(verify_alsa=True)
         self._device_volume = detected
-        if (
-            was_device_volume
-            and not detected
-            and self._config_manager.config.volume_control_mode is None
-        ):
-            self.set_volume_mode("fixed")
+        if was_device_volume and not detected:
+            self._apply_engine_volume_policy()
+            self._emit("playback_changed")
 
     def _playlist_position(self) -> int:
         if not self._playlist_meta:
@@ -1618,10 +1619,7 @@ class PlayerService:
         self._config_manager.config.volume_control_mode = None
         self._config_manager.save()
         self._rebuild_engine_for_output_change()
-        if not self._device_volume:
-            self.set_volume_mode("fixed")
-        else:
-            self._apply_engine_volume_policy()
+        self._apply_engine_volume_policy()
         self._emit("playback_changed")
 
     def list_output_sinks(self) -> list[VolumeEndpoint]:
@@ -1654,20 +1652,39 @@ class PlayerService:
         self._apply_engine_volume_policy()
         self._emit("playback_changed")
 
-    def set_volume_mode(self, mode: VolumeMode) -> None:
-        if mode == "hardware" and not self._device_volume:
+    def set_volume_control_enabled(self, enabled: bool) -> None:
+        if enabled == self.volume_control_enabled():
             return
         prev_mode = self._volume_mode()
         cfg = self._config_manager.config
-        cfg.volume_control_mode = None if mode == "hardware" else mode
-        cfg.allow_software_volume_fallback = mode == "software"
-        self._allow_software_volume_fallback = cfg.allow_software_volume_fallback
+        if enabled:
+            cfg.volume_control_mode = None
+            cfg.allow_software_volume_fallback = True
+            self._allow_software_volume_fallback = True
+            self._muted = False
+            if self._device_volume and self._volume_controller is not None:
+                try:
+                    self._volume = self._volume_controller.get_level()
+                except OSError:
+                    pass
+        else:
+            self._apply_unity_gain_output()
+            cfg.volume_control_mode = "fixed"
+            cfg.allow_software_volume_fallback = False
+            self._allow_software_volume_fallback = False
         self._config_manager.save()
         self._apply_engine_volume_policy()
         volume_changed = self._sync_device_volume_after_mode_change(prev_mode)
         self._emit("playback_changed")
         if volume_changed:
             self._emit("volume_changed")
+
+    def set_volume_mode(self, mode: VolumeMode) -> None:
+        """Legacy API — prefer set_volume_control_enabled for UI."""
+        if mode == "fixed":
+            self.set_volume_control_enabled(False)
+            return
+        self.set_volume_control_enabled(True)
 
     def exclusive_access_supported(self) -> bool:
         controller = self._volume_controller
@@ -2250,6 +2267,25 @@ class PlayerService:
         self._sync_from_engine()
         return True
 
+    def _normalize_volume_control_config(self) -> None:
+        cfg = self._config_manager.config
+        if cfg.volume_control_mode in (None, "fixed"):
+            return
+        # Legacy "software" / "hardware" override -> auto (device volume when available).
+        cfg.volume_control_mode = None
+        cfg.allow_software_volume_fallback = True
+        self._allow_software_volume_fallback = True
+        self._config_manager.save()
+
+    def _apply_unity_gain_output(self) -> None:
+        self._volume = 1.0
+        self._muted = False
+        if self._device_volume and self._volume_controller is not None:
+            try:
+                self._volume_controller.set_level(1.0)
+            except OSError:
+                pass
+
     def _auto_volume_mode(self) -> VolumeMode:
         return derive_volume_mode(
             device_volume=self._device_volume,
@@ -2259,13 +2295,8 @@ class PlayerService:
         )
 
     def _volume_mode(self) -> VolumeMode:
-        override = self._config_manager.config.volume_control_mode
-        if override == "software":
-            return "software"
-        if override == "fixed":
+        if self._config_manager.config.volume_control_mode == "fixed":
             return "fixed"
-        if override == "hardware" and self._device_volume:
-            return "hardware"
         return self._auto_volume_mode()
 
     def _mpv_soft_volume(self) -> bool:
