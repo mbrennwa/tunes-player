@@ -153,7 +153,9 @@ class QobuzClient:
         for item in albums.get("items") or []:
             if not isinstance(item, dict):
                 continue
-            release = convert.release_from_qobuz(item)
+            release = convert.release_from_qobuz(
+                self._enrich_qobuz_album_quality_metadata(item),
+            )
             if release.id not in seen:
                 seen.add(release.id)
                 releases.append(release)
@@ -165,11 +167,57 @@ class QobuzClient:
             album = item.get("album")
             if not isinstance(album, dict):
                 continue
-            release = convert.release_from_qobuz(album)
+            release = convert.release_from_qobuz(
+                self._enrich_qobuz_album_quality_metadata(album),
+            )
             if release.id not in seen:
                 seen.add(release.id)
                 releases.append(release)
         return releases[:limit]
+
+    def _enrich_qobuz_album_quality_metadata(
+        self,
+        album: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Merge album/get quality fields when search JSON omits hi-res availability."""
+        from tunes_player.core.release_quality import (
+            QUALITY_FILTER_HI_RES,
+            tiers_from_qobuz_album,
+        )
+
+        if QUALITY_FILTER_HI_RES in tiers_from_qobuz_album(album):
+            return album
+        album_id = album.get("id") or album.get("qobuz_id")
+        if album_id is None:
+            return album
+        summary = self._fetch_album_summary(str(album_id))
+        if not isinstance(summary, dict):
+            return album
+        merged = dict(album)
+        for key in (
+            "hires",
+            "hires_streamable",
+            "maximum_bit_depth",
+            "maximum_sampling_rate",
+            "maximum_technical_specifications",
+        ):
+            value = summary.get(key)
+            if value is not None:
+                merged[key] = value
+        summary_tracks = summary.get("tracks")
+        if isinstance(summary_tracks, dict):
+            items = summary_tracks.get("items")
+            if isinstance(items, list) and items:
+                merged_tracks = merged.get("tracks")
+                if not isinstance(merged_tracks, dict):
+                    merged["tracks"] = {"items": items[:5]}
+                else:
+                    existing = list(merged_tracks.get("items") or [])
+                    if not existing:
+                        merged_tracks = dict(merged_tracks)
+                        merged_tracks["items"] = items[:5]
+                        merged["tracks"] = merged_tracks
+        return merged
 
     def list_new_release_items(
         self,

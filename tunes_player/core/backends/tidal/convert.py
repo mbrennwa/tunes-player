@@ -12,6 +12,9 @@ from tunes_player.core.library.release_logic import (
 )
 from tunes_player.core.release_quality import (
     QUALITY_FILTER_COMPRESSED,
+    _collect_tidal_album_tier_signals,
+    _VALID_QUALITY_FILTERS,
+    available_tiers_from_signals,
     max_quality_tier,
     tier_from_tidal_album,
     tier_from_tidal_peak,
@@ -107,6 +110,32 @@ def _resolve_tidal_peak_quality_tier(session: Session, album: TidalAlbum) -> str
     return peak_quality_tier_from_tidal_tracks(_tidal_album_tracks(session, album))
 
 
+def _collect_tidal_release_quality_signals(
+    session: Session,
+    album: TidalAlbum,
+    *,
+    resolve_peak_quality: bool,
+    quality_hint_tier: str,
+) -> set[str]:
+    signals = set(_collect_tidal_album_tier_signals(album))
+    if resolve_peak_quality:
+        for track in _tidal_album_tracks(session, album):
+            signals.add(tier_from_tidal_peak(track_peak_quality(track)))
+    else:
+        hint = resolve_tidal_grid_peak_quality_tier(
+            session,
+            album,
+            quality_hint_tier=quality_hint_tier,
+        )
+        if hint:
+            signals.add(hint)
+        if not signals:
+            album_tier = tier_from_tidal_album(album)
+            if album_tier:
+                signals.add(album_tier)
+    return {tier for tier in signals if tier in _VALID_QUALITY_FILTERS}
+
+
 def resolve_tidal_grid_peak_quality_tier(
     session: Session,
     album: TidalAlbum,
@@ -160,6 +189,18 @@ def release_from_tidal(
         _resolve_tidal_release_type(session, album),
         is_synthetic=False,
     )
+    signals = set(_collect_tidal_release_quality_signals(
+        session,
+        album,
+        resolve_peak_quality=resolve_peak_quality,
+        quality_hint_tier=quality_hint_tier,
+    ))
+    available_quality_tiers = available_tiers_from_signals(signals)
+    peak_quality_tier = (
+        max_quality_tier(*available_quality_tiers)
+        if available_quality_tiers
+        else ""
+    )
     return Release(
         id=tidal_ids.album_id(album.id),
         title=album.name or "Unknown",
@@ -171,15 +212,8 @@ def release_from_tidal(
         completeness=completeness,
         release_type=release_type,
         art_uri=_album_art(session, album),
-        peak_quality_tier=(
-            _resolve_tidal_peak_quality_tier(session, album)
-            if resolve_peak_quality
-            else resolve_tidal_grid_peak_quality_tier(
-                session,
-                album,
-                quality_hint_tier=quality_hint_tier,
-            )
-        ),
+        peak_quality_tier=peak_quality_tier,
+        available_quality_tiers=available_quality_tiers,
     )
 
 

@@ -623,16 +623,22 @@ class LibraryStore:
             release_type_tag=release_type_tag,
         )
         duration = row["duration_sec"]
-        from tunes_player.core.release_quality import tier_from_local
+        from tunes_player.core.release_quality import (
+            max_quality_tier,
+            tiers_from_local,
+        )
 
         max_bit_depth = row["max_bit_depth"]
         max_sample_rate = row["max_sample_rate"]
-        peak_quality_tier = tier_from_local(
+        has_lossless = bool(int(row["has_lossless"] or 0))
+        has_lossy = bool(int(row["has_lossy"] or 0))
+        available_quality_tiers = tiers_from_local(
             max_bit_depth=int(max_bit_depth) if max_bit_depth is not None else None,
             max_sample_rate=int(max_sample_rate) if max_sample_rate is not None else None,
-            has_lossless=bool(int(row["has_lossless"] or 0)),
-            has_lossy=bool(int(row["has_lossy"] or 0)),
+            has_lossless=has_lossless,
+            has_lossy=has_lossy,
         )
+        peak_quality_tier = max_quality_tier(*available_quality_tiers)
         return Release(
             id=str(row["release_id"]),
             title=row["album"] or "Unknown",
@@ -647,6 +653,7 @@ class LibraryStore:
             art_uri=art_uri,
             duration_sec=float(duration) if duration is not None else None,
             peak_quality_tier=peak_quality_tier,
+            available_quality_tiers=available_quality_tiers,
         )
 
     @staticmethod

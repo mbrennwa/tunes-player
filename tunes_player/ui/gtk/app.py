@@ -778,13 +778,17 @@ class TunesWindow(Adw.ApplicationWindow):
     def _refresh_cached_release_quality(self, releases: list[Release]) -> list[Release]:
         if not any(release.source == Source.LOCAL for release in releases):
             return releases
+        local_releases = self._service.list_releases()
         local_tier_by_id = {
-            release.id: release.peak_quality_tier
-            for release in self._service.list_releases()
+            release.id: release.peak_quality_tier for release in local_releases
+        }
+        local_available_by_id = {
+            release.id: release.available_quality_tiers for release in local_releases
         }
         return refresh_local_peak_quality_tiers(
             releases,
             local_tier_by_id=local_tier_by_id,
+            local_available_tiers_by_id=local_available_by_id,
         )
 
     def _persisted_grid_cache_stale(self, state: ShellState) -> bool:

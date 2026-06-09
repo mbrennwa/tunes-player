@@ -50,6 +50,8 @@ class Release:
     art_uri: str | None = None
     duration_sec: float | None = None
     peak_quality_tier: str = ""
+    # Catalog tiers this release is streamable at (for shell quality filter OR match).
+    available_quality_tiers: frozenset[str] = frozenset()
 
     @property
     def is_partial(self) -> bool:

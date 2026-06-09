@@ -567,6 +567,14 @@ class TidalClient:
             album,
             owned_track_count=len(tracks),
         )
+        from tunes_player.core.release_quality import (
+            _collect_tidal_album_tier_signals,
+            available_tiers_from_signals,
+        )
+
+        signals = set(_collect_tidal_album_tier_signals(album))
+        signals.add(convert.peak_quality_tier_from_tidal_tracks(tracks))
+        available_quality_tiers = available_tiers_from_signals(signals)
         return Release(
             id=release.id,
             title=release.title,
@@ -580,10 +588,8 @@ class TidalClient:
             genre=release.genre,
             art_uri=release.art_uri,
             duration_sec=duration or None,
-            peak_quality_tier=max_quality_tier(
-                tier_from_tidal_album(album),
-                convert.peak_quality_tier_from_tidal_tracks(tracks),
-            ),
+            peak_quality_tier=max_quality_tier(*available_quality_tiers),
+            available_quality_tiers=available_quality_tiers,
         )
 
     def get_album(self, album_id: str) -> Release | None:
