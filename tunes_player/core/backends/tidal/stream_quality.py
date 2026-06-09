@@ -96,9 +96,56 @@ def session_quality_for_subscription(*, hi_res_entitled: bool) -> str:
     return "LOSSLESS"
 
 
+def _ceiling_max_tidal_rank(ceiling_tier: str | None) -> int | None:
+    from tunes_player.core.release_quality import (
+        QUALITY_FILTER_CD,
+        QUALITY_FILTER_COMPRESSED,
+        QUALITY_FILTER_HI_RES,
+    )
+
+    if ceiling_tier is None or ceiling_tier == QUALITY_FILTER_HI_RES:
+        return None
+    if ceiling_tier == QUALITY_FILTER_CD:
+        return _QUALITY_RANK["LOSSLESS"]
+    if ceiling_tier == QUALITY_FILTER_COMPRESSED:
+        return _QUALITY_RANK["HIGH"]
+    return None
+
+
+def cap_session_quality_for_ceiling(
+    session_quality: str,
+    ceiling_tier: str | None,
+) -> str:
+    """Lower session quality when the shell filter caps playback below subscription."""
+    max_rank = _ceiling_max_tidal_rank(ceiling_tier)
+    if max_rank is None:
+        return session_quality
+    session_rank = _QUALITY_RANK.get(normalize_api_quality(session_quality), 0)
+    if session_rank <= max_rank:
+        return normalize_api_quality(session_quality)
+    for tier in ("LOSSLESS", "HIGH", "LOW"):
+        if _QUALITY_RANK[tier] <= max_rank:
+            return tier
+    return "HIGH"
+
+
+def apply_playback_quality_ceiling(
+    candidates: list[str],
+    ceiling_tier: str | None,
+) -> list[str]:
+    """Drop stream tiers above the shell playback ceiling."""
+    max_rank = _ceiling_max_tidal_rank(ceiling_tier)
+    if max_rank is None:
+        return candidates
+    capped = [item for item in candidates if _QUALITY_RANK.get(item, 0) <= max_rank]
+    return capped or candidates[:1]
+
+
 def playback_quality_candidates(
     session_quality: str,
     track: _TrackQualityInfo,
+    *,
+    ceiling_tier: str | None = None,
 ) -> list[str]:
     """Ordered audioquality values to try for one track.
 
@@ -130,7 +177,7 @@ def playback_quality_candidates(
         if item not in seen:
             seen.add(item)
             ordered.append(item)
-    return ordered
+    return apply_playback_quality_ceiling(ordered, ceiling_tier)
 
 
 def payload_audio_quality(payload: dict[str, Any]) -> str:

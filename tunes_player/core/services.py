@@ -46,6 +46,7 @@ from tunes_player.core.playback.output_profile import (
     compute_output_profile,
 )
 from tunes_player.core.playback_quality import format_playback_status
+from tunes_player.core.release_quality import playback_ceiling_tier
 from tunes_player.core.volume import (
     VolumeController,
     VolumeEndpoint,
@@ -60,6 +61,7 @@ Unsubscribe = Callable[[], None]
 log = logging.getLogger(__name__)
 _timeline_log = logging.getLogger("tunes_player.playback.timeline")
 _QUEUE_END_MARGIN_SEC = 1.0
+_CEILING_UNCHANGED = object()
 
 MainThreadHook: TypeAlias = Callable[[Callable[[], None]], None]
 
@@ -155,6 +157,7 @@ class PlayerService:
         self._allow_software_volume_fallback = (
             self._config_manager.config.allow_software_volume_fallback
         )
+        self._normalize_volume_control_config()
         self._device_volume = self._has_device_volume()
         if self._device_volume and self._volume_controller is not None:
             try:
@@ -169,6 +172,7 @@ class PlayerService:
         self._device_output_fallback = False
         self._is_playing = False
         self._playlist_meta: list[Track] = []
+        self._playlist_playback_quality_ceiling: str | None = None
         self._playlist_build_generation = 0
         self._playlist_prepared: dict[str, _PreparedTrackLoad] = {}
         self._current_track: Track | None = None
@@ -185,7 +189,6 @@ class PlayerService:
         self._output_profile: PlaybackOutputProfile | None = None
         self._exclusive_session: object | None = None
         self._position_sec = 0.0
-        self._audible_position_sec = 0.0
         self._duration_sec: float | None = None
         self._engine: PlaybackEngine | None = None
         self._engine_error: str | None = None
@@ -1261,6 +1264,9 @@ class PlayerService:
     def volume_mode(self) -> VolumeMode:
         return self._volume_mode()
 
+    def volume_control_enabled(self) -> bool:
+        return self._volume_mode() != "fixed"
+
     def volume_adjustable(self) -> bool:
         return self._volume_mode() != "fixed"
 
@@ -1275,12 +1281,9 @@ class PlayerService:
         was_device_volume = self._device_volume
         detected = self._has_device_volume(verify_alsa=True)
         self._device_volume = detected
-        if (
-            was_device_volume
-            and not detected
-            and self._config_manager.config.volume_control_mode is None
-        ):
-            self.set_volume_mode("fixed")
+        if was_device_volume and not detected:
+            self._apply_engine_volume_policy()
+            self._emit("playback_changed")
 
     def _playlist_position(self) -> int:
         if not self._playlist_meta:
@@ -1297,12 +1300,18 @@ class PlayerService:
         self._auto_advanced_from_index = None
         self._play_queue_index(index)
 
-    def play_track(self, track_id: str) -> None:
+    def play_track(
+        self,
+        track_id: str,
+        *,
+        enabled_quality_tiers: frozenset[str] | None = None,
+    ) -> None:
+        ceiling = self._playback_ceiling_for_tiers(enabled_quality_tiers)
         if track_id.startswith("tidal:"):
-            self._play_tidal_track(track_id)
+            self._play_tidal_track(track_id, playback_quality_ceiling=ceiling)
             return
         if track_id.startswith("qobuz:"):
-            self._play_qobuz_track(track_id)
+            self._play_qobuz_track(track_id, playback_quality_ceiling=ceiling)
             return
 
         self._play_release_generation += 1
@@ -1326,7 +1335,11 @@ class PlayerService:
             def apply() -> None:
                 if generation != self._play_release_generation:
                     return
-                self._start_playlist(tracks, start_index=start_index)
+                self._start_playlist(
+                    tracks,
+                    start_index=start_index,
+                    playback_quality_ceiling=ceiling,
+                )
 
             self._run_on_main_thread(apply)
 
@@ -1336,7 +1349,12 @@ class PlayerService:
             daemon=True,
         ).start()
 
-    def _play_tidal_track(self, track_id: str) -> None:
+    def _play_tidal_track(
+        self,
+        track_id: str,
+        *,
+        playback_quality_ceiling: str | None = None,
+    ) -> None:
         if not self._tidal.is_logged_in():
             self._report_error("Sign in to TIDAL in Settings → Sources.")
             return
@@ -1348,9 +1366,18 @@ class PlayerService:
         if not tracks:
             self._report_error("TIDAL track not found.")
             return
-        self._start_playlist(tracks, start_index=start_index)
+        self._start_playlist(
+            tracks,
+            start_index=start_index,
+            playback_quality_ceiling=playback_quality_ceiling,
+        )
 
-    def _play_qobuz_track(self, track_id: str) -> None:
+    def _play_qobuz_track(
+        self,
+        track_id: str,
+        *,
+        playback_quality_ceiling: str | None = None,
+    ) -> None:
         if not self._qobuz.is_configured():
             self._report_error(
                 "Qobuz App ID and App Secret are required. Add them in Settings → Sources."
@@ -1367,9 +1394,20 @@ class PlayerService:
         if not tracks:
             self._report_error("Qobuz track not found.")
             return
-        self._start_playlist(tracks, start_index=start_index)
+        self._start_playlist(
+            tracks,
+            start_index=start_index,
+            playback_quality_ceiling=playback_quality_ceiling,
+        )
 
-    def play_release(self, release_id: str, *, start_index: int = 0) -> None:
+    def play_release(
+        self,
+        release_id: str,
+        *,
+        start_index: int = 0,
+        enabled_quality_tiers: frozenset[str] | None = None,
+    ) -> None:
+        ceiling = self._playback_ceiling_for_tiers(enabled_quality_tiers)
         self._play_release_generation += 1
         generation = self._play_release_generation
 
@@ -1390,7 +1428,11 @@ class PlayerService:
             def apply() -> None:
                 if generation != self._play_release_generation:
                     return
-                self._start_playlist(tracks, start_index=start_index_clamped)
+                self._start_playlist(
+                    tracks,
+                    start_index=start_index_clamped,
+                    playback_quality_ceiling=ceiling,
+                )
 
             self._run_on_main_thread(apply)
 
@@ -1440,11 +1482,21 @@ class PlayerService:
             return False
         return self._is_playing or self._playback_load_active
 
-    def play_or_toggle_release(self, release_id: str, *, start_index: int = 0) -> None:
+    def play_or_toggle_release(
+        self,
+        release_id: str,
+        *,
+        start_index: int = 0,
+        enabled_quality_tiers: frozenset[str] | None = None,
+    ) -> None:
         if self._current_track is not None and self._current_release_id == release_id:
             self.toggle_play_pause()
             return
-        self.play_release(release_id, start_index=start_index)
+        self.play_release(
+            release_id,
+            start_index=start_index,
+            enabled_quality_tiers=enabled_quality_tiers,
+        )
 
     def toggle_play_pause(self) -> None:
         if self._current_track is None and self._playlist_meta:
@@ -1618,10 +1670,7 @@ class PlayerService:
         self._config_manager.config.volume_control_mode = None
         self._config_manager.save()
         self._rebuild_engine_for_output_change()
-        if not self._device_volume:
-            self.set_volume_mode("fixed")
-        else:
-            self._apply_engine_volume_policy()
+        self._apply_engine_volume_policy()
         self._emit("playback_changed")
 
     def list_output_sinks(self) -> list[VolumeEndpoint]:
@@ -1654,20 +1703,39 @@ class PlayerService:
         self._apply_engine_volume_policy()
         self._emit("playback_changed")
 
-    def set_volume_mode(self, mode: VolumeMode) -> None:
-        if mode == "hardware" and not self._device_volume:
+    def set_volume_control_enabled(self, enabled: bool) -> None:
+        if enabled == self.volume_control_enabled():
             return
         prev_mode = self._volume_mode()
         cfg = self._config_manager.config
-        cfg.volume_control_mode = None if mode == "hardware" else mode
-        cfg.allow_software_volume_fallback = mode == "software"
-        self._allow_software_volume_fallback = cfg.allow_software_volume_fallback
+        if enabled:
+            cfg.volume_control_mode = None
+            cfg.allow_software_volume_fallback = True
+            self._allow_software_volume_fallback = True
+            self._muted = False
+            if self._device_volume and self._volume_controller is not None:
+                try:
+                    self._volume = self._volume_controller.get_level()
+                except OSError:
+                    pass
+        else:
+            self._apply_unity_gain_output()
+            cfg.volume_control_mode = "fixed"
+            cfg.allow_software_volume_fallback = False
+            self._allow_software_volume_fallback = False
         self._config_manager.save()
         self._apply_engine_volume_policy()
         volume_changed = self._sync_device_volume_after_mode_change(prev_mode)
         self._emit("playback_changed")
         if volume_changed:
             self._emit("volume_changed")
+
+    def set_volume_mode(self, mode: VolumeMode) -> None:
+        """Legacy API — prefer set_volume_control_enabled for UI."""
+        if mode == "fixed":
+            self.set_volume_control_enabled(False)
+            return
+        self.set_volume_control_enabled(True)
 
     def exclusive_access_supported(self) -> bool:
         controller = self._volume_controller
@@ -1702,7 +1770,7 @@ class PlayerService:
             and self._engine is not None
         ):
             self._sync_duration_from_engine()
-            self._sync_audible_position_from_engine()
+            self.refresh_playback_position_for_ui()
             self._maybe_auto_advance_queue()
 
     def poll_playback_health(self) -> None:
@@ -2138,7 +2206,11 @@ class PlayerService:
         if track is None:
             return
         source = resolve_track(
-            self._store, track.id, tidal=self._tidal, qobuz=self._qobuz
+            self._store,
+            track.id,
+            tidal=self._tidal,
+            qobuz=self._qobuz,
+            playback_quality_ceiling=self._playlist_playback_quality_ceiling,
         )
         if source is None:
             return
@@ -2209,7 +2281,11 @@ class PlayerService:
             return True
         try:
             source = resolve_track(
-                self._store, track.id, tidal=self._tidal, qobuz=self._qobuz
+                self._store,
+                track.id,
+                tidal=self._tidal,
+                qobuz=self._qobuz,
+                playback_quality_ceiling=self._playlist_playback_quality_ceiling,
             )
         except Exception as exc:
             self._report_error(str(exc), exc=exc)
@@ -2250,6 +2326,25 @@ class PlayerService:
         self._sync_from_engine()
         return True
 
+    def _normalize_volume_control_config(self) -> None:
+        cfg = self._config_manager.config
+        if cfg.volume_control_mode in (None, "fixed"):
+            return
+        # Legacy "software" / "hardware" override -> auto (device volume when available).
+        cfg.volume_control_mode = None
+        cfg.allow_software_volume_fallback = True
+        self._allow_software_volume_fallback = True
+        self._config_manager.save()
+
+    def _apply_unity_gain_output(self) -> None:
+        self._volume = 1.0
+        self._muted = False
+        if self._device_volume and self._volume_controller is not None:
+            try:
+                self._volume_controller.set_level(1.0)
+            except OSError:
+                pass
+
     def _auto_volume_mode(self) -> VolumeMode:
         return derive_volume_mode(
             device_volume=self._device_volume,
@@ -2259,13 +2354,8 @@ class PlayerService:
         )
 
     def _volume_mode(self) -> VolumeMode:
-        override = self._config_manager.config.volume_control_mode
-        if override == "software":
-            return "software"
-        if override == "fixed":
+        if self._config_manager.config.volume_control_mode == "fixed":
             return "fixed"
-        if override == "hardware" and self._device_volume:
-            return "hardware"
         return self._auto_volume_mode()
 
     def _mpv_soft_volume(self) -> bool:
@@ -2380,6 +2470,16 @@ class PlayerService:
         else:
             callback()
 
+    def _playback_ceiling_for_tiers(
+        self,
+        enabled_quality_tiers: frozenset[str] | None,
+    ) -> str | None:
+        if enabled_quality_tiers is None:
+            enabled_quality_tiers = (
+                self._config_manager.config.shell_state.enabled_quality_tiers
+            )
+        return playback_ceiling_tier(enabled_quality_tiers)
+
     def _build_prepared_track_load(
         self,
         track: Track,
@@ -2389,7 +2489,11 @@ class PlayerService:
     ) -> _PreparedTrackLoad:
         try:
             source = resolve_track(
-                self._store, track.id, tidal=self._tidal, qobuz=self._qobuz
+                self._store,
+                track.id,
+                tidal=self._tidal,
+                qobuz=self._qobuz,
+                playback_quality_ceiling=self._playlist_playback_quality_ceiling,
             )
         except Exception as exc:
             return _PreparedTrackLoad(
@@ -2589,13 +2693,7 @@ class PlayerService:
         engine = self._engine
         time_pos = self._engine_time_pos_sec(engine) if engine is not None else 0.0
         end_threshold = duration - _QUEUE_END_MARGIN_SEC
-        audible = self._audible_position_sec
-        if self._is_playing:
-            # While audio is still playing, both timelines must agree (#44).
-            if audible < end_threshold or time_pos < end_threshold:
-                return
-        elif max(audible, time_pos) < end_threshold:
-            # mpv often pauses at EOF before we advance.
+        if time_pos < end_threshold:
             return
 
         index = self._playlist_position()
@@ -2623,19 +2721,26 @@ class PlayerService:
             return
 
         _timeline_log.info(
-            "auto_advance queue[%s/%s] audible=%.2fs time-pos=%.2fs dur=%.2fs",
+            "auto_advance queue[%s/%s] pos=%.2fs dur=%.2fs",
             index,
             len(self._playlist_meta),
-            self._audible_position_sec,
             time_pos,
             duration,
         )
         self._play_queue_index(index + 1)
 
-    def _start_playlist(self, tracks: list[Track], *, start_index: int = 0) -> None:
+    def _start_playlist(
+        self,
+        tracks: list[Track],
+        *,
+        start_index: int = 0,
+        playback_quality_ceiling: str | None | object = _CEILING_UNCHANGED,
+    ) -> None:
         if not tracks:
             return
         start_index = max(0, min(start_index, len(tracks) - 1))
+        if playback_quality_ceiling is not _CEILING_UNCHANGED:
+            self._playlist_playback_quality_ceiling = playback_quality_ceiling
         self._playlist_build_generation += 1
         build_generation = self._playlist_build_generation
         self._load_generation += 1
@@ -2874,6 +2979,7 @@ class PlayerService:
         if previous is None or previous.id != track.id:
             self._reset_playback_position(0.0)
             self._duration_sec = None
+            self.refresh_playback_position_for_ui()
         self._playback_load_active = False
         self._direct_alsa_recovery_attempts = 0
         self._auto_advanced_from_index = None
@@ -3003,9 +3109,7 @@ class PlayerService:
             self._reset_playback_position(0.0)
 
     def _reset_playback_position(self, position_sec: float) -> None:
-        position_sec = max(0.0, position_sec)
-        self._position_sec = position_sec
-        self._audible_position_sec = position_sec
+        self._position_sec = max(0.0, position_sec)
 
     def max_seek_position_sec(self) -> float | None:
         engine = self._engine
@@ -3026,16 +3130,6 @@ class PlayerService:
             return max(0.0, get_fn())
         return max(0.0, engine.get_position())
 
-    def _apply_ui_position(self, position_sec: float, *, allow_backward: bool = False) -> None:
-        position = max(0.0, position_sec)
-        if not allow_backward:
-            if self._is_playing:
-                if position < self._position_sec:
-                    return
-            elif position < self._position_sec:
-                return
-        self._position_sec = position
-
     def refresh_playback_position_for_ui(self) -> None:
         """Pull live mpv time-pos for the seek bar."""
         engine = self._engine
@@ -3043,18 +3137,12 @@ class PlayerService:
             return
         query_fn = getattr(engine, "query_time_pos", None)
         if callable(query_fn):
-            self._apply_ui_position(query_fn())
+            self._position_sec = max(0.0, query_fn())
         else:
-            self._apply_ui_position(engine.get_position())
-
-    def _sync_audible_position_from_engine(self) -> None:
-        engine = self._engine
-        if engine is None:
-            return
-        self._audible_position_sec = max(0.0, engine.get_position())
+            self._position_sec = max(0.0, engine.get_position())
 
     def _sync_playback_position_from_engine(self) -> None:
-        self._sync_audible_position_from_engine()
+        self.refresh_playback_position_for_ui()
         self._maybe_auto_advance_queue()
 
     def _sync_duration_from_engine(self) -> None:
@@ -3065,8 +3153,6 @@ class PlayerService:
         if duration is not None and duration > 0:
             self._duration_sec = duration
         self._is_playing = engine.is_playing()
-        self._sync_audible_position_from_engine()
-        self._maybe_auto_advance_queue()
 
     def _sync_from_engine(self) -> None:
         self._sync_playback_position_from_engine()
@@ -3094,15 +3180,14 @@ class PlayerService:
         if event == "track_eof":
             self._is_playing = False
             self._sync_duration_from_engine()
-            self._sync_audible_position_from_engine()
+            self.refresh_playback_position_for_ui()
             self._maybe_auto_advance_queue()
             return
         if event == "track_finished":
             _timeline_log.info(
-                "service track_finished track=%s ui_pos=%.2f audible=%.2f dur=%s",
+                "service track_finished track=%s pos=%.2f dur=%s",
                 self._current_track.id if self._current_track else None,
                 self._position_sec,
-                self._audible_position_sec,
                 self._duration_sec,
             )
             track = self._current_track
@@ -3142,7 +3227,6 @@ class PlayerService:
             return
         if event == "position_changed":
             self.refresh_playback_position_for_ui()
-            self._sync_audible_position_from_engine()
             self._maybe_auto_advance_queue()
         elif event == "duration_changed":
             self._sync_duration_from_engine()

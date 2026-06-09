@@ -153,7 +153,9 @@ class QobuzClient:
         for item in albums.get("items") or []:
             if not isinstance(item, dict):
                 continue
-            release = convert.release_from_qobuz(item)
+            release = convert.release_from_qobuz(
+                self._enrich_qobuz_album_quality_metadata(item),
+            )
             if release.id not in seen:
                 seen.add(release.id)
                 releases.append(release)
@@ -165,11 +167,57 @@ class QobuzClient:
             album = item.get("album")
             if not isinstance(album, dict):
                 continue
-            release = convert.release_from_qobuz(album)
+            release = convert.release_from_qobuz(
+                self._enrich_qobuz_album_quality_metadata(album),
+            )
             if release.id not in seen:
                 seen.add(release.id)
                 releases.append(release)
         return releases[:limit]
+
+    def _enrich_qobuz_album_quality_metadata(
+        self,
+        album: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Merge album/get quality fields when search JSON omits hi-res availability."""
+        from tunes_player.core.release_quality import (
+            QUALITY_FILTER_HI_RES,
+            tiers_from_qobuz_album,
+        )
+
+        if QUALITY_FILTER_HI_RES in tiers_from_qobuz_album(album):
+            return album
+        album_id = album.get("id") or album.get("qobuz_id")
+        if album_id is None:
+            return album
+        summary = self._fetch_album_summary(str(album_id))
+        if not isinstance(summary, dict):
+            return album
+        merged = dict(album)
+        for key in (
+            "hires",
+            "hires_streamable",
+            "maximum_bit_depth",
+            "maximum_sampling_rate",
+            "maximum_technical_specifications",
+        ):
+            value = summary.get(key)
+            if value is not None:
+                merged[key] = value
+        summary_tracks = summary.get("tracks")
+        if isinstance(summary_tracks, dict):
+            items = summary_tracks.get("items")
+            if isinstance(items, list) and items:
+                merged_tracks = merged.get("tracks")
+                if not isinstance(merged_tracks, dict):
+                    merged["tracks"] = {"items": items[:5]}
+                else:
+                    existing = list(merged_tracks.get("items") or [])
+                    if not existing:
+                        merged_tracks = dict(merged_tracks)
+                        merged_tracks["items"] = items[:5]
+                        merged["tracks"] = merged_tracks
+        return merged
 
     def list_new_release_items(
         self,
@@ -358,7 +406,12 @@ class QobuzClient:
             return queue, index
         return [track], 0
 
-    def resolve_playable(self, track_id: str) -> PlayableSource | None:
+    def resolve_playable(
+        self,
+        track_id: str,
+        *,
+        playback_quality_ceiling: str | None = None,
+    ) -> PlayableSource | None:
         numeric = qobuz_ids.parse_prefixed_id(track_id, "track")
         if numeric is None:
             return None
@@ -367,7 +420,16 @@ class QobuzClient:
         if not isinstance(data, dict):
             return None
         metadata = convert.track_from_qobuz(data)
-        stream = self._get_file_url(numeric)
+        from tunes_player.core.release_quality import qobuz_format_id_for_playback
+
+        format_id = qobuz_format_id_for_playback(
+            config_format_id=self._format_id,
+            ceiling_tier=playback_quality_ceiling,
+        )
+        stream = self._get_file_url(
+            numeric,
+            playback_quality_ceiling=playback_quality_ceiling,
+        )
         from tunes_player.core.playback_quality import (
             qobuz_format_label_from_stream,
             qobuz_stream_file_metadata,
@@ -375,7 +437,7 @@ class QobuzClient:
 
         format_label = qobuz_format_label_from_stream(
             stream,
-            fallback_format_id=self._format_id,
+            fallback_format_id=format_id,
         )
         stream_metadata = qobuz_stream_file_metadata(stream)
         url = stream.get("url")
@@ -425,17 +487,28 @@ class QobuzClient:
                     "This Qobuz account cannot stream (free or inactive subscription)."
                 )
 
-    def _get_file_url(self, track_id: str) -> dict[str, Any]:
+    def _get_file_url(
+        self,
+        track_id: str,
+        *,
+        playback_quality_ceiling: str | None = None,
+    ) -> dict[str, Any]:
+        from tunes_player.core.release_quality import qobuz_format_id_for_playback
+
+        format_id = qobuz_format_id_for_playback(
+            config_format_id=self._format_id,
+            ceiling_tier=playback_quality_ceiling,
+        )
         request_ts = time.time()
         request_sig = sign_get_file_url(
             track_id=track_id,
-            format_id=self._format_id,
+            format_id=format_id,
             request_ts=request_ts,
             app_secret=self._app_secret or "",
         )
         params = {
             "track_id": track_id,
-            "format_id": str(self._format_id),
+            "format_id": str(format_id),
             "intent": "stream",
             "request_ts": str(request_ts),
             "request_sig": request_sig,

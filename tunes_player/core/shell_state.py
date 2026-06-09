@@ -14,7 +14,11 @@ from tunes_player.core.models import (
     Source,
 )
 from tunes_player.core import release_quality as _release_quality
-from tunes_player.core.release_quality import release_quality_filter_bucket
+from tunes_player.core.release_quality import (
+    release_available_quality_tiers,
+    release_matches_quality_filter,
+    release_quality_filter_bucket,
+)
 
 QUALITY_FILTER_COMPRESSED = _release_quality.QUALITY_FILTER_COMPRESSED
 QUALITY_FILTER_CD = _release_quality.QUALITY_FILTER_CD
@@ -88,7 +92,7 @@ class ShellState:
     enabled_genres: frozenset[str] = field(default_factory=frozenset)
     # Empty set = all release-type buckets enabled. Non-empty = OR on filter buckets.
     enabled_release_types: frozenset[str] = field(default_factory=frozenset)
-    # Empty set = all quality tiers enabled. Non-empty = OR on peak_quality_tier.
+    # Empty set = all quality tiers enabled. Non-empty = OR on available_quality_tiers.
     enabled_quality_tiers: frozenset[str] = field(default_factory=frozenset)
     # None = preserve cache order; otherwise single-field sort after filters.
     sort_key: str | None = None
@@ -183,6 +187,9 @@ def release_to_cache_payload(release: Release) -> dict[str, Any]:
         if release.peak_quality_tier in _VALID_QUALITY_FILTERS
         else QUALITY_FILTER_COMPRESSED
     )
+    available = release_available_quality_tiers(release)
+    if available:
+        payload["available_quality_tiers"] = sorted(available)
     return payload
 
 
@@ -223,6 +230,16 @@ def release_from_cache_payload(raw: object) -> Release | None:
         and peak_quality_tier_raw in _VALID_QUALITY_FILTERS
     ):
         peak_quality_tier = peak_quality_tier_raw
+    available_quality_tiers: frozenset[str] = frozenset()
+    available_raw = raw.get("available_quality_tiers")
+    if isinstance(available_raw, list):
+        parsed = frozenset(
+            str(item)
+            for item in available_raw
+            if isinstance(item, str) and item in _VALID_QUALITY_FILTERS
+        )
+        if parsed:
+            available_quality_tiers = parsed
     return Release(
         id=release_id,
         title=title,
@@ -237,6 +254,7 @@ def release_from_cache_payload(raw: object) -> Release | None:
         art_uri=str(art_uri) if art_uri else None,
         duration_sec=float(duration) if duration is not None else None,
         peak_quality_tier=peak_quality_tier,
+        available_quality_tiers=available_quality_tiers,
     )
 
 
@@ -244,9 +262,10 @@ def refresh_local_peak_quality_tiers(
     releases: list[Release],
     *,
     local_tier_by_id: dict[str, str],
+    local_available_tiers_by_id: dict[str, frozenset[str]] | None = None,
 ) -> list[Release]:
-    """Replace stale cached peak_quality_tier values for local releases."""
-    if not local_tier_by_id:
+    """Replace stale cached quality tier values for local releases."""
+    if not local_tier_by_id and not local_available_tiers_by_id:
         return list(releases)
     refreshed: list[Release] = []
     for release in releases:
@@ -254,8 +273,20 @@ def refresh_local_peak_quality_tiers(
             refreshed.append(release)
             continue
         tier = local_tier_by_id.get(release.id)
+        available = (
+            local_available_tiers_by_id.get(release.id)
+            if local_available_tiers_by_id is not None
+            else None
+        )
         if tier and tier != release.peak_quality_tier:
-            refreshed.append(replace(release, peak_quality_tier=tier))
+            kwargs: dict[str, object] = {"peak_quality_tier": tier}
+            if available is not None:
+                kwargs["available_quality_tiers"] = available
+            refreshed.append(replace(release, **kwargs))
+        elif available is not None and available != release.available_quality_tiers:
+            refreshed.append(
+                replace(release, available_quality_tiers=available),
+            )
         else:
             refreshed.append(release)
     return refreshed
@@ -505,11 +536,9 @@ def quality_tiers_in_selection(
     releases: list[Release] | tuple[Release, ...],
 ) -> tuple[str, ...]:
     """Distinct quality tiers in *releases*, in stable bucket order."""
-    present = {
-        release_quality_filter_bucket(release)
-        for release in releases
-        if release.peak_quality_tier in _VALID_QUALITY_FILTERS
-    }
+    present: set[str] = set()
+    for release in releases:
+        present.update(release_available_quality_tiers(release))
     return tuple(tier for tier in _QUALITY_TIER_ORDER if tier in present)
 
 
@@ -530,7 +559,7 @@ def apply_quality_filter(
     return [
         release
         for release in releases
-        if release_quality_filter_bucket(release) in enabled_quality_tiers
+        if release_matches_quality_filter(release, enabled_quality_tiers)
     ]
 
 

@@ -285,12 +285,6 @@ class NowPlayingBar(Gtk.Box):
     def _playback_duration(self, state: PlaybackState) -> float | None:
         duration = state.duration_sec
         if duration is None or duration <= 0:
-            track = state.current_track
-            if track is not None:
-                catalog = track.duration_sec
-                if catalog is not None and catalog > 0:
-                    duration = catalog
-        if duration is None or duration <= 0:
             return None
         return float(duration)
 
@@ -507,6 +501,8 @@ class NowPlayingBar(Gtk.Box):
             self._shown_anchor_sec = 0.0
             self._shown_anchor_at = None
             self._set_progress_fraction(0.0, allow_decrease=True)
+            # Service position can still reflect the previous track on this tick.
+            return 0.0
 
         reported_sec = max(0.0, min(reported_sec, duration_sec))
         now = time.monotonic()

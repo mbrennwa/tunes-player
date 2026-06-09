@@ -63,7 +63,7 @@ class TrackEofAdvanceTests(unittest.TestCase):
         self._service._playback_intended = True
         self._service._is_playing = True
         self._service._duration_sec = None
-        self._service._audible_position_sec = 120.0
+        self._service._position_sec = 120.0
         self._service._engine = _EofEngine()
         self._service._play_queue_index = MagicMock()
 
@@ -80,7 +80,7 @@ class TrackEofAdvanceTests(unittest.TestCase):
         self._service._playback_intended = True
         self._service._is_playing = False
         self._service._duration_sec = 240.0
-        self._service._audible_position_sec = 239.5
+        self._service._position_sec = 239.5
         self._service._engine = _EofEngine(position=239.5)
         self._service._play_queue_index = MagicMock()
 

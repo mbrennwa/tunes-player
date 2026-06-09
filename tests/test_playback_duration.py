@@ -1,4 +1,4 @@
-"""Tests for mpv-direct playback duration and seek bar (#44)."""
+"""Tests for mpv playback duration, seek bar, and queue advance."""
 
 from __future__ import annotations
 
@@ -19,16 +19,14 @@ class _DurationEngine:
         *,
         duration: float | None = 237.0,
         position: float = 0.0,
-        time_pos: float | None = None,
         playing: bool = True,
     ) -> None:
         self._duration_sec = duration
-        self._position_sec = position
-        self._time_pos_sec = position if time_pos is None else time_pos
+        self._time_pos_sec = position
         self._playing = playing
 
     def get_position(self) -> float:
-        return self._position_sec
+        return self._time_pos_sec
 
     def query_time_pos(self) -> float:
         return self._time_pos_sec
@@ -87,7 +85,7 @@ class PlaybackDurationTests(unittest.TestCase):
         )
         self.assertAlmostEqual(bar._clamp_seek_position(200.0, 240.0), 200.0)
 
-    def test_auto_advance_uses_position_and_duration_not_demuxer_eof(self) -> None:
+    def test_auto_advance_uses_time_pos_near_end(self) -> None:
         track_a = self._track(duration_sec=240.0)
         track_b = Track(
             id="local:/music/next.flac",
@@ -103,7 +101,6 @@ class PlaybackDurationTests(unittest.TestCase):
         self._service._playback_intended = True
         self._service._is_playing = True
         self._service._duration_sec = 240.0
-        self._service._audible_position_sec = 239.5
         self._service._engine = _DurationEngine(duration=240.0, position=239.5)
         self._service._play_queue_index = lambda index, **kwargs: setattr(  # type: ignore[method-assign]
             self._service, "_queue_index", index
@@ -111,30 +108,12 @@ class PlaybackDurationTests(unittest.TestCase):
         self._service._maybe_auto_advance_queue()
         self.assertEqual(self._service._queue_index, 1)
 
-    def test_auto_advance_waits_when_audible_ahead_of_time_pos(self) -> None:
-        class _SplitEngine(_DurationEngine):
-            def __init__(self) -> None:
-                super().__init__(duration=240.0, position=239.5, time_pos=233.0)
-
+    def test_auto_advance_waits_until_time_pos_reaches_end(self) -> None:
         self._service._playlist_meta = [self._track(), self._track()]
         self._service._queue_index = 0
         self._service._playback_intended = True
         self._service._is_playing = True
         self._service._duration_sec = 240.0
-        self._service._audible_position_sec = 239.5
-        self._service._engine = _SplitEngine()
-        advanced: list[int] = []
-        self._service._play_queue_index = lambda index, **kwargs: advanced.append(index)  # type: ignore[method-assign]
-        self._service._maybe_auto_advance_queue()
-        self.assertEqual(advanced, [])
-
-    def test_auto_advance_waits_until_audible_position_reaches_end(self) -> None:
-        self._service._playlist_meta = [self._track(), self._track()]
-        self._service._queue_index = 0
-        self._service._playback_intended = True
-        self._service._is_playing = True
-        self._service._duration_sec = 240.0
-        self._service._audible_position_sec = 216.0
         self._service._engine = _DurationEngine(duration=240.0, position=216.0)
         advanced: list[int] = []
         self._service._play_queue_index = lambda index, **kwargs: advanced.append(index)  # type: ignore[method-assign]
@@ -146,24 +125,16 @@ class PlaybackDurationTests(unittest.TestCase):
             def query_time_pos(self) -> float:
                 return 42.0
 
-            def get_position(self) -> float:
-                return 99.0
-
         self._service._engine = _Engine()
         self._service._position_sec = 1.0
-        self._service._audible_position_sec = 1.0
         self._service.refresh_playback_position_for_ui()
         self.assertAlmostEqual(self._service._position_sec, 42.0)
-        self.assertAlmostEqual(self._service._audible_position_sec, 1.0)
 
-    def test_sync_audible_position_uses_audio_pts_cache(self) -> None:
-        class _Engine(_DurationEngine):
-            def get_position(self) -> float:
-                return 99.0
-
-        self._service._engine = _Engine()
-        self._service._sync_audible_position_from_engine()
-        self.assertAlmostEqual(self._service._audible_position_sec, 99.0)
+    def test_refresh_follows_engine_position_on_track_change(self) -> None:
+        self._service._position_sec = 239.0
+        self._service._engine = _DurationEngine(duration=240.0, position=0.5)
+        self._service.refresh_playback_position_for_ui()
+        self.assertAlmostEqual(self._service._position_sec, 0.5)
 
     def test_auto_advance_uses_engine_duration_when_service_cache_empty(self) -> None:
         track_a = self._track(duration_sec=240.0)
@@ -173,11 +144,9 @@ class PlaybackDurationTests(unittest.TestCase):
         self._service._playback_intended = True
         self._service._is_playing = False
         self._service._duration_sec = None
-        self._service._audible_position_sec = 239.6
         self._service._engine = _DurationEngine(
             duration=240.0,
             position=239.6,
-            time_pos=239.6,
             playing=False,
         )
         self._service._play_queue_index = lambda index, **kwargs: setattr(  # type: ignore[method-assign]
@@ -187,39 +156,13 @@ class PlaybackDurationTests(unittest.TestCase):
         self.assertEqual(self._service._queue_index, 1)
         self.assertAlmostEqual(self._service._duration_sec, 240.0)
 
-    def test_auto_advance_when_paused_at_eof_with_lagging_time_pos(self) -> None:
-        class _PausedEndEngine(_DurationEngine):
-            def __init__(self) -> None:
-                super().__init__(
-                    duration=240.0,
-                    position=239.6,
-                    time_pos=233.0,
-                    playing=False,
-                )
-
-        track_a = self._track(duration_sec=240.0)
-        track_b = self._track(duration_sec=200.0)
-        self._service._playlist_meta = [track_a, track_b]
-        self._service._queue_index = 0
-        self._service._current_track = track_a
-        self._service._playback_intended = True
-        self._service._is_playing = False
-        self._service._duration_sec = 240.0
-        self._service._audible_position_sec = 239.6
-        self._service._engine = _PausedEndEngine()
-        self._service._play_queue_index = lambda index, **kwargs: setattr(  # type: ignore[method-assign]
-            self._service, "_queue_index", index
-        )
-        self._service._maybe_auto_advance_queue()
-        self.assertEqual(self._service._queue_index, 1)
-
     def test_auto_advance_does_not_fire_before_track_end(self) -> None:
         self._service._playlist_meta = [self._track(), self._track()]
         self._service._queue_index = 0
         self._service._playback_intended = True
         self._service._is_playing = True
         self._service._duration_sec = 240.0
-        self._service._audible_position_sec = 196.0
+        self._service._engine = _DurationEngine(duration=240.0, position=196.0)
         advanced: list[int] = []
         self._service._play_queue_index = lambda index, **kwargs: advanced.append(index)  # type: ignore[method-assign]
         self._service._maybe_auto_advance_queue()

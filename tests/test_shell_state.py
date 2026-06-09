@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from tunes_player.core.config import ConfigManager
@@ -58,8 +59,9 @@ def _release(
     genre: str | None = "Rock",
     release_type: ReleaseType = ReleaseType.ALBUM,
     peak_quality_tier: str = QUALITY_FILTER_CD,
+    available_quality_tiers: frozenset[str] | None = None,
 ) -> Release:
-    return Release(
+    release = Release(
         id=release_id,
         title=title,
         artist_name=artist_name,
@@ -68,7 +70,13 @@ def _release(
         genre=genre,
         release_type=release_type,
         peak_quality_tier=peak_quality_tier,
+        available_quality_tiers=frozenset(),
     )
+    if available_quality_tiers is None:
+        from tunes_player.core.release_quality import release_available_quality_tiers
+
+        available_quality_tiers = release_available_quality_tiers(release)
+    return replace(release, available_quality_tiers=available_quality_tiers)
 
 
 class TestShellStateParsing(unittest.TestCase):
@@ -300,6 +308,24 @@ class TestReleaseCachePayload(unittest.TestCase):
         payload = release_to_cache_payload(_release("local:1", Source.LOCAL))
         self.assertEqual(payload["peak_quality_tier"], QUALITY_FILTER_CD)
 
+    def test_cache_payload_roundtrips_available_quality_tiers(self) -> None:
+        release = _release(
+            "qobuz:1",
+            Source.QOBUZ,
+            peak_quality_tier=QUALITY_FILTER_CD,
+            available_quality_tiers=frozenset(
+                {
+                    QUALITY_FILTER_COMPRESSED,
+                    QUALITY_FILTER_CD,
+                    QUALITY_FILTER_HI_RES,
+                },
+            ),
+        )
+        payload = release_to_cache_payload(release)
+        restored = release_from_cache_payload(payload)
+        assert restored is not None
+        self.assertEqual(restored.available_quality_tiers, release.available_quality_tiers)
+
     def test_cached_releases_have_quality_tiers(self) -> None:
         self.assertFalse(cached_releases_have_quality_tiers(()))
         payload = release_to_cache_payload(
@@ -378,7 +404,11 @@ class TestQualityFilter(unittest.TestCase):
         ]
         self.assertEqual(
             quality_tiers_in_selection(releases),
-            (QUALITY_FILTER_CD, QUALITY_FILTER_HI_RES),
+            (
+                QUALITY_FILTER_COMPRESSED,
+                QUALITY_FILTER_CD,
+                QUALITY_FILTER_HI_RES,
+            ),
         )
 
     def test_apply_quality_filter(self) -> None:
@@ -396,6 +426,27 @@ class TestQualityFilter(unittest.TestCase):
     def test_empty_quality_filter_is_passthrough(self) -> None:
         releases = [_release("a", Source.LOCAL)]
         self.assertEqual(len(apply_quality_filter(releases, frozenset())), 1)
+
+    def test_apply_quality_filter_matches_available_not_peak_only(self) -> None:
+        releases = [
+            _release(
+                "dual",
+                Source.QOBUZ,
+                peak_quality_tier=QUALITY_FILTER_CD,
+                available_quality_tiers=frozenset(
+                    {
+                        QUALITY_FILTER_COMPRESSED,
+                        QUALITY_FILTER_CD,
+                        QUALITY_FILTER_HI_RES,
+                    },
+                ),
+            ),
+        ]
+        filtered = apply_quality_filter(
+            releases,
+            frozenset({QUALITY_FILTER_HI_RES}),
+        )
+        self.assertEqual([r.id for r in filtered], ["dual"])
 
     def test_apply_quality_filter_excludes_unknown_tier(self) -> None:
         releases = [

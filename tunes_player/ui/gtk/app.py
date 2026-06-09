@@ -568,10 +568,14 @@ class TunesWindow(Adw.ApplicationWindow):
         if state.enabled_quality_tiers == enabled_quality_tiers:
             return
         self._shell_state = replace(state, enabled_quality_tiers=enabled_quality_tiers)
+        self._service.config.update_shell_quality_tiers(enabled_quality_tiers)
         if self._quality_filter_multi is not None:
             self._quality_filter_multi.set_enabled_quality_tiers(enabled_quality_tiers)
         self._schedule_persist()
         self._display_cached_selection()
+
+    def _enabled_quality_tiers_for_playback(self) -> frozenset[str]:
+        return self._shell_state.enabled_quality_tiers
 
     def _sync_genre_filter(self) -> None:
         available = genres_in_selection(self._cached_releases)
@@ -774,13 +778,17 @@ class TunesWindow(Adw.ApplicationWindow):
     def _refresh_cached_release_quality(self, releases: list[Release]) -> list[Release]:
         if not any(release.source == Source.LOCAL for release in releases):
             return releases
+        local_releases = self._service.list_releases()
         local_tier_by_id = {
-            release.id: release.peak_quality_tier
-            for release in self._service.list_releases()
+            release.id: release.peak_quality_tier for release in local_releases
+        }
+        local_available_by_id = {
+            release.id: release.available_quality_tiers for release in local_releases
         }
         return refresh_local_peak_quality_tiers(
             releases,
             local_tier_by_id=local_tier_by_id,
+            local_available_tiers_by_id=local_available_by_id,
         )
 
     def _persisted_grid_cache_stale(self, state: ShellState) -> bool:
@@ -1003,7 +1011,9 @@ class TunesWindow(Adw.ApplicationWindow):
             releases=releases,
             on_release_activated=self._open_release,
             on_release_play=lambda release_id: self._service.play_or_toggle_release(
-                release_id, start_index=0
+                release_id,
+                start_index=0,
+                enabled_quality_tiers=self._enabled_quality_tiers_for_playback(),
             ),
             on_artist_search=self._search_for_artist,
             empty_message=empty_message,
@@ -1079,7 +1089,11 @@ class TunesWindow(Adw.ApplicationWindow):
         if state.current_track is None and not state.queue:
             release_id = self._release_id_for_current_view()
             if release_id is not None:
-                self._service.play_release(release_id, start_index=0)
+                self._service.play_release(
+                    release_id,
+                    start_index=0,
+                    enabled_quality_tiers=self._enabled_quality_tiers_for_playback(),
+                )
                 return
         self._service.toggle_play_pause()
 

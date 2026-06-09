@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-import math
+import os
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -38,8 +39,23 @@ EngineCallback = Callable[[EngineEvent], None]
 
 _LOG = logging.getLogger(__name__)
 _TIMELINE_LOG = logging.getLogger("tunes_player.playback.timeline")
-_POSITION_INTERVAL_SEC = 0.1
 _SEEK_END_MARGIN_SEC = 1.0
+
+
+def _position_poll_log_enabled() -> bool:
+    return os.environ.get("TUNES_POSITION_POLL_LOG", "").lower() in (
+        "1",
+        "yes",
+        "true",
+    )
+
+
+def _log_position_poll(label: str, position_sec: float, *, delta: float | None) -> None:
+    if delta is None:
+        msg = f"tunes position {label}: {position_sec:.3f}s"
+    else:
+        msg = f"tunes position {label}: {position_sec:.3f}s (delta={delta:+.3f})"
+    print(msg, file=sys.stderr, flush=True)
 
 
 def probe_playback_engine() -> str | None:
@@ -106,14 +122,11 @@ class MpvEngine:
         self._loaded_uri: str | None = None
         self._time_pos_lock = threading.Lock()
         self._time_pos_sec = 0.0
-        self._audio_pts_sec: float | None = None
-        self._position_sec = 0.0
-        self._ui_position_sec = 0.0
         self._duration_sec: float | None = None
         self._playing = False
         self._track_end_signaled = False
-        self._last_position_emit = 0.0
         self._last_position_update_at = 0.0
+        self._last_position_poll_log_sec: float | None = None
         self._load_in_progress = False
         self._last_track_started_uri: str | None = None
 
@@ -245,7 +258,6 @@ class MpvEngine:
             self._track_end_signaled = False
             self._seed_playback_position(max(0.0, start_sec))
             self._duration_sec = None
-            self._last_position_emit = 0.0
             self._last_position_update_at = time.monotonic()
 
             self._player.play(uri)
@@ -275,7 +287,6 @@ class MpvEngine:
             return
         self._player.pause = True
         self._playing = False
-        self._update_audible_position()
         self._publish_ui_position()
         self._emit("playing_changed")
         self._emit("position_changed")
@@ -329,25 +340,40 @@ class MpvEngine:
             self._apply_software_volume()
 
     def get_position(self) -> float:
-        """Audible timeline (audio-pts when available) for queue advance and watchdogs."""
-        return self._position_sec
+        """Return live mpv time-pos."""
+        return self.query_time_pos()
+
+    def _record_position_poll_log(self, label: str, position_sec: float) -> None:
+        if not _position_poll_log_enabled():
+            return
+        previous = self._last_position_poll_log_sec
+        delta = None if previous is None else position_sec - previous
+        self._last_position_poll_log_sec = position_sec
+        _log_position_poll(label, position_sec, delta=delta)
 
     def query_time_pos(self) -> float:
-        """Return live mpv time-pos for the seek bar (call from the engine owner thread)."""
+        """Return live mpv time-pos (call from the engine owner thread)."""
         if not self._shutting_down and not self._terminated:
-            pos = self._player.time_pos
-            if pos is not None:
-                value = max(0.0, float(pos))
-                self._set_cached_time_pos(value)
-                return value
+            raw = self._get_property("time-pos")
+            if raw is not None:
+                try:
+                    value = max(0.0, float(raw))
+                except (TypeError, ValueError):
+                    value = None
+                if value is not None:
+                    self._set_cached_time_pos(value)
+                    self._record_position_poll_log("poll live", value)
+                    return value
         with self._time_pos_lock:
-            return max(0.0, self._time_pos_sec)
+            value = max(0.0, self._time_pos_sec)
+        self._record_position_poll_log("poll cache", value)
+        return value
 
     def get_time_pos(self) -> float:
         return self.query_time_pos()
 
     def _resume_position_sec(self) -> float:
-        """Playback position for ALSA recovery seeks (time-pos, not audio-pts)."""
+        """Playback position for ALSA recovery seeks."""
         return self.query_time_pos()
 
     def get_duration(self) -> float | None:
@@ -579,18 +605,6 @@ class MpvEngine:
             attr = name.replace("-", "_")
             return getattr(self._player, attr, None)
 
-    @staticmethod
-    def _coerce_optional_seconds(data: object) -> float | None:
-        if data is None:
-            return None
-        try:
-            value = float(data)
-        except (TypeError, ValueError):
-            return None
-        if math.copysign(1.0, value) < 0:
-            return None
-        return value
-
     def _set_cached_time_pos(self, position_sec: float) -> None:
         with self._time_pos_lock:
             self._time_pos_sec = max(0.0, position_sec)
@@ -599,39 +613,19 @@ class MpvEngine:
         with self._time_pos_lock:
             return self._time_pos_sec
 
-    def _resolve_audible_position_sec(self) -> float:
-        if self._audio_pts_sec is not None:
-            return self._audio_pts_sec
-        return self._cached_time_pos()
-
     def _seed_playback_position(self, position_sec: float) -> None:
         position_sec = max(0.0, position_sec)
         self._set_cached_time_pos(position_sec)
-        self._audio_pts_sec = None
-        self._position_sec = position_sec
-        self._ui_position_sec = position_sec
+        self._last_position_poll_log_sec = None
         self._touch_position_clock()
 
-    def _update_audible_position(self) -> None:
-        self._position_sec = self._resolve_audible_position_sec()
-        if self._near_track_end(self._position_sec, margin=_SEEK_END_MARGIN_SEC):
-            self._emit("position_changed")
-
     def _snap_positions_to_track_end(self) -> None:
-        """Align cached timelines at demuxer EOF so queue advance can fire."""
+        """Align cached time-pos at demuxer EOF so queue advance can fire."""
         duration = self._duration_sec
         if duration is None or duration <= 0:
             return
-        end_pos = max(
-            self._resolve_audible_position_sec(),
-            self._cached_time_pos(),
-            duration - 0.01,
-        )
-        end_pos = min(end_pos, duration)
-        self._set_cached_time_pos(end_pos)
-        self._audio_pts_sec = end_pos
-        self._position_sec = end_pos
-        self._ui_position_sec = end_pos
+        end_pos = min(max(self._cached_time_pos(), duration - 0.01), duration)
+        self._seed_playback_position(end_pos)
 
     def _near_track_end(self, position_sec: float, *, margin: float = 3.0) -> bool:
         duration = self._duration_sec
@@ -640,18 +634,10 @@ class MpvEngine:
         return position_sec >= duration - margin
 
     def _publish_ui_position(self) -> None:
-        resolved = self._cached_time_pos()
-        previous = self._ui_position_sec
-        changed = abs(resolved - previous) > 0.01
-        self._ui_position_sec = resolved
-        now = time.monotonic()
-        if changed:
-            self._touch_position_clock()
         if self._load_in_progress:
             return
-        if changed and now - self._last_position_emit >= _POSITION_INTERVAL_SEC:
-            self._last_position_emit = now
-            self._emit("position_changed")
+        self._touch_position_clock()
+        self._emit("position_changed")
 
     def _touch_position_clock(self) -> None:
         self._last_position_update_at = time.monotonic()
@@ -662,7 +648,7 @@ class MpvEngine:
             return
         self._last_track_started_uri = uri
         self._track_end_signaled = False
-        self._seed_playback_position(self._position_sec)
+        self._seed_playback_position(0.0)
         self._duration_sec = None
         _TIMELINE_LOG.info("track_started emit uri=%s", uri[:72] if uri else "")
         self._emit("track_started")
@@ -683,18 +669,20 @@ class MpvEngine:
 
         @player.property_observer("time-pos")
         def _on_time_pos(_name: str, value: float | None) -> None:
-            if self._shutting_down or self._terminated or value is None:
+            if (
+                self._shutting_down
+                or self._terminated
+                or self._load_in_progress
+                or value is None
+            ):
                 return
-            self._set_cached_time_pos(float(value))
+            position_sec = float(value)
+            self._set_cached_time_pos(position_sec)
+            if _position_poll_log_enabled():
+                previous = self._last_position_poll_log_sec
+                delta = None if previous is None else position_sec - previous
+                _log_position_poll("observer", position_sec, delta=delta)
             self._publish_ui_position()
-
-        @player.property_observer("audio-pts")
-        def _on_audio_pts(_name: str, value: object) -> None:
-            if self._shutting_down or self._terminated:
-                return
-            pts = self._coerce_optional_seconds(value)
-            self._audio_pts_sec = pts
-            self._update_audible_position()
 
         @player.property_observer("duration")
         def _on_duration(_name: str, value: float | None) -> None:
@@ -741,7 +729,6 @@ class MpvEngine:
                 self._emit("playback_error")
             elif end_file_triggers_track_finished(reason):
                 _TIMELINE_LOG.debug("end-file demuxer eof — snap position for queue")
-                self._update_audible_position()
                 self._snap_positions_to_track_end()
                 self._playing = False
                 self._emit("track_eof")

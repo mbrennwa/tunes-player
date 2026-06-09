@@ -64,6 +64,36 @@ def _tier_from_lossless_bit_depth_sample_rate(
     return QUALITY_FILTER_COMPRESSED
 
 
+def tiers_from_local(
+    *,
+    max_bit_depth: int | None,
+    max_sample_rate: int | None,
+    has_lossless: bool,
+    has_lossy: bool,
+) -> frozenset[str]:
+    """Catalog quality tiers present in a local release (from file aggregates)."""
+    tiers: set[str] = set()
+    if has_lossy:
+        tiers.add(QUALITY_FILTER_COMPRESSED)
+    if has_lossless:
+        tiers.add(
+            _tier_from_lossless_bit_depth_sample_rate(
+                bit_depth=max_bit_depth or 0,
+                sample_rate_hz=max_sample_rate or 0,
+            ),
+        )
+    elif max_bit_depth is not None and max_sample_rate is not None:
+        tiers.add(
+            _tier_from_lossless_bit_depth_sample_rate(
+                bit_depth=max_bit_depth,
+                sample_rate_hz=max_sample_rate,
+            ),
+        )
+    if not tiers:
+        tiers.add(QUALITY_FILTER_COMPRESSED)
+    return frozenset(tier for tier in tiers if tier in _VALID_QUALITY_FILTERS)
+
+
 def tier_from_local(
     *,
     max_bit_depth: int | None,
@@ -72,19 +102,13 @@ def tier_from_local(
     has_lossy: bool,
 ) -> str:
     """Peak catalog tier from per-release file aggregates."""
-    if has_lossless:
-        return _tier_from_lossless_bit_depth_sample_rate(
-            bit_depth=max_bit_depth or 0,
-            sample_rate_hz=max_sample_rate or 0,
-        )
-    if has_lossy:
-        return QUALITY_FILTER_COMPRESSED
-    if max_bit_depth is not None and max_sample_rate is not None:
-        return _tier_from_lossless_bit_depth_sample_rate(
-            bit_depth=max_bit_depth,
-            sample_rate_hz=max_sample_rate,
-        )
-    return QUALITY_FILTER_COMPRESSED
+    tiers = tiers_from_local(
+        max_bit_depth=max_bit_depth,
+        max_sample_rate=max_sample_rate,
+        has_lossless=has_lossless,
+        has_lossy=has_lossy,
+    )
+    return max_quality_tier(*tiers)
 
 
 def tier_from_tidal_peak(rank: int) -> str:
@@ -117,19 +141,45 @@ def tier_from_tidal_track(track: object) -> str:
     return tier_from_tidal_peak(track_peak_quality(track))
 
 
-def tier_from_tidal_album(album: object) -> str:
-    """Peak catalog tier from TIDAL album metadata (no track list fetch)."""
+def _collect_tidal_album_tier_signals(album: object) -> set[str]:
     from tunes_player.core.backends.tidal.stream_quality import track_peak_quality
 
     if not tidal_album_has_quality_metadata(album):
-        return ""
+        return set()
+    signals: set[str] = set()
     rank = track_peak_quality(album)
+    signals.add(tier_from_tidal_peak(rank))
     audio_modes = getattr(album, "audio_modes", None) or []
     for mode in audio_modes:
         key = str(mode).upper().replace(" ", "_")
         if "HI_RES" in key or "HIRES" in key:
-            rank = max(rank, _TIDAL_RANK_CD + 1)
-    return tier_from_tidal_peak(rank)
+            signals.add(QUALITY_FILTER_HI_RES)
+    return {tier for tier in signals if tier in _VALID_QUALITY_FILTERS}
+
+
+def available_tiers_from_signals(signals: set[str]) -> frozenset[str]:
+    """Expand raw catalog signals into available filter tiers."""
+    valid = {tier for tier in signals if tier in _VALID_QUALITY_FILTERS}
+    if not valid:
+        return frozenset({QUALITY_FILTER_COMPRESSED})
+    peak = max_quality_tier(*valid)
+    return _streaming_available_tiers(peak, valid)
+
+
+def tiers_from_tidal_album(album: object) -> frozenset[str]:
+    """All catalog quality tiers a TIDAL album is available at."""
+    signals = _collect_tidal_album_tier_signals(album)
+    if not signals:
+        return frozenset()
+    return available_tiers_from_signals(signals)
+
+
+def tier_from_tidal_album(album: object) -> str:
+    """Peak catalog tier from TIDAL album metadata (no track list fetch)."""
+    tiers = tiers_from_tidal_album(album)
+    if not tiers:
+        return ""
+    return max_quality_tier(*tiers)
 
 
 def _tier_from_qobuz_bit_depth_sample_rate(
@@ -166,33 +216,47 @@ def _tier_from_qobuz_technical_specifications(spec: object) -> str | None:
     )
 
 
-def tier_from_qobuz_album(album: dict[str, Any]) -> str:
-    """Peak catalog tier from Qobuz album JSON."""
-    tiers: list[str] = []
+def _qobuz_album_has_hires_stream(album: dict[str, Any]) -> bool:
+    if album.get("hires") or album.get("hires_streamable"):
+        return True
+    tracks = album.get("tracks")
+    if not isinstance(tracks, dict):
+        return False
+    for item in tracks.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("hires") or item.get("hires_streamable"):
+            return True
+    return False
+
+
+def _collect_qobuz_peak_signals(album: dict[str, Any]) -> set[str]:
+    """Peak catalog quality signals from Qobuz album JSON."""
+    signals: set[str] = set()
     rate_hz = _normalize_sample_rate_hz(album.get("maximum_sampling_rate"))
     if (
         (album.get("hires") or album.get("hires_streamable"))
         and rate_hz > _CD_SAMPLE_RATE_HZ
     ):
-        tiers.append(QUALITY_FILTER_HI_RES)
-    tiers.extend(
-        [
-        _tier_from_qobuz_technical_specifications(
-            album.get("maximum_technical_specifications"),
-        ),
+        signals.add(QUALITY_FILTER_HI_RES)
+    technical = _tier_from_qobuz_technical_specifications(
+        album.get("maximum_technical_specifications"),
+    )
+    if technical is not None:
+        signals.add(technical)
+    signals.add(
         _tier_from_qobuz_bit_depth_sample_rate(
             bit_depth=album.get("maximum_bit_depth"),
             sample_rate=album.get("maximum_sampling_rate"),
         ),
-        ]
     )
     tracks = album.get("tracks")
     if isinstance(tracks, dict):
         for item in tracks.get("items") or []:
             if not isinstance(item, dict):
                 continue
-            tiers.append(
-                tier_from_qobuz_album(
+            signals.update(
+                _collect_qobuz_peak_signals(
                     {
                         "hires": item.get("hires"),
                         "hires_streamable": item.get("hires_streamable"),
@@ -201,10 +265,44 @@ def tier_from_qobuz_album(album: dict[str, Any]) -> str:
                     },
                 ),
             )
-    valid = [tier for tier in tiers if tier is not None]
-    if not valid:
+    return {tier for tier in signals if tier in _VALID_QUALITY_FILTERS}
+
+
+def _collect_qobuz_available_signals(album: dict[str, Any]) -> set[str]:
+    """Catalog signals including streamable hi-res below the peak sample rate."""
+    signals = set(_collect_qobuz_peak_signals(album))
+    if _qobuz_album_has_hires_stream(album):
+        signals.add(QUALITY_FILTER_HI_RES)
+    return signals
+
+
+def _streaming_available_tiers(
+    peak: str,
+    signals: set[str],
+) -> frozenset[str]:
+    """Expand peak/signals into streamable tiers (lower tiers are usually available too)."""
+    tiers = set(signals)
+    tiers.add(peak)
+    peak_rank = _TIER_RANK.get(peak, 0)
+    for tier, rank in _TIER_RANK.items():
+        if rank <= peak_rank:
+            tiers.add(tier)
+    return frozenset(
+        tier for tier in tiers if tier in _VALID_QUALITY_FILTERS
+    )
+
+
+def tiers_from_qobuz_album(album: dict[str, Any]) -> frozenset[str]:
+    """All catalog quality tiers a Qobuz album is available at."""
+    return available_tiers_from_signals(_collect_qobuz_available_signals(album))
+
+
+def tier_from_qobuz_album(album: dict[str, Any]) -> str:
+    """Peak catalog tier from Qobuz album JSON."""
+    signals = _collect_qobuz_peak_signals(album)
+    if not signals:
         return QUALITY_FILTER_COMPRESSED
-    return max_quality_tier(*valid)
+    return max_quality_tier(*signals)
 
 
 def max_quality_tier(*tiers: str) -> str:
@@ -221,8 +319,70 @@ def max_quality_tier(*tiers: str) -> str:
     return best
 
 
+def release_available_quality_tiers(release: Release) -> frozenset[str]:
+    """Tiers used for shell quality filter matching."""
+    if release.available_quality_tiers:
+        return release.available_quality_tiers
+    tier = release.peak_quality_tier
+    if tier in _VALID_QUALITY_FILTERS:
+        return _streaming_available_tiers(tier, {tier})
+    return frozenset()
+
+
 def release_quality_filter_bucket(release: Release) -> str:
     tier = release.peak_quality_tier
     if tier in _VALID_QUALITY_FILTERS:
         return tier
     return ""
+
+
+def release_matches_quality_filter(
+    release: Release,
+    enabled_quality_tiers: frozenset[str],
+) -> bool:
+    """True when the release is available at any enabled quality tier."""
+    if not enabled_quality_tiers:
+        return True
+    available = release_available_quality_tiers(release)
+    if not available:
+        return False
+    return bool(available & enabled_quality_tiers)
+
+
+_QOBUZ_FORMAT_ID_RANK: dict[int, int] = {
+    5: 0,  # MP3 320
+    6: 1,  # 16/44 FLAC
+    7: 2,  # 24/96
+    27: 3,  # 24/192
+}
+_QOBUZ_RANK_TO_FORMAT_ID: dict[int, int] = {
+    0: 5,
+    1: 6,
+    2: 7,
+    3: 27,
+}
+
+
+def playback_ceiling_tier(enabled_quality_tiers: frozenset[str]) -> str | None:
+    """Highest enabled shell filter tier, or None when all tiers are enabled (no cap)."""
+    if not enabled_quality_tiers:
+        return None
+    return max_quality_tier(*enabled_quality_tiers)
+
+
+def qobuz_format_id_for_playback(
+    *,
+    config_format_id: int,
+    ceiling_tier: str | None,
+) -> int:
+    """Apply shell playback ceiling to the configured Qobuz stream format."""
+    config_rank = _QOBUZ_FORMAT_ID_RANK.get(config_format_id, 3)
+    if ceiling_tier is None or ceiling_tier == QUALITY_FILTER_HI_RES:
+        cap_rank = 3
+    elif ceiling_tier == QUALITY_FILTER_CD:
+        cap_rank = 1
+    elif ceiling_tier == QUALITY_FILTER_COMPRESSED:
+        cap_rank = 0
+    else:
+        cap_rank = 3
+    return _QOBUZ_RANK_TO_FORMAT_ID[min(config_rank, cap_rank)]
