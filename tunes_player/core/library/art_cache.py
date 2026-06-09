@@ -61,7 +61,10 @@ def index_album_art_for_file(
     album_id: str,
 ) -> bool:
     """Extract embedded art from *path* into the cache for *album_id*."""
-    art = extract_embedded_art(path)
+    try:
+        art = extract_embedded_art(path)
+    except Exception:
+        return False
     if art is None:
         return False
     data, mime_type = art
@@ -118,18 +121,25 @@ def backfill_missing_album_art(connection: sqlite3.Connection, *, data_dir: Path
     indexed = 0
     for row in rows:
         album_id = str(row["album_id"])
-        if find_cached_art_path(data_dir, album_id) is not None:
-            continue
         before = connection.execute(
             "SELECT 1 FROM album_art WHERE album_id = ?",
             (album_id,),
         ).fetchone()
-        index_album_art_for_file(
-            connection,
-            data_dir=data_dir,
-            path=Path(str(row["path"])),
-            album_id=album_id,
-        )
+        cached = find_cached_art_path(data_dir, album_id)
+        if cached is not None:
+            if before is None:
+                _restore_album_art_row_from_cache(
+                    connection,
+                    album_id=album_id,
+                    cached_path=cached,
+                )
+        else:
+            index_album_art_for_file(
+                connection,
+                data_dir=data_dir,
+                path=Path(str(row["path"])),
+                album_id=album_id,
+            )
         after = connection.execute(
             "SELECT 1 FROM album_art WHERE album_id = ?",
             (album_id,),
@@ -137,6 +147,66 @@ def backfill_missing_album_art(connection: sqlite3.Connection, *, data_dir: Path
         if before is None and after is not None:
             indexed += 1
     return indexed
+
+
+def _restore_album_art_row_from_cache(
+    connection: sqlite3.Connection,
+    *,
+    album_id: str,
+    cached_path: Path,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO album_art(album_id, art_uri, mime_type, updated_at)
+        VALUES (?, ?, ?, strftime('%s', 'now'))
+        ON CONFLICT(album_id) DO UPDATE SET
+            art_uri = excluded.art_uri,
+            mime_type = excluded.mime_type,
+            updated_at = excluded.updated_at
+        """,
+        (album_id, local_art_uri(album_id), _mime_type_for_cache_path(cached_path)),
+    )
+
+
+def _mime_type_for_cache_path(path: Path) -> str:
+    ext = path.suffix.lower()
+    if ext == ".png":
+        return "image/png"
+    if ext == ".webp":
+        return "image/webp"
+    if ext == ".gif":
+        return "image/gif"
+    return "image/jpeg"
+
+
+def link_or_index_album_art(
+    connection: sqlite3.Connection,
+    *,
+    data_dir: Path,
+    path: Path,
+    album_id: str,
+) -> bool:
+    """Ensure *album_id* has album_art; return True when a row was added."""
+    before = connection.execute(
+        "SELECT 1 FROM album_art WHERE album_id = ?",
+        (album_id,),
+    ).fetchone()
+    if before is not None:
+        return False
+    cached = find_cached_art_path(data_dir, album_id)
+    if cached is not None:
+        _restore_album_art_row_from_cache(
+            connection,
+            album_id=album_id,
+            cached_path=cached,
+        )
+        return True
+    return index_album_art_for_file(
+        connection,
+        data_dir=data_dir,
+        path=path,
+        album_id=album_id,
+    )
 
 
 def maintain_album_art(connection: sqlite3.Connection, *, data_dir: Path) -> tuple[int, int]:

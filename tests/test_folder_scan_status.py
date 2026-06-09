@@ -58,8 +58,7 @@ class FolderScanStatusFormatTests(unittest.TestCase):
             catalog_total=18_050,
             last_scan_kind="full",
         )
-        self.assertIn("18,050 / 18,050 files indexed", line)
-        self.assertIn("complete", line)
+        self.assertEqual(line, "Last scan: 2023-11-14 23:13 · 18,050 files")
         self.assertNotIn(DIAGNOSTICS_SCAN_HINT, line)
 
     def test_successful_scan_with_errors_refers_to_diagnostics(self) -> None:

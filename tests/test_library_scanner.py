@@ -472,7 +472,7 @@ class LibraryScannerScopedTests(unittest.TestCase):
             patch.object(
                 LibraryScanner,
                 "_process_candidate",
-                return_value=("indexed", "/tmp/fake_0.flac", True),
+                return_value=("indexed", "/tmp/fake_0.flac", True, False),
             ),
             patch(
                 "tunes_player.core.library.scanner.maintain_album_art",
@@ -699,7 +699,7 @@ class LibraryScannerScopedTests(unittest.TestCase):
                 [str(self._folder_a.resolve())],
             )
             with patch("tunes_player.core.library.scanner._parse_file") as parse_file:
-                outcome, result_path, wrote = self._scanner._process_candidate(
+                outcome, result_path, wrote, _art_added = self._scanner._process_candidate(
                     connection,
                     track,
                     file_errors=[],
@@ -730,7 +730,7 @@ class LibraryScannerScopedTests(unittest.TestCase):
                 [str(self._folder_a.resolve())],
             )
             with patch("tunes_player.core.library.scanner._parse_file") as parse_file:
-                outcome, result_path, wrote = self._scanner._process_candidate(
+                outcome, result_path, wrote, _art_added = self._scanner._process_candidate(
                     connection,
                     track,
                     file_errors=[],
@@ -877,7 +877,7 @@ class LibraryScannerScopedTests(unittest.TestCase):
 
             with patch.object(Path, "resolve", tracking_resolve):
                 with patch("tunes_player.core.library.scanner._parse_file") as parse_file:
-                    outcome, result_path, wrote = self._scanner._process_candidate(
+                    outcome, result_path, wrote, _art_added = self._scanner._process_candidate(
                         connection,
                         track,
                         file_errors=[],
@@ -915,7 +915,7 @@ class LibraryScannerScopedTests(unittest.TestCase):
                 [str(scan_root.resolve())],
             )
             with patch.object(Path, "stat") as stat_mock:
-                outcome, result_path, wrote = self._scanner._process_candidate(
+                outcome, result_path, wrote, _art_added = self._scanner._process_candidate(
                     connection,
                     walk_path,
                     file_errors=[],
@@ -1034,7 +1034,7 @@ class LibraryScannerScopedTests(unittest.TestCase):
                 [str(self._folder_a.resolve())],
             )
             with patch("tunes_player.core.library.scanner._parse_file") as parse_file:
-                outcome, result_path, wrote = self._scanner._process_candidate(
+                outcome, result_path, wrote, _art_added = self._scanner._process_candidate(
                     connection,
                     track,
                     file_errors=[],
@@ -1048,18 +1048,35 @@ class LibraryScannerScopedTests(unittest.TestCase):
         self.assertEqual(result_path, path_str)
         self.assertFalse(wrote)
 
-    def test_scan_skips_art_maintenance_when_unchanged(self) -> None:
+    def test_scan_backfills_art_when_files_unchanged(self) -> None:
         scan_root = self._folder_a / "unchanged"
         scan_root.mkdir()
         track = scan_root / "track.flac"
         track.write_bytes(b"x")
         path_str = str(track.resolve())
         stat = track.stat()
+        album_id = ids.release_id("Artist", "Album")
         connection = connect(self._db_path)
         try:
-            connection.execute(
+            file_id = connection.execute(
                 "INSERT INTO files(path, mtime_ns, size_bytes, indexed_at_ns) VALUES (?, ?, ?, ?)",
                 (path_str, stat.st_mtime_ns, stat.st_size, time.time_ns()),
+            ).lastrowid
+            connection.execute(
+                """
+                INSERT INTO tracks(
+                    id, file_id, album_id, title, artist, album_artist, album, is_synthetic
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    ids.track_id(path_str),
+                    file_id,
+                    album_id,
+                    "Track",
+                    "Artist",
+                    "Artist",
+                    "Album",
+                ),
             )
             connection.commit()
         finally:
@@ -1067,14 +1084,21 @@ class LibraryScannerScopedTests(unittest.TestCase):
 
         config = AppConfig(music_folders=[str(scan_root.resolve())])
         scanner = LibraryScanner(db_path=self._db_path, config=config)
-        with patch("tunes_player.core.library.scanner.maintain_album_art") as maintain:
+        with (
+            patch(
+                "tunes_player.core.library.art_cache.backfill_missing_album_art",
+                return_value=1,
+            ) as backfill,
+            patch("tunes_player.core.library.scanner.maintain_album_art") as maintain,
+        ):
             result = scanner.scan(scan_folders=[str(scan_root.resolve())])
 
         maintain.assert_not_called()
+        backfill.assert_called_once()
         self.assertEqual(result.indexed, 0)
         self.assertEqual(result.skipped, 1)
         self.assertEqual(result.removed, 0)
-        self.assertEqual(result.art_indexed, 0)
+        self.assertEqual(result.art_indexed, 1)
 
     def test_iter_audio_candidates_skips_junk_directories(self) -> None:
         scan_root = self._folder_a / "prune"
@@ -1159,6 +1183,26 @@ class LibraryScannerScopedTests(unittest.TestCase):
             instance.tags = {}
             with self.assertRaises(_UnsupportedTier1Path):
                 _parse_file(track, 1, 1)
+
+    def test_commit_scan_batch_commits_and_notifies(self) -> None:
+        connection = connect(self._db_path)
+        notifications: list[tuple[int, int]] = []
+        try:
+            connection.execute("BEGIN")
+            last = LibraryScanner._commit_scan_batch(
+                connection,
+                batch_notify=lambda indexed, art_indexed: notifications.append(
+                    (indexed, art_indexed),
+                ),
+                indexed=2,
+                art_indexed=5,
+                last_notified=(0, 0),
+            )
+        finally:
+            connection.close()
+
+        self.assertEqual(last, (2, 5))
+        self.assertEqual(notifications, [(2, 5)])
 
 
 if __name__ == "__main__":

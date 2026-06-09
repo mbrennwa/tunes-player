@@ -26,6 +26,7 @@ from tunes_player.core.library.formats import (
 )
 
 ProgressCallback = Callable[[int, int, str], None]
+ScanBatchCallback = Callable[[int, int], None]
 _CandidateOutcome = Literal["indexed", "skipped", "error"]
 
 
@@ -109,6 +110,8 @@ class LibraryScanner:
     _DISCOVERY_PROGRESS_INTERVAL_SEC = 2.0
     _DISCOVERY_PROGRESS_EVERY = 10_000
     _YIELD_EVERY = 32
+    _IN_SCAN_BACKFILL_INTERVAL_SEC = 3.0
+    _IN_SCAN_ART_COMMIT_INTERVAL_SEC = 2.0
 
     def __init__(self, *, db_path: Path, config: AppConfig) -> None:
         self._db_path = db_path
@@ -123,6 +126,7 @@ class LibraryScanner:
         progress: ProgressCallback | None = None,
         checkpoint_path: str | None = None,
         expected_total: int | None = None,
+        batch_notify: ScanBatchCallback | None = None,
     ) -> ScanResult:
         del checkpoint_path  # Resume is handled by fast-skipping indexed files.
         last_error: sqlite3.OperationalError | None = None
@@ -132,6 +136,7 @@ class LibraryScanner:
                     scan_folders=scan_folders,
                     progress=progress,
                     expected_total=expected_total,
+                    batch_notify=batch_notify,
                 )
             except sqlite3.OperationalError as exc:
                 if not _is_locked_error(exc) or attempt == _LOCK_RETRY_ATTEMPTS - 1:
@@ -149,6 +154,7 @@ class LibraryScanner:
         add_paths: list[str] | None = None,
         remove_paths: list[str] | None = None,
         progress: ProgressCallback | None = None,
+        batch_notify: ScanBatchCallback | None = None,
     ) -> ScanResult:
         """Index or drop specific paths without walking the whole library folder."""
         last_error: sqlite3.OperationalError | None = None
@@ -159,6 +165,7 @@ class LibraryScanner:
                     add_paths=add_paths,
                     remove_paths=remove_paths,
                     progress=progress,
+                    batch_notify=batch_notify,
                 )
             except sqlite3.OperationalError as exc:
                 if not _is_locked_error(exc) or attempt == _LOCK_RETRY_ATTEMPTS - 1:
@@ -175,6 +182,7 @@ class LibraryScanner:
         scan_folders: list[str] | None = None,
         progress: ProgressCallback | None = None,
         expected_total: int | None = None,
+        batch_notify: ScanBatchCallback | None = None,
     ) -> ScanResult:
         if progress is not None:
             progress(0, 0, "Discovering files…")
@@ -193,6 +201,9 @@ class LibraryScanner:
         errors = 0
         file_errors: list[ScanFileError] = []
         last_progress_at = 0.0
+        last_backfill_at = time.monotonic()
+        last_art_commit_at = time.monotonic()
+        last_batch_notify = (0, 0)
         removed = 0
         art_indexed = 0
         total = 0
@@ -239,12 +250,44 @@ class LibraryScanner:
                         )
                         last_progress_at = now
 
-                outcome, path_str, wrote = self._process_candidate(
+                now = time.monotonic()
+                if now - last_backfill_at >= self._IN_SCAN_BACKFILL_INTERVAL_SEC:
+                    added = self._backfill_missing_art_during_scan(connection)
+                    last_backfill_at = now
+                    if added > 0:
+                        art_indexed += added
+                        last_batch_notify = self._commit_scan_batch(
+                            connection,
+                            batch_notify=batch_notify,
+                            indexed=indexed,
+                            art_indexed=art_indexed,
+                            last_notified=last_batch_notify,
+                        )
+                        last_art_commit_at = now
+
+                outcome, path_str, wrote, art_added = self._process_candidate(
                     connection,
                     path,
                     file_errors=file_errors,
                     existing_files=existing_files,
                 )
+                if art_added:
+                    art_indexed += 1
+                    now = time.monotonic()
+                    at_batch = wrote and index % self._BATCH_SIZE == 0
+                    if (
+                        not at_batch
+                        and now - last_art_commit_at
+                        >= self._IN_SCAN_ART_COMMIT_INTERVAL_SEC
+                    ):
+                        last_batch_notify = self._commit_scan_batch(
+                            connection,
+                            batch_notify=batch_notify,
+                            indexed=indexed,
+                            art_indexed=art_indexed,
+                            last_notified=last_batch_notify,
+                        )
+                        last_art_commit_at = now
                 if path_str is not None:
                     discovered_paths.add(path_str)
                 if outcome == "skipped":
@@ -255,8 +298,14 @@ class LibraryScanner:
                     indexed += 1
 
                 if wrote and index % self._BATCH_SIZE == 0:
-                    connection.commit()
-                    connection.execute("BEGIN")
+                    last_batch_notify = self._commit_scan_batch(
+                        connection,
+                        batch_notify=batch_notify,
+                        indexed=indexed,
+                        art_indexed=art_indexed,
+                        last_notified=last_batch_notify,
+                    )
+                    last_art_commit_at = time.monotonic()
 
             if progress is not None and total > 0:
                 progress(total, max(estimated_total, total), "")
@@ -274,8 +323,22 @@ class LibraryScanner:
                     connection,
                     data_dir=self._data_dir,
                 )
-                art_indexed = art_added + art_repaired
-            connection.commit()
+            else:
+                from tunes_player.core.library.art_cache import backfill_missing_album_art
+
+                art_added = backfill_missing_album_art(
+                    connection,
+                    data_dir=self._data_dir,
+                )
+                art_repaired = 0
+            art_indexed += art_added + art_repaired
+            last_batch_notify = self._commit_scan_batch(
+                connection,
+                batch_notify=batch_notify,
+                indexed=indexed,
+                art_indexed=art_indexed,
+                last_notified=last_batch_notify,
+            )
         except Exception:
             connection.rollback()
             raise
@@ -299,6 +362,7 @@ class LibraryScanner:
         add_paths: list[str] | None = None,
         remove_paths: list[str] | None = None,
         progress: ProgressCallback | None = None,
+        batch_notify: ScanBatchCallback | None = None,
     ) -> ScanResult:
         root = str(Path(folder).resolve())
         to_add = self._expand_change_paths(add_paths or [])
@@ -314,6 +378,8 @@ class LibraryScanner:
         ] + [("add", path) for path in to_add]
         total = len(steps)
         last_progress_at = 0.0
+        last_art_commit_at = time.monotonic()
+        last_batch_notify = (0, 0)
 
         connection = connect(self._db_path)
         try:
@@ -343,11 +409,28 @@ class LibraryScanner:
                     skipped += 1
                     continue
 
-                outcome, _path_str, wrote = self._process_candidate(
+                outcome, _path_str, wrote, art_added = self._process_candidate(
                     connection,
                     target,
                     file_errors=file_errors,
                 )
+                if art_added:
+                    art_indexed += 1
+                    now = time.monotonic()
+                    at_batch = wrote and index % self._BATCH_SIZE == 0
+                    if (
+                        not at_batch
+                        and now - last_art_commit_at
+                        >= self._IN_SCAN_ART_COMMIT_INTERVAL_SEC
+                    ):
+                        last_batch_notify = self._commit_scan_batch(
+                            connection,
+                            batch_notify=batch_notify,
+                            indexed=indexed,
+                            art_indexed=art_indexed,
+                            last_notified=last_batch_notify,
+                        )
+                        last_art_commit_at = now
                 if outcome == "skipped":
                     skipped += 1
                 elif outcome == "error":
@@ -355,16 +438,36 @@ class LibraryScanner:
                 else:
                     indexed += 1
                 if wrote and index % self._BATCH_SIZE == 0:
-                    connection.commit()
-                    connection.execute("BEGIN")
+                    last_batch_notify = self._commit_scan_batch(
+                        connection,
+                        batch_notify=batch_notify,
+                        indexed=indexed,
+                        art_indexed=art_indexed,
+                        last_notified=last_batch_notify,
+                    )
+                    last_art_commit_at = time.monotonic()
 
             if indexed > 0 or removed > 0:
                 art_added, art_repaired = maintain_album_art(
                     connection,
                     data_dir=self._data_dir,
                 )
-                art_indexed = art_added + art_repaired
-            connection.commit()
+            else:
+                from tunes_player.core.library.art_cache import backfill_missing_album_art
+
+                art_added = backfill_missing_album_art(
+                    connection,
+                    data_dir=self._data_dir,
+                )
+                art_repaired = 0
+            art_indexed += art_added + art_repaired
+            self._commit_scan_batch(
+                connection,
+                batch_notify=batch_notify,
+                indexed=indexed,
+                art_indexed=art_indexed,
+                last_notified=last_batch_notify,
+            )
         except Exception:
             connection.rollback()
             raise
@@ -380,6 +483,44 @@ class LibraryScanner:
             file_errors=tuple(file_errors),
             total_candidates=total,
         )
+
+    @staticmethod
+    def _commit_scan_batch(
+        connection: sqlite3.Connection,
+        *,
+        batch_notify: ScanBatchCallback | None,
+        indexed: int,
+        art_indexed: int,
+        last_notified: tuple[int, int],
+    ) -> tuple[int, int]:
+        connection.commit()
+        connection.execute("BEGIN")
+        return LibraryScanner._notify_scan_batch(
+            batch_notify,
+            indexed=indexed,
+            art_indexed=art_indexed,
+            last_notified=last_notified,
+        )
+
+    @staticmethod
+    def _notify_scan_batch(
+        batch_notify: ScanBatchCallback | None,
+        *,
+        indexed: int,
+        art_indexed: int,
+        last_notified: tuple[int, int],
+    ) -> tuple[int, int]:
+        if batch_notify is None:
+            return last_notified
+        if indexed <= last_notified[0] and art_indexed <= last_notified[1]:
+            return last_notified
+        batch_notify(indexed, art_indexed)
+        return (indexed, art_indexed)
+
+    def _backfill_missing_art_during_scan(self, connection: sqlite3.Connection) -> int:
+        from tunes_player.core.library.art_cache import backfill_missing_album_art
+
+        return backfill_missing_album_art(connection, data_dir=self._data_dir)
 
     @staticmethod
     def _record_file_error(
@@ -474,9 +615,9 @@ class LibraryScanner:
         *,
         file_errors: list[ScanFileError],
         existing_files: ExistingFileIndex | None = None,
-    ) -> tuple[_CandidateOutcome, str | None, bool]:
+    ) -> tuple[_CandidateOutcome, str | None, bool, bool]:
         if not has_tier1_extension(path):
-            return "skipped", None, False
+            return "skipped", None, False, False
 
         path_str, existing = self._lookup_existing_file(path, existing_files, connection)
         if existing is not None and not self._should_bump_indexed_at(
@@ -485,7 +626,7 @@ class LibraryScanner:
             mtime_ns=int(existing["mtime_ns"]),
             file_mtime_ns=int(existing["mtime_ns"]),
         ):
-            return "skipped", path_str, False
+            return "skipped", path_str, False, False
 
         try:
             stat = path.stat()
@@ -495,7 +636,7 @@ class LibraryScanner:
                 path_str,
                 f"could not read file ({exc})",
             )
-            return "error", path_str, False
+            return "error", path_str, False, False
 
         if (
             existing is not None
@@ -513,16 +654,16 @@ class LibraryScanner:
                     (time.time_ns(), int(existing["id"])),
                 )
                 wrote = True
-            return "skipped", path_str, wrote
+            return "skipped", path_str, wrote, False
 
         try:
             parsed = _parse_file(path, stat.st_mtime_ns, stat.st_size)
         except _UnsupportedTier1Path:
-            return "skipped", None, False
+            return "skipped", None, False, False
         except Exception as exc:
             reason = str(exc).strip() or type(exc).__name__
             self._record_file_error(file_errors, path_str, reason)
-            return "error", path_str, False
+            return "error", path_str, False, False
 
         path_str = parsed.path
         reindex = existing is not None
@@ -537,7 +678,15 @@ class LibraryScanner:
                 file_id = self._insert_file(connection, parsed, indexed_at_ns=time.time_ns())
                 self._insert_track(connection, parsed, file_id)
                 connection.execute("RELEASE SAVEPOINT index_file")
-                return "indexed", path_str, True
+                from tunes_player.core.library.art_cache import link_or_index_album_art
+
+                art_added = link_or_index_album_art(
+                    connection,
+                    data_dir=self._data_dir,
+                    path=path,
+                    album_id=parsed.release_id,
+                )
+                return "indexed", path_str, True, art_added
             except sqlite3.OperationalError as exc:
                 try:
                     connection.execute("ROLLBACK TO SAVEPOINT index_file")
@@ -550,7 +699,7 @@ class LibraryScanner:
                     continue
                 reason = str(exc).strip() or type(exc).__name__
                 self._record_file_error(file_errors, path_str, reason)
-                return "error", path_str, False
+                return "error", path_str, False, False
             except Exception as exc:
                 try:
                     connection.execute("ROLLBACK TO SAVEPOINT index_file")
@@ -559,11 +708,11 @@ class LibraryScanner:
                     pass
                 reason = str(exc).strip() or type(exc).__name__
                 self._record_file_error(file_errors, path_str, reason)
-                return "error", path_str, False
+                return "error", path_str, False, False
 
         if last_error is not None:
             self._record_file_error(file_errors, path_str, str(last_error))
-        return "error", path_str, False
+        return "error", path_str, False, False
 
     def purge_folder(self, folder: str) -> int:
         """Remove all indexed files under *folder* from the library database."""

@@ -33,7 +33,7 @@ from tunes_player.core.home import (
     suggestion_added_ns,
 )
 from tunes_player.core.library import LibraryScanner, LibraryStore, ScanResult
-from tunes_player.core.library.db import is_locked_error
+from tunes_player.core.library.db import connect, is_locked_error
 from tunes_player.core.library.store import FileMetadata
 from tunes_player.core.library.scanner import ScanFileError
 from tunes_player.core.library.scan_process import terminate_orphan_library_scans
@@ -46,6 +46,7 @@ from tunes_player.core.playback.output_profile import (
     compute_output_profile,
 )
 from tunes_player.core.playback_quality import format_playback_status
+from tunes_player.core.release_quality import playback_ceiling_tier
 from tunes_player.core.volume import (
     VolumeController,
     VolumeEndpoint,
@@ -60,6 +61,7 @@ Unsubscribe = Callable[[], None]
 log = logging.getLogger(__name__)
 _timeline_log = logging.getLogger("tunes_player.playback.timeline")
 _QUEUE_END_MARGIN_SEC = 1.0
+_UNSET_PLAYBACK_QUALITY_CEILING = object()
 
 MainThreadHook: TypeAlias = Callable[[Callable[[], None]], None]
 
@@ -172,6 +174,7 @@ class PlayerService:
         self._playlist_meta: list[Track] = []
         self._playlist_build_generation = 0
         self._playlist_prepared: dict[str, _PreparedTrackLoad] = {}
+        self._playlist_playback_quality_ceiling: str | None = None
         self._current_track: Track | None = None
         self._current_release_id: str | None = None
         self._quality_hint = ""
@@ -207,6 +210,8 @@ class PlayerService:
         self._pending_scan_jobs: list[_ScanJob] = []
         self._scan_catalog_total_persisted = False
         self._scan_last_checkpoint_at = 0
+        self._scan_pending_batch: tuple[int, int] | None = None
+        self._scan_ui_flush_at = 0.0
         self._pending_startup_art_maintenance = False
         self._art_maintenance_running = False
         self._incremental_coalesce: dict[str, tuple[set[str], set[str]]] = {}
@@ -914,6 +919,22 @@ class PlayerService:
     def count_indexed_files(self, folder: str) -> int:
         return self._store.count_files_under_folder(folder)
 
+    def _count_indexed_files_snapshot(self, folder: str) -> int:
+        root = str(Path(folder).expanduser().resolve())
+        connection = connect(self._config_manager.database_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM files
+                WHERE path = ? OR path LIKE ?
+                """,
+                (root, root + os.sep + "%"),
+            ).fetchone()
+            return int(row["count"])
+        finally:
+            connection.close()
+
     def _folder_scan_is_complete(self, folder: str) -> bool:
         catalog_total = self._config_manager.folder_catalog_total(folder)
         if catalog_total is None or catalog_total <= 0:
@@ -1030,18 +1051,20 @@ class PlayerService:
         self._scan_last_error = None
         self._scan_catalog_total_persisted = False
         self._scan_last_checkpoint_at = 0
+        self._scan_pending_batch = None
+        self._scan_ui_flush_at = 0.0
         checkpoint_path = None
         if not job.is_incremental:
             # Checkpoints are persisted for status only. The scanner always walks
             # the full catalog and fast-skips files already indexed in the DB.
             pass
         terminate_orphan_library_scans(db_path=self._config_manager.database_path)
-        self._store.close()
-        time.sleep(0.1)
         expected_total = self._config_manager.folder_catalog_total(job.folder)
         if expected_total is None or expected_total <= 0:
-            indexed = self.count_indexed_files(job.folder)
+            indexed = self._count_indexed_files_snapshot(job.folder)
             expected_total = indexed if indexed > 0 else None
+        self._store.close()
+        time.sleep(0.1)
         self._scan_process, self._scan_queue = create_scan_process(
             db_path=self._config_manager.database_path,
             music_folders=self._config_manager.config.music_folders,
@@ -1071,6 +1094,9 @@ class PlayerService:
                 self._scan_progress = (message[1], message[2], message[3])
                 self._maybe_persist_scan_checkpoint()
                 self._emit("scan_progress")
+            elif kind == "batch":
+                self._scan_pending_batch = (int(message[1]), int(message[2]))
+                self._maybe_flush_scan_catalog_ui()
             elif kind == "done":
                 file_errors = tuple(
                     ScanFileError(path, reason)
@@ -1107,6 +1133,8 @@ class PlayerService:
                 self._cleanup_scan()
                 self._emit("scan_finished")
                 self.notify_library_updated()
+                if result.art_indexed > 0 or result.indexed > 0:
+                    self.notify_art_updated()
                 return False
             elif kind == "error":
                 finished_folder = self._scanning_folder
@@ -1134,6 +1162,7 @@ class PlayerService:
                 return False
 
         if self._scan_process is not None and self._scan_process.is_alive():
+            self._maybe_flush_scan_catalog_ui()
             return True
 
         if self._scan_process is not None:
@@ -1231,18 +1260,36 @@ class PlayerService:
 
     def notify_library_updated(self) -> None:
         """Call from the GTK main thread after a scan completes."""
-        self._store.reconnect()
+        if not self.is_scanning():
+            self._store.reconnect()
         self._emit("library_updated")
 
     def notify_art_updated(self) -> None:
         """Call after album-art cache repair; refreshes in-place UI cover art."""
-        self._store.reconnect()
+        if not self.is_scanning():
+            self._store.reconnect()
         track = self._current_track
         if track is not None and track.id.startswith("local:"):
             refreshed = self._store.get_track(track.id)
             if refreshed is not None:
                 self._current_track = refreshed
         self._emit("art_updated")
+
+    _SCAN_UI_FLUSH_INTERVAL_SEC = 1.0
+
+    def _maybe_flush_scan_catalog_ui(self) -> None:
+        pending = self._scan_pending_batch
+        if pending is None or not self.is_scanning():
+            return
+        now = time.monotonic()
+        if now - self._scan_ui_flush_at < self._SCAN_UI_FLUSH_INTERVAL_SEC:
+            return
+        indexed, art_indexed = pending
+        self._scan_ui_flush_at = now
+        if indexed > 0:
+            self.notify_library_updated()
+        if art_indexed > 0:
+            self.notify_art_updated()
 
     def get_playback_state(self) -> PlaybackState:
         volume_mode = self._volume_mode()
@@ -1377,9 +1424,18 @@ class PlayerService:
             return
         self._start_playlist(tracks, start_index=start_index)
 
-    def play_release(self, release_id: str, *, start_index: int = 0) -> None:
+    def play_release(
+        self,
+        release_id: str,
+        *,
+        start_index: int = 0,
+        enabled_quality_tiers: frozenset[str] | None = None,
+    ) -> None:
         self._play_release_generation += 1
         generation = self._play_release_generation
+        playback_quality_ceiling = playback_ceiling_tier(
+            enabled_quality_tiers or frozenset(),
+        )
 
         def worker() -> None:
             tracks = self.get_release_tracks(release_id)
@@ -1398,7 +1454,11 @@ class PlayerService:
             def apply() -> None:
                 if generation != self._play_release_generation:
                     return
-                self._start_playlist(tracks, start_index=start_index_clamped)
+                self._start_playlist(
+                    tracks,
+                    start_index=start_index_clamped,
+                    playback_quality_ceiling=playback_quality_ceiling,
+                )
 
             self._run_on_main_thread(apply)
 
@@ -1448,11 +1508,21 @@ class PlayerService:
             return False
         return self._is_playing or self._playback_load_active
 
-    def play_or_toggle_release(self, release_id: str, *, start_index: int = 0) -> None:
+    def play_or_toggle_release(
+        self,
+        release_id: str,
+        *,
+        start_index: int = 0,
+        enabled_quality_tiers: frozenset[str] | None = None,
+    ) -> None:
         if self._current_track is not None and self._current_release_id == release_id:
             self.toggle_play_pause()
             return
-        self.play_release(release_id, start_index=start_index)
+        self.play_release(
+            release_id,
+            start_index=start_index,
+            enabled_quality_tiers=enabled_quality_tiers,
+        )
 
     def toggle_play_pause(self) -> None:
         if self._current_track is None and self._playlist_meta:
@@ -2162,7 +2232,11 @@ class PlayerService:
         if track is None:
             return
         source = resolve_track(
-            self._store, track.id, tidal=self._tidal, qobuz=self._qobuz
+            self._store,
+            track.id,
+            tidal=self._tidal,
+            qobuz=self._qobuz,
+            playback_quality_ceiling=self._playlist_playback_quality_ceiling,
         )
         if source is None:
             return
@@ -2233,7 +2307,11 @@ class PlayerService:
             return True
         try:
             source = resolve_track(
-                self._store, track.id, tidal=self._tidal, qobuz=self._qobuz
+                self._store,
+                track.id,
+                tidal=self._tidal,
+                qobuz=self._qobuz,
+                playback_quality_ceiling=self._playlist_playback_quality_ceiling,
             )
         except Exception as exc:
             self._report_error(str(exc), exc=exc)
@@ -2427,7 +2505,11 @@ class PlayerService:
     ) -> _PreparedTrackLoad:
         try:
             source = resolve_track(
-                self._store, track.id, tidal=self._tidal, qobuz=self._qobuz
+                self._store,
+                track.id,
+                tidal=self._tidal,
+                qobuz=self._qobuz,
+                playback_quality_ceiling=self._playlist_playback_quality_ceiling,
             )
         except Exception as exc:
             return _PreparedTrackLoad(
@@ -2670,9 +2752,17 @@ class PlayerService:
         )
         self._play_queue_index(index + 1)
 
-    def _start_playlist(self, tracks: list[Track], *, start_index: int = 0) -> None:
+    def _start_playlist(
+        self,
+        tracks: list[Track],
+        *,
+        start_index: int = 0,
+        playback_quality_ceiling: str | None | object = _UNSET_PLAYBACK_QUALITY_CEILING,
+    ) -> None:
         if not tracks:
             return
+        if playback_quality_ceiling is not _UNSET_PLAYBACK_QUALITY_CEILING:
+            self._playlist_playback_quality_ceiling = playback_quality_ceiling  # type: ignore[assignment]
         start_index = max(0, min(start_index, len(tracks) - 1))
         self._playlist_build_generation += 1
         build_generation = self._playlist_build_generation

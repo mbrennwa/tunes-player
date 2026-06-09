@@ -126,6 +126,9 @@ def format_folder_last_scan_line(
         last_scan_kind=last_scan_kind,
     )
 
+    if detail == "complete" and indexed_files is not None and indexed_files > 0:
+        return f"Last scan: {stamp} · {indexed_files:,} files"
+
     parts = [f"Last scan: {stamp}"]
     if coverage is not None:
         parts.append(coverage)

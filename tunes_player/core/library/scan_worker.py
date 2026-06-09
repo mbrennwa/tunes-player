@@ -30,6 +30,9 @@ def run_library_scan(
     def progress(current: int, total: int, path: str) -> None:
         queue.put(("progress", current, total, path))
 
+    def batch_notify(indexed: int, art_indexed: int) -> None:
+        queue.put(("batch", indexed, art_indexed))
+
     try:
         config = AppConfig(
             music_folders=list(music_folders),
@@ -42,6 +45,7 @@ def run_library_scan(
                 add_paths=list(add_paths or []),
                 remove_paths=list(remove_paths or []),
                 progress=progress,
+                batch_notify=batch_notify,
             )
         else:
             result = scanner.scan(
@@ -49,6 +53,7 @@ def run_library_scan(
                 progress=progress,
                 checkpoint_path=checkpoint_path,
                 expected_total=expected_total,
+                batch_notify=batch_notify,
             )
     except Exception as exc:
         queue.put(("error", str(exc)))

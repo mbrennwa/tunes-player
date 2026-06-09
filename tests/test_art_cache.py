@@ -119,7 +119,7 @@ class ArtCacheMaintenanceTests(unittest.TestCase):
         self.assertEqual(added, 1)
         self.assertIsNotNone(find_cached_art_path(self._data_dir, album_id))
 
-    def test_backfill_skips_when_cache_file_exists_without_db_row(self) -> None:
+    def test_backfill_restores_db_row_when_cache_file_exists(self) -> None:
         album_id = ids.release_id("Artist", "Album")
         path = str((self._data_dir / "track.flac").resolve())
         _seed_track(self._connection, path=path, album_id=album_id)
@@ -140,7 +140,13 @@ class ArtCacheMaintenanceTests(unittest.TestCase):
             added = backfill_missing_album_art(self._connection, data_dir=self._data_dir)
 
         extract_art.assert_not_called()
-        self.assertEqual(added, 0)
+        self.assertEqual(added, 1)
+        row = self._connection.execute(
+            "SELECT art_uri FROM album_art WHERE album_id = ?",
+            (album_id,),
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(str(row["art_uri"]), local_art_uri(album_id))
 
     def test_maintain_album_art_runs_repair_then_backfill(self) -> None:
         stale_id = ids.release_id("Artist", "Stale")

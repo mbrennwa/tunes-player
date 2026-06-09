@@ -306,7 +306,7 @@ class ReleaseGridView(Gtk.ScrolledWindow):
                     art_loader=art_loader,
                     small=small,
                 )
-            grid.sync_layout()
+            GLib.idle_add(grid._sync_layout_and_notify_idle)
             return
 
         end = min(start + batch_size, len(releases))
