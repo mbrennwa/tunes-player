@@ -186,7 +186,6 @@ class PlayerService:
         self._output_profile: PlaybackOutputProfile | None = None
         self._exclusive_session: object | None = None
         self._position_sec = 0.0
-        self._audible_position_sec = 0.0
         self._duration_sec: float | None = None
         self._engine: PlaybackEngine | None = None
         self._engine_error: str | None = None
@@ -1719,7 +1718,7 @@ class PlayerService:
             and self._engine is not None
         ):
             self._sync_duration_from_engine()
-            self._sync_audible_position_from_engine()
+            self.refresh_playback_position_for_ui()
             self._maybe_auto_advance_queue()
 
     def poll_playback_health(self) -> None:
@@ -2620,13 +2619,7 @@ class PlayerService:
         engine = self._engine
         time_pos = self._engine_time_pos_sec(engine) if engine is not None else 0.0
         end_threshold = duration - _QUEUE_END_MARGIN_SEC
-        audible = self._audible_position_sec
-        if self._is_playing:
-            # While audio is still playing, both timelines must agree (#44).
-            if audible < end_threshold or time_pos < end_threshold:
-                return
-        elif max(audible, time_pos) < end_threshold:
-            # mpv often pauses at EOF before we advance.
+        if time_pos < end_threshold:
             return
 
         index = self._playlist_position()
@@ -2654,10 +2647,9 @@ class PlayerService:
             return
 
         _timeline_log.info(
-            "auto_advance queue[%s/%s] audible=%.2fs time-pos=%.2fs dur=%.2fs",
+            "auto_advance queue[%s/%s] pos=%.2fs dur=%.2fs",
             index,
             len(self._playlist_meta),
-            self._audible_position_sec,
             time_pos,
             duration,
         )
@@ -2905,6 +2897,7 @@ class PlayerService:
         if previous is None or previous.id != track.id:
             self._reset_playback_position(0.0)
             self._duration_sec = None
+            self.refresh_playback_position_for_ui()
         self._playback_load_active = False
         self._direct_alsa_recovery_attempts = 0
         self._auto_advanced_from_index = None
@@ -3034,9 +3027,7 @@ class PlayerService:
             self._reset_playback_position(0.0)
 
     def _reset_playback_position(self, position_sec: float) -> None:
-        position_sec = max(0.0, position_sec)
-        self._position_sec = position_sec
-        self._audible_position_sec = position_sec
+        self._position_sec = max(0.0, position_sec)
 
     def max_seek_position_sec(self) -> float | None:
         engine = self._engine
@@ -3057,16 +3048,6 @@ class PlayerService:
             return max(0.0, get_fn())
         return max(0.0, engine.get_position())
 
-    def _apply_ui_position(self, position_sec: float, *, allow_backward: bool = False) -> None:
-        position = max(0.0, position_sec)
-        if not allow_backward:
-            if self._is_playing:
-                if position < self._position_sec:
-                    return
-            elif position < self._position_sec:
-                return
-        self._position_sec = position
-
     def refresh_playback_position_for_ui(self) -> None:
         """Pull live mpv time-pos for the seek bar."""
         engine = self._engine
@@ -3074,18 +3055,12 @@ class PlayerService:
             return
         query_fn = getattr(engine, "query_time_pos", None)
         if callable(query_fn):
-            self._apply_ui_position(query_fn())
+            self._position_sec = max(0.0, query_fn())
         else:
-            self._apply_ui_position(engine.get_position())
-
-    def _sync_audible_position_from_engine(self) -> None:
-        engine = self._engine
-        if engine is None:
-            return
-        self._audible_position_sec = max(0.0, engine.get_position())
+            self._position_sec = max(0.0, engine.get_position())
 
     def _sync_playback_position_from_engine(self) -> None:
-        self._sync_audible_position_from_engine()
+        self.refresh_playback_position_for_ui()
         self._maybe_auto_advance_queue()
 
     def _sync_duration_from_engine(self) -> None:
@@ -3096,8 +3071,6 @@ class PlayerService:
         if duration is not None and duration > 0:
             self._duration_sec = duration
         self._is_playing = engine.is_playing()
-        self._sync_audible_position_from_engine()
-        self._maybe_auto_advance_queue()
 
     def _sync_from_engine(self) -> None:
         self._sync_playback_position_from_engine()
@@ -3125,15 +3098,14 @@ class PlayerService:
         if event == "track_eof":
             self._is_playing = False
             self._sync_duration_from_engine()
-            self._sync_audible_position_from_engine()
+            self.refresh_playback_position_for_ui()
             self._maybe_auto_advance_queue()
             return
         if event == "track_finished":
             _timeline_log.info(
-                "service track_finished track=%s ui_pos=%.2f audible=%.2f dur=%s",
+                "service track_finished track=%s pos=%.2f dur=%s",
                 self._current_track.id if self._current_track else None,
                 self._position_sec,
-                self._audible_position_sec,
                 self._duration_sec,
             )
             track = self._current_track
@@ -3173,7 +3145,6 @@ class PlayerService:
             return
         if event == "position_changed":
             self.refresh_playback_position_for_ui()
-            self._sync_audible_position_from_engine()
             self._maybe_auto_advance_queue()
         elif event == "duration_changed":
             self._sync_duration_from_engine()
