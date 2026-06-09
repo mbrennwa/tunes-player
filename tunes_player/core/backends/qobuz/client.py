@@ -358,7 +358,12 @@ class QobuzClient:
             return queue, index
         return [track], 0
 
-    def resolve_playable(self, track_id: str) -> PlayableSource | None:
+    def resolve_playable(
+        self,
+        track_id: str,
+        *,
+        playback_quality_ceiling: str | None = None,
+    ) -> PlayableSource | None:
         numeric = qobuz_ids.parse_prefixed_id(track_id, "track")
         if numeric is None:
             return None
@@ -367,7 +372,16 @@ class QobuzClient:
         if not isinstance(data, dict):
             return None
         metadata = convert.track_from_qobuz(data)
-        stream = self._get_file_url(numeric)
+        from tunes_player.core.release_quality import qobuz_format_id_for_playback
+
+        format_id = qobuz_format_id_for_playback(
+            config_format_id=self._format_id,
+            ceiling_tier=playback_quality_ceiling,
+        )
+        stream = self._get_file_url(
+            numeric,
+            playback_quality_ceiling=playback_quality_ceiling,
+        )
         from tunes_player.core.playback_quality import (
             qobuz_format_label_from_stream,
             qobuz_stream_file_metadata,
@@ -375,7 +389,7 @@ class QobuzClient:
 
         format_label = qobuz_format_label_from_stream(
             stream,
-            fallback_format_id=self._format_id,
+            fallback_format_id=format_id,
         )
         stream_metadata = qobuz_stream_file_metadata(stream)
         url = stream.get("url")
@@ -425,17 +439,28 @@ class QobuzClient:
                     "This Qobuz account cannot stream (free or inactive subscription)."
                 )
 
-    def _get_file_url(self, track_id: str) -> dict[str, Any]:
+    def _get_file_url(
+        self,
+        track_id: str,
+        *,
+        playback_quality_ceiling: str | None = None,
+    ) -> dict[str, Any]:
+        from tunes_player.core.release_quality import qobuz_format_id_for_playback
+
+        format_id = qobuz_format_id_for_playback(
+            config_format_id=self._format_id,
+            ceiling_tier=playback_quality_ceiling,
+        )
         request_ts = time.time()
         request_sig = sign_get_file_url(
             track_id=track_id,
-            format_id=self._format_id,
+            format_id=format_id,
             request_ts=request_ts,
             app_secret=self._app_secret or "",
         )
         params = {
             "track_id": track_id,
-            "format_id": str(self._format_id),
+            "format_id": str(format_id),
             "intent": "stream",
             "request_ts": str(request_ts),
             "request_sig": request_sig,

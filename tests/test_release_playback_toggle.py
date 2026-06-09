@@ -60,7 +60,11 @@ class ReleasePlaybackToggleTests(unittest.TestCase):
             with patch.object(self._service, "play_release") as play_release:
                 self._service.play_or_toggle_release(self._release_id, start_index=2)
         toggle.assert_not_called()
-        play_release.assert_called_once_with(self._release_id, start_index=2)
+        play_release.assert_called_once_with(
+            self._release_id,
+            start_index=2,
+            enabled_quality_tiers=None,
+        )
 
 
 if __name__ == "__main__":

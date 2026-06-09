@@ -628,7 +628,12 @@ class TidalClient:
             return queue, index
         return [track], 0
 
-    def resolve_playable(self, track_id: str) -> PlayableSource | None:
+    def resolve_playable(
+        self,
+        track_id: str,
+        *,
+        playback_quality_ceiling: str | None = None,
+    ) -> PlayableSource | None:
         numeric = tidal_ids.parse_prefixed_id(track_id, "track")
         if numeric is None:
             return None
@@ -636,7 +641,12 @@ class TidalClient:
         track = session.track(numeric)
         metadata = convert.track_from_tidal(session, track)
         try:
-            payload = self._fetch_stream_payload(session, numeric, track)
+            payload = self._fetch_stream_payload(
+                session,
+                numeric,
+                track,
+                playback_quality_ceiling=playback_quality_ceiling,
+            )
             presentation = payload.get("assetPresentation")
             if presentation == "PREVIEW":
                 raise TidalUnavailableError(
@@ -678,10 +688,23 @@ class TidalClient:
         session: object,
         track_id: int,
         tidal_track: object,
+        *,
+        playback_quality_ceiling: str | None = None,
     ) -> dict[str, Any]:
-        session_quality = quality_request_value(session.config.quality)
-        candidates = playback_quality_candidates(session_quality, tidal_track)
-        cache_key = (track_id, ",".join(candidates))
+        from tunes_player.core.backends.tidal.stream_quality import (
+            cap_session_quality_for_ceiling,
+        )
+
+        session_quality = cap_session_quality_for_ceiling(
+            quality_request_value(session.config.quality),
+            playback_quality_ceiling,
+        )
+        candidates = playback_quality_candidates(
+            session_quality,
+            tidal_track,
+            ceiling_tier=playback_quality_ceiling,
+        )
+        cache_key = (track_id, playback_quality_ceiling or "", ",".join(candidates))
         now = time.monotonic()
         cached = self._stream_cache.get(cache_key)
         if cached is not None:

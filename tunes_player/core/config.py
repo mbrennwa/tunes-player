@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
@@ -395,3 +395,10 @@ class ConfigManager:
     def set_shell_state(self, state: ShellState) -> None:
         self._config.shell_state = state
         self.save()
+
+    def update_shell_quality_tiers(self, enabled_quality_tiers: frozenset[str]) -> None:
+        """Update in-memory shell quality tiers without writing config to disk."""
+        self._config.shell_state = replace(
+            self._config.shell_state,
+            enabled_quality_tiers=enabled_quality_tiers,
+        )

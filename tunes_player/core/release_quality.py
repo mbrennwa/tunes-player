@@ -226,3 +226,42 @@ def release_quality_filter_bucket(release: Release) -> str:
     if tier in _VALID_QUALITY_FILTERS:
         return tier
     return ""
+
+
+_QOBUZ_FORMAT_ID_RANK: dict[int, int] = {
+    5: 0,  # MP3 320
+    6: 1,  # 16/44 FLAC
+    7: 2,  # 24/96
+    27: 3,  # 24/192
+}
+_QOBUZ_RANK_TO_FORMAT_ID: dict[int, int] = {
+    0: 5,
+    1: 6,
+    2: 7,
+    3: 27,
+}
+
+
+def playback_ceiling_tier(enabled_quality_tiers: frozenset[str]) -> str | None:
+    """Highest enabled shell filter tier, or None when all tiers are enabled (no cap)."""
+    if not enabled_quality_tiers:
+        return None
+    return max_quality_tier(*enabled_quality_tiers)
+
+
+def qobuz_format_id_for_playback(
+    *,
+    config_format_id: int,
+    ceiling_tier: str | None,
+) -> int:
+    """Apply shell playback ceiling to the configured Qobuz stream format."""
+    config_rank = _QOBUZ_FORMAT_ID_RANK.get(config_format_id, 3)
+    if ceiling_tier is None or ceiling_tier == QUALITY_FILTER_HI_RES:
+        cap_rank = 3
+    elif ceiling_tier == QUALITY_FILTER_CD:
+        cap_rank = 1
+    elif ceiling_tier == QUALITY_FILTER_COMPRESSED:
+        cap_rank = 0
+    else:
+        cap_rank = 3
+    return _QOBUZ_RANK_TO_FORMAT_ID[min(config_rank, cap_rank)]

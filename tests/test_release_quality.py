@@ -11,6 +11,8 @@ from tunes_player.core.release_quality import (
     QUALITY_FILTER_COMPRESSED,
     QUALITY_FILTER_HI_RES,
     max_quality_tier,
+    playback_ceiling_tier,
+    qobuz_format_id_for_playback,
     tier_from_local,
     tier_from_qobuz_album,
     tier_from_tidal_album,
@@ -193,6 +195,41 @@ class ReleaseQualityTests(unittest.TestCase):
             "maximum_sampling_rate": 44.1,
         }
         self.assertEqual(tier_from_qobuz_album(album), QUALITY_FILTER_HI_RES)
+
+    def test_playback_ceiling_tier_empty_means_no_cap(self) -> None:
+        self.assertIsNone(playback_ceiling_tier(frozenset()))
+
+    def test_playback_ceiling_tier_cd_only(self) -> None:
+        self.assertEqual(
+            playback_ceiling_tier(frozenset({QUALITY_FILTER_CD})),
+            QUALITY_FILTER_CD,
+        )
+
+    def test_playback_ceiling_tier_cd_and_hi_res(self) -> None:
+        self.assertEqual(
+            playback_ceiling_tier(
+                frozenset({QUALITY_FILTER_CD, QUALITY_FILTER_HI_RES}),
+            ),
+            QUALITY_FILTER_HI_RES,
+        )
+
+    def test_qobuz_format_id_cd_ceiling_caps_config(self) -> None:
+        self.assertEqual(
+            qobuz_format_id_for_playback(
+                config_format_id=27,
+                ceiling_tier=QUALITY_FILTER_CD,
+            ),
+            6,
+        )
+
+    def test_qobuz_format_id_compressed_ceiling(self) -> None:
+        self.assertEqual(
+            qobuz_format_id_for_playback(
+                config_format_id=6,
+                ceiling_tier=QUALITY_FILTER_COMPRESSED,
+            ),
+            5,
+        )
 
     def test_qobuz_embedded_track_raises_tier(self) -> None:
         album = {

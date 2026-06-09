@@ -6,12 +6,14 @@ import unittest
 from types import SimpleNamespace
 
 from tunes_player.core.backends.tidal.stream_quality import (
+    cap_session_quality_for_ceiling,
     negotiate_stream_payload,
     playback_quality_candidates,
     session_quality_for_subscription,
     subscription_allows_hi_res,
     track_peak_quality,
 )
+from tunes_player.core.release_quality import QUALITY_FILTER_CD
 
 
 class TidalStreamQualityTests(unittest.TestCase):
@@ -29,6 +31,24 @@ class TidalStreamQualityTests(unittest.TestCase):
         self.assertEqual(
             playback_quality_candidates("HI_RES_LOSSLESS", track),
             ["LOSSLESS", "HI_RES", "HIGH"],
+        )
+
+    def test_cd_ceiling_caps_hi_res_session_and_track(self) -> None:
+        track = SimpleNamespace(
+            audio_quality="HI_RES_LOSSLESS",
+            media_metadata_tags=["HIRES_LOSSLESS"],
+        )
+        self.assertEqual(
+            cap_session_quality_for_ceiling("HI_RES_LOSSLESS", QUALITY_FILTER_CD),
+            "LOSSLESS",
+        )
+        self.assertEqual(
+            playback_quality_candidates(
+                "HI_RES_LOSSLESS",
+                track,
+                ceiling_tier=QUALITY_FILTER_CD,
+            ),
+            ["LOSSLESS", "HIGH"],
         )
 
     def test_hi_res_track_candidates(self) -> None:

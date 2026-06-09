@@ -15,19 +15,26 @@ def resolve_track(
     *,
     tidal: TidalClient | None,
     qobuz: QobuzClient | None = None,
+    playback_quality_ceiling: str | None = None,
 ) -> PlayableSource | None:
     if track_id.startswith("tidal:"):
         if tidal is None:
             return None
         try:
-            return tidal.resolve_playable(track_id)
+            return tidal.resolve_playable(
+                track_id,
+                playback_quality_ceiling=playback_quality_ceiling,
+            )
         except TidalUnavailableError:
             raise
     if track_id.startswith("qobuz:"):
         if qobuz is None:
             return None
         try:
-            return qobuz.resolve_playable(track_id)
+            return qobuz.resolve_playable(
+                track_id,
+                playback_quality_ceiling=playback_quality_ceiling,
+            )
         except QobuzUnavailableError:
             raise
     if track_id.startswith("local:"):
