@@ -5,6 +5,7 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import multiprocessing
+import os
 import sqlite3
 import threading
 import time
@@ -214,6 +215,8 @@ class PlayerService:
         self._scan_ui_flush_at = 0.0
         self._pending_startup_art_maintenance = False
         self._art_maintenance_running = False
+        self._catalog_reconcile_running = False
+        self._library_db_write_lock = threading.Lock()
         self._incremental_coalesce: dict[str, tuple[set[str], set[str]]] = {}
         self._last_recorded_track_id: str | None = None
         self._last_recorded_at_ns = 0
@@ -610,28 +613,40 @@ class PlayerService:
             self.reconcile_library_catalog()
         except Exception:
             log.exception("Startup library catalog reconciliation failed")
+        finally:
+            self._run_on_main_thread(self._after_startup_reconcile)
+
+    def _after_startup_reconcile(self) -> None:
+        self._try_start_scan()
+        self._try_start_art_maintenance()
 
     def reconcile_library_catalog(self) -> int:
         """Drop indexed tracks whose files are outside configured music folders."""
-        terminate_orphan_library_scans(db_path=self._config_manager.database_path)
-        scanner = LibraryScanner(
-            db_path=self._config_manager.database_path,
-            config=self._config_manager.config,
-        )
-        self._store.close()
+        self._catalog_reconcile_running = True
+        removed = 0
         try:
-            removed = scanner.purge_unconfigured_folders()
-        except sqlite3.OperationalError as exc:
-            self._store.reconnect()
-            if is_locked_error(exc):
-                log.warning(
-                    "Library catalog reconciliation skipped: %s",
-                    exc,
+            with self._library_db_write_lock:
+                terminate_orphan_library_scans(db_path=self._config_manager.database_path)
+                scanner = LibraryScanner(
+                    db_path=self._config_manager.database_path,
+                    config=self._config_manager.config,
                 )
-                return 0
-            raise
-        else:
-            self._store.reconnect()
+                self._store.close()
+                try:
+                    try:
+                        removed = scanner.purge_unconfigured_folders()
+                    except sqlite3.OperationalError as exc:
+                        if is_locked_error(exc):
+                            log.warning(
+                                "Library catalog reconciliation skipped: %s",
+                                exc,
+                            )
+                            return 0
+                        raise
+                finally:
+                    self._store.reconnect()
+        finally:
+            self._catalog_reconcile_running = False
         if removed:
             log.info(
                 "Removed %d indexed tracks outside configured music folders",
@@ -654,6 +669,7 @@ class PlayerService:
             self._art_maintenance_running
             or self.is_scanning()
             or self._pending_scan_jobs
+            or self._catalog_reconcile_running
         ):
             return
         self._pending_startup_art_maintenance = False
@@ -690,27 +706,28 @@ class PlayerService:
         data_dir = self._config_manager.data_dir
         self._store.close()
         try:
-            last_error: sqlite3.OperationalError | None = None
-            for attempt in range(LOCK_RETRY_ATTEMPTS):
-                connection = connect(db_path)
-                try:
-                    result = maintain_album_art(connection, data_dir=data_dir)
-                    connection.commit()
-                    return result
-                except sqlite3.OperationalError as exc:
-                    connection.rollback()
-                    if not is_locked_error(exc) or attempt == LOCK_RETRY_ATTEMPTS - 1:
+            with self._library_db_write_lock:
+                last_error: sqlite3.OperationalError | None = None
+                for attempt in range(LOCK_RETRY_ATTEMPTS):
+                    connection = connect(db_path)
+                    try:
+                        result = maintain_album_art(connection, data_dir=data_dir)
+                        connection.commit()
+                        return result
+                    except sqlite3.OperationalError as exc:
+                        connection.rollback()
+                        if not is_locked_error(exc) or attempt == LOCK_RETRY_ATTEMPTS - 1:
+                            raise
+                        last_error = exc
+                        time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
+                    except Exception:
+                        connection.rollback()
                         raise
-                    last_error = exc
-                    time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
-                except Exception:
-                    connection.rollback()
-                    raise
-                finally:
-                    connection.close()
-            if last_error is not None:
-                raise last_error
-            raise RuntimeError("album art maintenance retry loop exited without result")
+                    finally:
+                        connection.close()
+                if last_error is not None:
+                    raise last_error
+                raise RuntimeError("album art maintenance retry loop exited without result")
         finally:
             self._store.reconnect()
 
@@ -732,11 +749,12 @@ class PlayerService:
             db_path=self._config_manager.database_path,
             config=self._config_manager.config,
         )
-        self._store.close()
-        try:
-            removed = scanner.purge_folder(resolved)
-        finally:
-            self._store.reconnect()
+        with self._library_db_write_lock:
+            self._store.close()
+            try:
+                removed = scanner.purge_folder(resolved)
+            finally:
+                self._store.reconnect()
 
         self._config_manager.remove_music_folder(folder)
         self.notify_library_updated()
@@ -911,10 +929,17 @@ class PlayerService:
         )
 
     def _try_start_scan(self) -> None:
+        if self._catalog_reconcile_running:
+            return
         if self._scan_queue is not None or not self._pending_scan_jobs:
             return
-        job = self._pending_scan_jobs.pop(0)
-        self._start_scan_job(job)
+        with self._library_db_write_lock:
+            if self._catalog_reconcile_running:
+                return
+            if self._scan_queue is not None or not self._pending_scan_jobs:
+                return
+            job = self._pending_scan_jobs.pop(0)
+            self._start_scan_job(job)
 
     def count_indexed_files(self, folder: str) -> int:
         return self._store.count_files_under_folder(folder)

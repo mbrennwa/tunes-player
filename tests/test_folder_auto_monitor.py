@@ -357,6 +357,24 @@ class FolderScanResumeServiceTests(unittest.TestCase):
         create_scan.assert_called_once()
         self.assertIsNone(create_scan.call_args.kwargs.get("checkpoint_path"))
 
+    def test_try_start_scan_waits_for_startup_reconcile(self) -> None:
+        from tunes_player.core.services import _ScanJob
+
+        self._config.add_music_folder(self._folder, auto_monitor=True)
+        self._service._pending_scan_jobs = [_ScanJob(folder=str(Path(self._folder).resolve()))]
+        self._service._catalog_reconcile_running = True
+
+        with patch.object(self._service, "_start_scan_job") as start_scan:
+            self._service._try_start_scan()
+
+        start_scan.assert_not_called()
+
+        self._service._catalog_reconcile_running = False
+        with patch.object(self._service, "_start_scan_job") as start_scan:
+            self._service._try_start_scan()
+
+        start_scan.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
