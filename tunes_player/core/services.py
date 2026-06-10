@@ -40,6 +40,7 @@ from tunes_player.core.library.scanner import ScanFileError
 from tunes_player.core.library.scan_process import terminate_orphan_library_scans
 from tunes_player.core.library.scan_worker import close_scan_queue, create_scan_process
 from tunes_player.core.models import Album, Release, Source, Track
+from tunes_player.core.shell_state import refresh_local_release_art_uris
 from tunes_player.core.playback.engine import EngineEvent, PlaybackEngine
 from tunes_player.core.playback.output_profile import (
     PlaybackOutputProfile,
@@ -1341,6 +1342,16 @@ class PlayerService:
         if not self.is_scanning():
             self._store.reconnect()
         self._emit("library_updated")
+
+    def refresh_local_release_art_uris(self, releases: list[Release]) -> list[Release]:
+        """Refresh art_uri on local releases from the library store."""
+        local_ids = [release.id for release in releases if release.source == Source.LOCAL]
+        if not local_ids:
+            return releases
+        return refresh_local_release_art_uris(
+            releases,
+            local_art_by_id=self._store.art_uri_map(local_ids),
+        )
 
     def notify_art_updated(self) -> None:
         """Call after album-art cache repair; refreshes in-place UI cover art."""

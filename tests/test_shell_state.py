@@ -41,6 +41,7 @@ from tunes_player.core.shell_state import (
     cached_releases_have_quality_tiers,
     prune_enabled_quality_tiers,
     refresh_local_peak_quality_tiers,
+    refresh_local_release_art_uris,
     quality_tiers_in_selection,
     release_from_cache_payload,
     release_to_cache_payload,
@@ -393,6 +394,32 @@ class TestRefreshLocalPeakQualityTiers(unittest.TestCase):
         )
         self.assertEqual(refreshed[0].peak_quality_tier, QUALITY_FILTER_HI_RES)
         self.assertEqual(refreshed[1].peak_quality_tier, QUALITY_FILTER_COMPRESSED)
+
+
+class TestRefreshLocalReleaseArtUris(unittest.TestCase):
+    def test_updates_local_only(self) -> None:
+        streaming_uri = "https://example.com/cover.jpg"
+        local_uri = "tunes://art/local/local%3Aalbum%3Aabc"
+        releases = [
+            replace(_release("local:1", Source.LOCAL), art_uri=None),
+            replace(_release("qobuz:1", Source.QOBUZ), art_uri=streaming_uri),
+        ]
+        refreshed = refresh_local_release_art_uris(
+            releases,
+            local_art_by_id={"local:1": local_uri, "qobuz:1": None},
+        )
+        self.assertEqual(refreshed[0].art_uri, local_uri)
+        self.assertEqual(refreshed[1].art_uri, streaming_uri)
+
+    def test_none_for_unindexed_local(self) -> None:
+        releases = [
+            replace(_release("local:1", Source.LOCAL), art_uri="tunes://art/local/stale"),
+        ]
+        refreshed = refresh_local_release_art_uris(
+            releases,
+            local_art_by_id={"local:1": None},
+        )
+        self.assertIsNone(refreshed[0].art_uri)
 
 
 class TestQualityFilter(unittest.TestCase):

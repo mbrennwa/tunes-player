@@ -152,6 +152,16 @@ Future: `ui/qt/` for macOS/Windows; same `PlayerService` API.
 GTK runs on the main loop; mpv callbacks post to a queue → GLib idle (same pattern
 will work for Qt signals later).
 
+**Album art (`art_uri`):**
+
+- `Release.art_uri` is the canonical cover value for UI and MPRIS.
+- **Local** art is backed by the `album_art` SQLite table and on-disk cache under
+  `{data_dir}/art/`; URIs use the `tunes://art/local/…` scheme. `art_updated` events
+  mean local cache rows changed — refresh via `PlayerService.refresh_local_release_art_uris()`.
+- **Streaming** art is an HTTPS URL set when the catalog row is fetched (TIDAL/Qobuz APIs).
+  It lives on the in-memory `Release` object (and shell cache payload), not in
+  `LibraryStore`. UI must not re-resolve streaming covers through the local store.
+
 **Errors and logging:**
 
 - User-facing playback failures set `PlayerService.last_error()` and emit

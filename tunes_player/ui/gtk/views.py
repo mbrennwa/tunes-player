@@ -11,7 +11,6 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
-from tunes_player.core.library.store import LibraryStore
 from tunes_player.core.models import Release, ReleaseCompleteness, Source, Track
 from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.album_grid import (
@@ -236,19 +235,13 @@ class ReleaseGridView(Gtk.ScrolledWindow):
             grid.sync_layout()
         self._schedule_visible_art_sync()
 
-    def refresh_artwork(self, store: LibraryStore) -> None:
+    def refresh_artwork(self, releases: list[Release]) -> None:
         """Reload cover URIs for grid tiles and repaint visible artwork."""
         grid = getattr(self, "_tile_grid", None)
-        if grid is None or not grid._cards:
+        if grid is None or not grid._cards or not releases:
             return
-        release_ids = [
-            rid
-            for card in grid._cards
-            if isinstance(rid := getattr(card, "_tunes_release_id", None), str)
-        ]
-        if not release_ids:
-            return
-        grid.refresh_card_art_uris(store.art_uri_map(release_ids))
+        art_by_id = {release.id: release.art_uri for release in releases}
+        grid.refresh_card_art_uris(art_by_id)
         self._schedule_visible_art_sync()
 
     def _schedule_visible_art_sync(self) -> None:
@@ -951,6 +944,9 @@ class ReleaseTileGrid(Gtk.Box):
             release_id = getattr(card, "_tunes_release_id", None)
             if not isinstance(release_id, str) or release_id not in art_by_id:
                 continue
+            source = getattr(card, "_tunes_source", None)
+            if source != Source.LOCAL:
+                continue
             setattr(card, "_tunes_art_uri", art_by_id[release_id])
             setattr(card, "_tunes_art_loaded_key", None)
 
@@ -1356,6 +1352,7 @@ def _release_card(
     shell.set_halign(Gtk.Align.START)
     setattr(shell, "_tunes_release_id", release.id)
     setattr(shell, "_tunes_art_uri", release.art_uri)
+    setattr(shell, "_tunes_source", release.source)
 
     tile = Gtk.Box()
     tile.add_css_class("card")

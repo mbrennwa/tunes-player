@@ -292,6 +292,30 @@ def refresh_local_peak_quality_tiers(
     return refreshed
 
 
+def refresh_local_release_art_uris(
+    releases: list[Release],
+    *,
+    local_art_by_id: dict[str, str | None],
+) -> list[Release]:
+    """Replace stale cached art_uri values for local releases."""
+    if not local_art_by_id:
+        return list(releases)
+    refreshed: list[Release] = []
+    for release in releases:
+        if release.source != Source.LOCAL:
+            refreshed.append(release)
+            continue
+        if release.id not in local_art_by_id:
+            refreshed.append(release)
+            continue
+        art_uri = local_art_by_id[release.id]
+        if art_uri != release.art_uri:
+            refreshed.append(replace(release, art_uri=art_uri))
+        else:
+            refreshed.append(release)
+    return refreshed
+
+
 def cached_releases_have_quality_tiers(
     payloads: tuple[dict[str, Any], ...] | list[dict[str, Any]],
 ) -> bool:
