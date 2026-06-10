@@ -79,6 +79,7 @@ _LOADING_MESSAGES = {
     ShellBase.SUGGESTION: "Finding suggestions...",
     ShellBase.ALL_LOCAL: "Loading local library…",
 }
+_CATALOG_ENRICH_CONCURRENCY = 6
 
 log = logging.getLogger(__name__)
 
@@ -843,6 +844,7 @@ class TunesWindow(Adw.ApplicationWindow):
             sync_populate=True,
         )
         self._schedule_persist()
+        self._start_catalog_quality_enrich(self._load_token)
 
     def _try_show_grid_sync(self, state: ShellState) -> bool:
         restored = self._restore_persisted_releases(state)
@@ -935,6 +937,84 @@ class TunesWindow(Adw.ApplicationWindow):
             title=title,
         )
         self._schedule_persist()
+        self._start_catalog_quality_enrich(token)
+        return False
+
+    def _start_catalog_quality_enrich(self, token: int) -> None:
+        if self._shell_state.base == ShellBase.ALL_LOCAL:
+            return
+        pending_ids = [
+            release.id
+            for release in self._cached_releases
+            if not release.catalog_quality_ready
+            and release.source in (Source.TIDAL, Source.QOBUZ)
+        ]
+        if not pending_ids:
+            return
+
+        def work() -> None:
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=_CATALOG_ENRICH_CONCURRENCY,
+                thread_name_prefix="tunes-catalog-enrich",
+            ) as pool:
+                futures = {
+                    pool.submit(self._service.enrich_catalog_quality, release_id): release_id
+                    for release_id in pending_ids
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    if token != self._load_token:
+                        return
+                    release_id = futures[future]
+                    try:
+                        enriched = future.result()
+                    except Exception:
+                        log.debug(
+                            "Catalog quality enrich failed for %s",
+                            release_id,
+                            exc_info=True,
+                        )
+                        continue
+                    if enriched is None:
+                        continue
+                    GLib.idle_add(self._patch_enriched_release, token, enriched)
+            GLib.idle_add(self._finish_catalog_enrich, token)
+
+        threading.Thread(
+            target=work,
+            daemon=True,
+            name="tunes-catalog-enrich",
+        ).start()
+
+    def _patch_enriched_release(self, token: int, enriched: Release) -> bool:
+        if token != self._load_token:
+            return False
+        patched = False
+        updated: list[Release] = []
+        for release in self._cached_releases:
+            if release.id == enriched.id:
+                updated.append(enriched)
+                patched = True
+            else:
+                updated.append(release)
+        if not patched:
+            return False
+        self._cached_releases = updated
+        filtered = self._filtered_from_cache(self._shell_state)
+        title = self._grid_title(self._shell_state)
+        self._show_grid(
+            releases=filtered,
+            empty_message=self._empty_message(self._shell_state, filtered),
+            title=title,
+        )
+        self._schedule_persist()
+        return False
+
+    def _finish_catalog_enrich(self, token: int) -> bool:
+        if token != self._load_token:
+            return False
+        self._sync_quality_filter()
         return False
 
     def _async_load_error_copy(

@@ -61,8 +61,11 @@ def _release(
     release_type: ReleaseType = ReleaseType.ALBUM,
     peak_quality_tier: str = QUALITY_FILTER_CD,
     available_quality_tiers: frozenset[str] | None = None,
+    catalog_quality_ready: bool = True,
 ) -> Release:
-    release = Release(
+    if available_quality_tiers is None and peak_quality_tier:
+        available_quality_tiers = frozenset({peak_quality_tier})
+    return Release(
         id=release_id,
         title=title,
         artist_name=artist_name,
@@ -71,13 +74,9 @@ def _release(
         genre=genre,
         release_type=release_type,
         peak_quality_tier=peak_quality_tier,
-        available_quality_tiers=frozenset(),
+        available_quality_tiers=available_quality_tiers or frozenset(),
+        catalog_quality_ready=catalog_quality_ready,
     )
-    if available_quality_tiers is None:
-        from tunes_player.core.release_quality import release_available_quality_tiers
-
-        available_quality_tiers = release_available_quality_tiers(release)
-    return replace(release, available_quality_tiers=available_quality_tiers)
 
 
 class TestShellStateParsing(unittest.TestCase):
@@ -332,6 +331,7 @@ class TestReleaseCachePayload(unittest.TestCase):
         payload = release_to_cache_payload(
             _release("a", Source.LOCAL, peak_quality_tier=QUALITY_FILTER_HI_RES),
         )
+        self.assertIn("catalog_quality_ready", payload)
         self.assertTrue(cached_releases_have_quality_tiers((payload,)))
         legacy = {"id": "local:1", "title": "T", "artist_name": "A", "source": "local"}
         self.assertFalse(cached_releases_have_quality_tiers((legacy,)))
@@ -431,11 +431,7 @@ class TestQualityFilter(unittest.TestCase):
         ]
         self.assertEqual(
             quality_tiers_in_selection(releases),
-            (
-                QUALITY_FILTER_COMPRESSED,
-                QUALITY_FILTER_CD,
-                QUALITY_FILTER_HI_RES,
-            ),
+            (QUALITY_FILTER_CD, QUALITY_FILTER_HI_RES),
         )
 
     def test_apply_quality_filter(self) -> None:
@@ -478,13 +474,45 @@ class TestQualityFilter(unittest.TestCase):
     def test_apply_quality_filter_excludes_unknown_tier(self) -> None:
         releases = [
             _release("a", Source.TIDAL, peak_quality_tier=QUALITY_FILTER_COMPRESSED),
-            _release("b", Source.TIDAL, peak_quality_tier=""),
+            _release(
+                "b",
+                Source.TIDAL,
+                peak_quality_tier="",
+                available_quality_tiers=frozenset(),
+            ),
         ]
         filtered = apply_quality_filter(
             releases,
             frozenset({QUALITY_FILTER_COMPRESSED}),
         )
         self.assertEqual([r.id for r in filtered], ["a"])
+
+    def test_apply_quality_filter_excludes_pending_catalog(self) -> None:
+        releases = [
+            _release(
+                "pending",
+                Source.TIDAL,
+                peak_quality_tier="",
+                available_quality_tiers=frozenset(),
+                catalog_quality_ready=False,
+            ),
+            _release("ready", Source.TIDAL, peak_quality_tier=QUALITY_FILTER_CD),
+        ]
+        filtered = apply_quality_filter(
+            releases,
+            frozenset({QUALITY_FILTER_CD}),
+        )
+        self.assertEqual([r.id for r in filtered], ["ready"])
+
+    def test_pending_visible_when_quality_filter_off(self) -> None:
+        pending = _release(
+            "pending",
+            Source.QOBUZ,
+            peak_quality_tier="",
+            available_quality_tiers=frozenset(),
+            catalog_quality_ready=False,
+        )
+        self.assertEqual(len(apply_quality_filter([pending], frozenset())), 1)
 
     def test_prune_enabled_quality_tiers(self) -> None:
         pruned = prune_enabled_quality_tiers(

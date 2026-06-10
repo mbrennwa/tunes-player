@@ -51,7 +51,6 @@ def _normalize_sample_rate_hz(value: int | float | None) -> int:
         return 0
     if rate <= 0:
         return 0
-    # Qobuz API reports kHz (44.1, 96, 192); local library index uses Hz.
     if rate < 1000:
         return int(round(rate * 1000))
     return int(round(rate))
@@ -104,7 +103,7 @@ def _tier_from_lossless_bit_depth_sample_rate(
     )
 
 
-def tiers_from_local(
+def classify_local_catalog(
     *,
     max_bit_depth: int | None,
     max_sample_rate: int | None,
@@ -129,9 +128,22 @@ def tiers_from_local(
                 sample_rate_hz=max_sample_rate,
             ),
         )
-    if not tiers:
-        tiers.add(QUALITY_FILTER_COMPRESSED)
     return frozenset(tier for tier in tiers if tier in _VALID_QUALITY_FILTERS)
+
+
+def tiers_from_local(
+    *,
+    max_bit_depth: int | None,
+    max_sample_rate: int | None,
+    has_lossless: bool,
+    has_lossy: bool,
+) -> frozenset[str]:
+    return classify_local_catalog(
+        max_bit_depth=max_bit_depth,
+        max_sample_rate=max_sample_rate,
+        has_lossless=has_lossless,
+        has_lossy=has_lossy,
+    )
 
 
 def tier_from_local(
@@ -142,13 +154,13 @@ def tier_from_local(
     has_lossy: bool,
 ) -> str:
     """Peak catalog tier from per-release file aggregates."""
-    tiers = tiers_from_local(
+    tiers = classify_local_catalog(
         max_bit_depth=max_bit_depth,
         max_sample_rate=max_sample_rate,
         has_lossless=has_lossless,
         has_lossy=has_lossy,
     )
-    return max_quality_tier(*tiers)
+    return max_quality_tier(*tiers) if tiers else ""
 
 
 def tier_from_tidal_peak(rank: int) -> str:
@@ -235,41 +247,43 @@ def _collect_tidal_album_tier_signals(album: object) -> set[str]:
     return {tier for tier in signals if tier in _VALID_QUALITY_FILTERS}
 
 
-def available_tiers_from_signals(signals: set[str]) -> frozenset[str]:
-    """Expand raw catalog signals into available filter tiers."""
-    valid = {tier for tier in signals if tier in _VALID_QUALITY_FILTERS}
-    if not valid:
-        return frozenset({QUALITY_FILTER_COMPRESSED})
-    peak = max_quality_tier(*valid)
-    return _streaming_available_tiers(peak, valid)
+def classify_tidal_catalog(
+    album: object,
+    tracks: list[object] | None = None,
+) -> frozenset[str]:
+    """Catalog tiers a TIDAL album supports (facts from album metadata and tracks)."""
+    from tunes_player.core.backends.tidal.stream_quality import track_peak_quality
+
+    tiers = set(_collect_tidal_album_tier_signals(album))
+    if tracks:
+        for track in tracks:
+            tier = tier_from_tidal_peak(track_peak_quality(track))
+            if tier in _VALID_QUALITY_FILTERS:
+                tiers.add(tier)
+    return frozenset(tiers)
 
 
 def tiers_from_tidal_album(album: object) -> frozenset[str]:
-    """All catalog quality tiers a TIDAL album is available at."""
-    signals = _collect_tidal_album_tier_signals(album)
-    if not signals:
-        return frozenset()
-    return available_tiers_from_signals(signals)
+    return classify_tidal_catalog(album)
 
 
 def tier_from_tidal_album(album: object) -> str:
-    """Peak catalog tier from TIDAL album metadata (no track list fetch)."""
-    tiers = tiers_from_tidal_album(album)
-    if not tiers:
-        return ""
-    return max_quality_tier(*tiers)
+    tiers = classify_tidal_catalog(album)
+    return max_quality_tier(*tiers) if tiers else ""
 
 
 def _tier_from_qobuz_bit_depth_sample_rate(
     *,
     bit_depth: int | float | str | None,
     sample_rate: int | float | str | None,
-) -> str:
+) -> str | None:
     try:
         depth = int(bit_depth) if bit_depth is not None else 0
     except (TypeError, ValueError):
         depth = 0
     rate_hz = _normalize_sample_rate_hz(sample_rate)
+    if depth <= 0 and rate_hz <= 0:
+        return None
     return _tier_from_lossless_bit_depth_sample_rate(
         bit_depth=depth,
         sample_rate_hz=rate_hz,
@@ -330,12 +344,12 @@ def _collect_qobuz_peak_signals(album: dict[str, Any]) -> set[str]:
     )
     if technical is not None:
         signals.add(technical)
-    signals.add(
-        _tier_from_qobuz_bit_depth_sample_rate(
-            bit_depth=album.get("maximum_bit_depth"),
-            sample_rate=album.get("maximum_sampling_rate"),
-        ),
+    depth_rate_tier = _tier_from_qobuz_bit_depth_sample_rate(
+        bit_depth=album.get("maximum_bit_depth"),
+        sample_rate=album.get("maximum_sampling_rate"),
     )
+    if depth_rate_tier is not None:
+        signals.add(depth_rate_tier)
     tracks = album.get("tracks")
     if isinstance(tracks, dict):
         for item in tracks.get("items") or []:
@@ -362,33 +376,22 @@ def _collect_qobuz_available_signals(album: dict[str, Any]) -> set[str]:
     return signals
 
 
-def _streaming_available_tiers(
-    peak: str,
-    signals: set[str],
-) -> frozenset[str]:
-    """Expand peak/signals into streamable tiers (lower tiers are usually available too)."""
-    tiers = set(signals)
-    tiers.add(peak)
-    peak_rank = _TIER_RANK.get(peak, 0)
-    for tier, rank in _TIER_RANK.items():
-        if rank <= peak_rank:
-            tiers.add(tier)
+def classify_qobuz_catalog(album: dict[str, Any]) -> frozenset[str]:
+    """Catalog tiers a Qobuz album supports (facts from album/get JSON)."""
     return frozenset(
-        tier for tier in tiers if tier in _VALID_QUALITY_FILTERS
+        tier
+        for tier in _collect_qobuz_available_signals(album)
+        if tier in _VALID_QUALITY_FILTERS
     )
 
 
 def tiers_from_qobuz_album(album: dict[str, Any]) -> frozenset[str]:
-    """All catalog quality tiers a Qobuz album is available at."""
-    return available_tiers_from_signals(_collect_qobuz_available_signals(album))
+    return classify_qobuz_catalog(album)
 
 
 def tier_from_qobuz_album(album: dict[str, Any]) -> str:
-    """Peak catalog tier from Qobuz album JSON."""
-    signals = _collect_qobuz_peak_signals(album)
-    if not signals:
-        return QUALITY_FILTER_COMPRESSED
-    return max_quality_tier(*signals)
+    tiers = classify_qobuz_catalog(album)
+    return max_quality_tier(*tiers) if tiers else ""
 
 
 def max_quality_tier(*tiers: str) -> str:
@@ -419,53 +422,39 @@ def min_quality_tier(*tiers: str) -> str:
     return best
 
 
+def peak_quality_tier_from_tiers(tiers: frozenset[str]) -> str:
+    return max_quality_tier(*tiers) if tiers else ""
+
+
 @dataclass(frozen=True, slots=True)
-class PlaybackQualityPolicy:
-    """Playback quality for one queue: target tier and allowed fallback set."""
+class PlaybackPreference:
+    """User playback ceiling from shell quality filter (no catalog coupling)."""
 
-    target_tier: str | None
-    allowed_tiers: frozenset[str]
+    max_tier: str
 
 
-def playback_policy_for_play(
-    *,
+def playback_preference_from_shell(
     enabled_quality_tiers: frozenset[str],
-    release: Release | None,
-) -> PlaybackQualityPolicy:
-    """Derive playback target from enabled shell filters and release availability."""
+) -> PlaybackPreference:
+    """Derive playback ceiling from enabled shell tiers only."""
     if not enabled_quality_tiers:
-        return PlaybackQualityPolicy(None, ALL_QUALITY_TIERS)
-    available = (
-        release_available_quality_tiers(release)
-        if release is not None
-        else ALL_QUALITY_TIERS
-    )
-    if not available:
-        available = frozenset({QUALITY_FILTER_COMPRESSED})
-    allowed = frozenset(
-        tier for tier in enabled_quality_tiers if tier in available
-    )
-    if not allowed:
-        allowed = frozenset(enabled_quality_tiers)
-    target = max_quality_tier(*allowed)
-    return PlaybackQualityPolicy(target, allowed)
+        return PlaybackPreference(QUALITY_FILTER_HI_RES)
+    return PlaybackPreference(max_quality_tier(*enabled_quality_tiers))
 
 
 def release_available_quality_tiers(release: Release) -> frozenset[str]:
     """Tiers used for shell quality filter matching."""
-    if release.available_quality_tiers:
-        return release.available_quality_tiers
-    tier = release.peak_quality_tier
-    if tier in _VALID_QUALITY_FILTERS:
-        return _streaming_available_tiers(tier, {tier})
-    return frozenset()
+    return release.available_quality_tiers
 
 
 def release_quality_filter_bucket(release: Release) -> str:
+    if not release.catalog_quality_ready:
+        return ""
     tier = release.peak_quality_tier
     if tier in _VALID_QUALITY_FILTERS:
         return tier
-    return ""
+    tiers = release.available_quality_tiers
+    return max_quality_tier(*tiers) if tiers else ""
 
 
 def release_matches_quality_filter(
@@ -475,7 +464,9 @@ def release_matches_quality_filter(
     """True when the release is available at any enabled quality tier."""
     if not enabled_quality_tiers:
         return True
-    available = release_available_quality_tiers(release)
+    if not release.catalog_quality_ready:
+        return False
+    available = release.available_quality_tiers
     if not available:
         return False
     return bool(available & enabled_quality_tiers)
@@ -505,35 +496,31 @@ def _tier_to_qobuz_max_rank(tier: str) -> int:
     return 3
 
 
-def _tier_to_qobuz_min_rank(tier: str) -> int:
-    if tier == QUALITY_FILTER_HI_RES:
-        return 2
-    if tier == QUALITY_FILTER_CD:
-        return 1
-    return 0
-
-
-def _qobuz_max_rank_for_policy_target(policy: PlaybackQualityPolicy) -> int:
-    if policy.target_tier is None:
-        if not policy.allowed_tiers:
-            return 3
-        return max(_tier_to_qobuz_max_rank(tier) for tier in policy.allowed_tiers)
-    return _tier_to_qobuz_max_rank(policy.target_tier)
-
-
-def qobuz_format_id_for_policy(
+def qobuz_format_candidates_for_preference(
     *,
     config_format_id: int,
-    policy: PlaybackQualityPolicy,
-) -> int:
-    """Apply shell playback policy to the configured Qobuz stream format."""
+    preference: PlaybackPreference,
+) -> list[int]:
+    """Ordered Qobuz format_id values to try, highest quality first."""
     config_rank = _QOBUZ_FORMAT_ID_RANK.get(config_format_id, 3)
-    max_target = _qobuz_max_rank_for_policy_target(policy)
-    min_allowed = (
-        min(_tier_to_qobuz_min_rank(tier) for tier in policy.allowed_tiers)
-        if policy.allowed_tiers
-        else 0
+    max_target = _tier_to_qobuz_max_rank(preference.max_tier)
+    effective_max = min(config_rank, max_target)
+    return [
+        _QOBUZ_RANK_TO_FORMAT_ID[rank]
+        for rank in range(effective_max, -1, -1)
+        if rank in _QOBUZ_RANK_TO_FORMAT_ID
+    ]
+
+
+def qobuz_format_id_for_preference(
+    *,
+    config_format_id: int,
+    preference: PlaybackPreference,
+) -> int:
+    candidates = qobuz_format_candidates_for_preference(
+        config_format_id=config_format_id,
+        preference=preference,
     )
-    effective_rank = min(config_rank, max_target)
-    effective_rank = max(effective_rank, min_allowed)
-    return _QOBUZ_RANK_TO_FORMAT_ID[effective_rank]
+    if candidates:
+        return candidates[0]
+    return _QOBUZ_RANK_TO_FORMAT_ID[3]

@@ -52,6 +52,20 @@ class Release:
     peak_quality_tier: str = ""
     # Catalog tiers this release is streamable at (for shell quality filter OR match).
     available_quality_tiers: frozenset[str] = frozenset()
+    # False for streaming browse stubs until album lookup classifies quality.
+    catalog_quality_ready: bool = True
+
+    @property
+    def has_compressed(self) -> bool:
+        return "compressed" in self.available_quality_tiers
+
+    @property
+    def has_cd(self) -> bool:
+        return "cd" in self.available_quality_tiers
+
+    @property
+    def has_hires(self) -> bool:
+        return "hi_res" in self.available_quality_tiers
 
     @property
     def is_partial(self) -> bool:

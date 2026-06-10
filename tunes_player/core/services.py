@@ -49,8 +49,8 @@ from tunes_player.core.playback.output_profile import (
 )
 from tunes_player.core.playback_quality import format_playback_status
 from tunes_player.core.release_quality import (
-    PlaybackQualityPolicy,
-    playback_policy_for_play,
+    PlaybackPreference,
+    playback_preference_from_shell,
 )
 from tunes_player.core.volume import (
     VolumeController,
@@ -66,7 +66,7 @@ Unsubscribe = Callable[[], None]
 log = logging.getLogger(__name__)
 _timeline_log = logging.getLogger("tunes_player.playback.timeline")
 _QUEUE_END_MARGIN_SEC = 1.0
-_UNSET_PLAYBACK_QUALITY_POLICY = object()
+_UNSET_PLAYBACK_PREFERENCE = object()
 
 MainThreadHook: TypeAlias = Callable[[Callable[[], None]], None]
 
@@ -179,7 +179,7 @@ class PlayerService:
         self._playlist_meta: list[Track] = []
         self._playlist_build_generation = 0
         self._playlist_prepared: dict[str, _PreparedTrackLoad] = {}
-        self._playlist_playback_policy: PlaybackQualityPolicy | None = None
+        self._playlist_playback_preference: PlaybackPreference | None = None
         self._current_track: Track | None = None
         self._current_release_id: str | None = None
         self._quality_hint = ""
@@ -1444,22 +1444,23 @@ class PlayerService:
         self._auto_advanced_from_index = None
         self._play_queue_index(index)
 
-    def _playback_policy_for_shell(
+    def _playback_preference_for_shell(
         self,
         *,
-        release_id: str | None = None,
         enabled_quality_tiers: frozenset[str] | None = None,
-    ) -> PlaybackQualityPolicy:
+    ) -> PlaybackPreference:
         enabled = (
             enabled_quality_tiers
             if enabled_quality_tiers is not None
             else self.config.config.shell_state.enabled_quality_tiers
         )
-        release = self.get_release(release_id) if release_id else None
-        return playback_policy_for_play(
-            enabled_quality_tiers=enabled or frozenset(),
-            release=release,
-        )
+        return playback_preference_from_shell(enabled or frozenset())
+
+    def enrich_catalog_quality(self, release_id: str) -> Release | None:
+        """Classify streaming catalog quality via album lookup; local is already ready."""
+        if release_id.startswith("local:"):
+            return self.get_release(release_id)
+        return self.get_release_summary(release_id)
 
     def play_track(self, track_id: str) -> None:
         if track_id.startswith("tidal:"):
@@ -1493,9 +1494,7 @@ class PlayerService:
                 self._start_playlist(
                     tracks,
                     start_index=start_index,
-                    playback_quality_policy=self._playback_policy_for_shell(
-                        release_id=release_id,
-                    ),
+                    playback_preference=self._playback_preference_for_shell(),
                 )
 
             self._run_on_main_thread(apply)
@@ -1522,9 +1521,7 @@ class PlayerService:
         self._start_playlist(
             tracks,
             start_index=start_index,
-            playback_quality_policy=self._playback_policy_for_shell(
-                release_id=release_id,
-            ),
+            playback_preference=self._playback_preference_for_shell(),
         )
 
     def _play_qobuz_track(self, track_id: str) -> None:
@@ -1548,9 +1545,7 @@ class PlayerService:
         self._start_playlist(
             tracks,
             start_index=start_index,
-            playback_quality_policy=self._playback_policy_for_shell(
-                release_id=release_id,
-            ),
+            playback_preference=self._playback_preference_for_shell(),
         )
 
     def play_release(
@@ -1564,8 +1559,7 @@ class PlayerService:
         generation = self._play_release_generation
         def worker() -> None:
             tracks = self.get_release_tracks(release_id)
-            policy = self._playback_policy_for_shell(
-                release_id=release_id,
+            preference = self._playback_preference_for_shell(
                 enabled_quality_tiers=enabled_quality_tiers,
             )
             if not tracks:
@@ -1586,7 +1580,7 @@ class PlayerService:
                 self._start_playlist(
                     tracks,
                     start_index=start_index_clamped,
-                    playback_quality_policy=policy,
+                    playback_preference=preference,
                 )
 
             self._run_on_main_thread(apply)
@@ -1626,9 +1620,7 @@ class PlayerService:
         self._start_playlist(
             tracks,
             start_index=start_index,
-            playback_quality_policy=self._playback_policy_for_shell(
-                release_id=release_id,
-            ),
+            playback_preference=self._playback_preference_for_shell(),
         )
 
     def play_album(self, album_id: str, *, start_index: int = 0) -> None:
@@ -1938,6 +1930,7 @@ class PlayerService:
         """Reserved for future playback health hooks (ALSA xrun polling disabled)."""
 
     def shutdown(self) -> None:
+        self._tidal.save_session()
         self._pending_scan_jobs.clear()
         self._incremental_coalesce.clear()
         if self.is_scanning():
@@ -2371,7 +2364,7 @@ class PlayerService:
             track.id,
             tidal=self._tidal,
             qobuz=self._qobuz,
-            playback_quality_policy=self._playlist_playback_policy,
+            playback_preference=self._playlist_playback_preference,
         )
         if source is None:
             return
@@ -2446,7 +2439,7 @@ class PlayerService:
                 track.id,
                 tidal=self._tidal,
                 qobuz=self._qobuz,
-                playback_quality_policy=self._playlist_playback_policy,
+                playback_preference=self._playlist_playback_preference,
             )
         except Exception as exc:
             self._report_error(str(exc), exc=exc)
@@ -2644,7 +2637,7 @@ class PlayerService:
                 track.id,
                 tidal=self._tidal,
                 qobuz=self._qobuz,
-                playback_quality_policy=self._playlist_playback_policy,
+                playback_preference=self._playlist_playback_preference,
             )
         except Exception as exc:
             return _PreparedTrackLoad(
@@ -2892,12 +2885,12 @@ class PlayerService:
         tracks: list[Track],
         *,
         start_index: int = 0,
-        playback_quality_policy: PlaybackQualityPolicy | object = _UNSET_PLAYBACK_QUALITY_POLICY,
+        playback_preference: PlaybackPreference | object = _UNSET_PLAYBACK_PREFERENCE,
     ) -> None:
         if not tracks:
             return
-        if playback_quality_policy is not _UNSET_PLAYBACK_QUALITY_POLICY:
-            self._playlist_playback_policy = playback_quality_policy  # type: ignore[assignment]
+        if playback_preference is not _UNSET_PLAYBACK_PREFERENCE:
+            self._playlist_playback_preference = playback_preference  # type: ignore[assignment]
         start_index = max(0, min(start_index, len(tracks) - 1))
         self._playlist_build_generation += 1
         build_generation = self._playlist_build_generation

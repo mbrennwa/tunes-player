@@ -10,14 +10,18 @@ from tunes_player.core.release_quality import (
     QUALITY_FILTER_CD,
     QUALITY_FILTER_COMPRESSED,
     QUALITY_FILTER_HI_RES,
-    PlaybackQualityPolicy,
+    PlaybackPreference,
     acoustic_tier_from_lossless,
     acoustic_tier_from_stream,
+    classify_local_catalog,
+    classify_qobuz_catalog,
+    classify_tidal_catalog,
     is_acoustic_hi_res,
     max_quality_tier,
     min_quality_tier,
-    playback_policy_for_play,
-    qobuz_format_id_for_policy,
+    playback_preference_from_shell,
+    qobuz_format_candidates_for_preference,
+    qobuz_format_id_for_preference,
     release_matches_quality_filter,
     tier_from_local,
     tier_from_qobuz_album,
@@ -124,7 +128,7 @@ class ReleaseQualityTests(unittest.TestCase):
         )
         self.assertEqual(tier_from_tidal_album(album), QUALITY_FILTER_CD)
 
-    def test_tidal_album_without_metadata_is_unknown(self) -> None:
+    def test_tidal_album_without_metadata_has_no_tier(self) -> None:
         album = SimpleNamespace(audio_quality="", media_metadata_tags=None, audio_modes=[])
         self.assertEqual(tier_from_tidal_album(album), "")
 
@@ -212,9 +216,10 @@ class ReleaseQualityTests(unittest.TestCase):
         }
         self.assertEqual(tier_from_qobuz_album(album), QUALITY_FILTER_HI_RES)
 
-    def test_qobuz_compressed_album(self) -> None:
+    def test_qobuz_unknown_metadata_has_no_tier(self) -> None:
         mp3_only = {"maximum_bit_depth": None, "maximum_sampling_rate": None}
-        self.assertEqual(tier_from_qobuz_album(mp3_only), QUALITY_FILTER_COMPRESSED)
+        self.assertEqual(tier_from_qobuz_album(mp3_only), "")
+        self.assertEqual(classify_qobuz_catalog(mp3_only), frozenset())
 
     def test_qobuz_technical_specifications_hi_res(self) -> None:
         album = {
@@ -230,112 +235,86 @@ class ReleaseQualityTests(unittest.TestCase):
             QUALITY_FILTER_CD,
         )
 
-    def test_playback_policy_cd_only(self) -> None:
-        policy = playback_policy_for_play(
-            enabled_quality_tiers=frozenset({QUALITY_FILTER_CD}),
-            release=None,
-        )
-        self.assertEqual(policy.target_tier, QUALITY_FILTER_CD)
-        self.assertEqual(policy.allowed_tiers, frozenset({QUALITY_FILTER_CD}))
+    def test_playback_preference_from_shell_cd_only(self) -> None:
+        pref = playback_preference_from_shell(frozenset({QUALITY_FILTER_CD}))
+        self.assertEqual(pref.max_tier, QUALITY_FILTER_CD)
 
-    def test_playback_policy_hi_res_only(self) -> None:
-        policy = playback_policy_for_play(
-            enabled_quality_tiers=frozenset({QUALITY_FILTER_HI_RES}),
-            release=None,
-        )
-        self.assertEqual(policy.target_tier, QUALITY_FILTER_HI_RES)
-        self.assertEqual(policy.allowed_tiers, frozenset({QUALITY_FILTER_HI_RES}))
+    def test_playback_preference_from_shell_hi_res_only(self) -> None:
+        pref = playback_preference_from_shell(frozenset({QUALITY_FILTER_HI_RES}))
+        self.assertEqual(pref.max_tier, QUALITY_FILTER_HI_RES)
 
-    def test_playback_policy_cd_and_hi_res(self) -> None:
-        policy = playback_policy_for_play(
-            enabled_quality_tiers=frozenset(
-                {QUALITY_FILTER_CD, QUALITY_FILTER_HI_RES},
-            ),
-            release=None,
-        )
-        self.assertEqual(policy.target_tier, QUALITY_FILTER_HI_RES)
-        self.assertEqual(
-            policy.allowed_tiers,
+    def test_playback_preference_from_shell_picks_highest_enabled(self) -> None:
+        pref = playback_preference_from_shell(
             frozenset({QUALITY_FILTER_CD, QUALITY_FILTER_HI_RES}),
         )
+        self.assertEqual(pref.max_tier, QUALITY_FILTER_HI_RES)
 
-    def test_playback_policy_empty_means_best_available(self) -> None:
-        policy = playback_policy_for_play(
-            enabled_quality_tiers=frozenset(),
-            release=None,
-        )
-        self.assertIsNone(policy.target_tier)
+    def test_playback_preference_empty_filter_means_hi_res(self) -> None:
+        pref = playback_preference_from_shell(frozenset())
+        self.assertEqual(pref.max_tier, QUALITY_FILTER_HI_RES)
 
-    def test_playback_policy_cd_only_dual_format_release(self) -> None:
-        release = Release(
-            id="tidal:album:1",
-            title="Album",
-            artist_name="Artist",
-            source=Source.TIDAL,
-            peak_quality_tier=QUALITY_FILTER_CD,
-            available_quality_tiers=frozenset(
-                {
-                    QUALITY_FILTER_COMPRESSED,
-                    QUALITY_FILTER_CD,
-                    QUALITY_FILTER_HI_RES,
-                },
-            ),
-        )
-        policy = playback_policy_for_play(
-            enabled_quality_tiers=frozenset({QUALITY_FILTER_CD}),
-            release=release,
-        )
-        self.assertEqual(policy.target_tier, QUALITY_FILTER_CD)
-
-    def test_playback_policy_hi_res_only_dual_format_release(self) -> None:
-        release = Release(
-            id="tidal:album:1",
-            title="Album",
-            artist_name="Artist",
-            source=Source.TIDAL,
-            peak_quality_tier=QUALITY_FILTER_CD,
-            available_quality_tiers=frozenset(
-                {
-                    QUALITY_FILTER_COMPRESSED,
-                    QUALITY_FILTER_CD,
-                    QUALITY_FILTER_HI_RES,
-                },
-            ),
-        )
-        policy = playback_policy_for_play(
-            enabled_quality_tiers=frozenset({QUALITY_FILTER_HI_RES}),
-            release=release,
-        )
-        self.assertEqual(policy.target_tier, QUALITY_FILTER_HI_RES)
-
-    def test_qobuz_format_id_cd_policy_caps_config(self) -> None:
-        policy = PlaybackQualityPolicy(
-            target_tier=QUALITY_FILTER_CD,
-            allowed_tiers=frozenset({QUALITY_FILTER_CD}),
-        )
+    def test_qobuz_format_id_cd_preference_caps_config(self) -> None:
+        preference = PlaybackPreference(max_tier=QUALITY_FILTER_CD)
         self.assertEqual(
-            qobuz_format_id_for_policy(config_format_id=27, policy=policy),
+            qobuz_format_id_for_preference(config_format_id=27, preference=preference),
             6,
         )
 
-    def test_qobuz_format_id_compressed_policy(self) -> None:
-        policy = PlaybackQualityPolicy(
-            target_tier=QUALITY_FILTER_COMPRESSED,
-            allowed_tiers=frozenset({QUALITY_FILTER_COMPRESSED}),
-        )
+    def test_qobuz_format_id_compressed_preference(self) -> None:
+        preference = PlaybackPreference(max_tier=QUALITY_FILTER_COMPRESSED)
         self.assertEqual(
-            qobuz_format_id_for_policy(config_format_id=6, policy=policy),
+            qobuz_format_id_for_preference(config_format_id=6, preference=preference),
             5,
         )
 
-    def test_qobuz_format_id_hi_res_policy(self) -> None:
-        policy = PlaybackQualityPolicy(
-            target_tier=QUALITY_FILTER_HI_RES,
-            allowed_tiers=frozenset({QUALITY_FILTER_HI_RES}),
-        )
+    def test_qobuz_format_id_hi_res_preference(self) -> None:
+        preference = PlaybackPreference(max_tier=QUALITY_FILTER_HI_RES)
         self.assertEqual(
-            qobuz_format_id_for_policy(config_format_id=6, policy=policy),
-            7,
+            qobuz_format_id_for_preference(config_format_id=27, preference=preference),
+            27,
+        )
+
+    def test_classify_local_no_guess_when_empty(self) -> None:
+        self.assertEqual(
+            classify_local_catalog(
+                max_bit_depth=None,
+                max_sample_rate=None,
+                has_lossless=False,
+                has_lossy=False,
+            ),
+            frozenset(),
+        )
+
+    def test_release_has_tier_properties(self) -> None:
+        release = Release(
+            id="local:1",
+            title="Album",
+            artist_name="Artist",
+            source=Source.LOCAL,
+            available_quality_tiers=frozenset(
+                {QUALITY_FILTER_COMPRESSED, QUALITY_FILTER_CD, QUALITY_FILTER_HI_RES},
+            ),
+        )
+        self.assertTrue(release.has_compressed)
+        self.assertTrue(release.has_cd)
+        self.assertTrue(release.has_hires)
+
+    def test_qobuz_format_candidates_for_preference(self) -> None:
+        all_pref = playback_preference_from_shell(frozenset())
+        self.assertEqual(
+            qobuz_format_candidates_for_preference(
+                config_format_id=27,
+                preference=all_pref,
+            ),
+            [27, 7, 6, 5],
+        )
+        cd_pref = PlaybackPreference(max_tier=QUALITY_FILTER_CD)
+        self.assertEqual(
+            qobuz_format_candidates_for_preference(
+                config_format_id=27,
+                preference=cd_pref,
+            ),
+            [6, 5],
         )
 
     def test_qobuz_hires_streamable_at_cd_peak_stays_cd_only(self) -> None:
@@ -345,15 +324,7 @@ class ReleaseQualityTests(unittest.TestCase):
             "hires_streamable": True,
         }
         self.assertEqual(tier_from_qobuz_album(album), QUALITY_FILTER_CD)
-        self.assertEqual(
-            tiers_from_qobuz_album(album),
-            frozenset(
-                {
-                    QUALITY_FILTER_COMPRESSED,
-                    QUALITY_FILTER_CD,
-                },
-            ),
-        )
+        self.assertEqual(tiers_from_qobuz_album(album), frozenset({QUALITY_FILTER_CD}))
 
     def test_qobuz_dual_format_matches_hi_res_filter(self) -> None:
         release = Release(
@@ -362,6 +333,7 @@ class ReleaseQualityTests(unittest.TestCase):
             artist_name="Artist",
             source=Source.QOBUZ,
             peak_quality_tier=QUALITY_FILTER_CD,
+            catalog_quality_ready=True,
             available_quality_tiers=tiers_from_qobuz_album(
                 {
                     "maximum_bit_depth": 16,

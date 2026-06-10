@@ -17,8 +17,9 @@ from tunes_player.core.backends.qobuz.convert import cover_url, release_from_qob
 from tunes_player.core.release_quality import (
     QUALITY_FILTER_CD,
     QUALITY_FILTER_HI_RES,
+    playback_preference_from_shell,
 )
-from tunes_player.core.models import Source
+from tunes_player.core.models import Release, Source
 
 
 class TestQobuzIds(unittest.TestCase):
@@ -249,6 +250,44 @@ class TestReleaseFromQobuz(unittest.TestCase):
         }
         release = release_from_qobuz(album)
         self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_HI_RES)
+
+
+class TestQobuzGetFileUrlNegotiation(unittest.TestCase):
+    def test_get_file_url_negotiates_hi_res_format(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        preference = playback_preference_from_shell(frozenset())
+        calls: list[int] = []
+
+        def fake_request(track_id: str, *, format_id: int) -> dict:
+            calls.append(format_id)
+            if format_id == 27:
+                return {
+                    "url": "https://stream.example/44",
+                    "bit_depth": 16,
+                    "sampling_rate": 44.1,
+                }
+            return {
+                "url": "https://stream.example/96",
+                "bit_depth": 24,
+                "sampling_rate": 96,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "qobuz.json"
+            client = QobuzClient(session, app_id="1", app_secret="secret")
+            client._user_auth_token = "token"  # noqa: SLF001
+            with patch.object(client, "_request_file_url", side_effect=fake_request):
+                stream = client._get_file_url(  # noqa: SLF001
+                    "12345",
+                    playback_preference=preference,
+                )
+
+        self.assertEqual(calls, [27, 7])
+        self.assertEqual(stream["sampling_rate"], 96)
+        self.assertEqual(stream["bit_depth"], 24)
 
 
 class TestUserFacingApiError(unittest.TestCase):

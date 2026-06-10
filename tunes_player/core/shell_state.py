@@ -182,11 +182,9 @@ def release_to_cache_payload(release: Release) -> dict[str, Any]:
         payload["art_uri"] = release.art_uri
     if release.duration_sec is not None:
         payload["duration_sec"] = release.duration_sec
-    payload["peak_quality_tier"] = (
-        release.peak_quality_tier
-        if release.peak_quality_tier in _VALID_QUALITY_FILTERS
-        else QUALITY_FILTER_COMPRESSED
-    )
+    if release.peak_quality_tier in _VALID_QUALITY_FILTERS:
+        payload["peak_quality_tier"] = release.peak_quality_tier
+    payload["catalog_quality_ready"] = release.catalog_quality_ready
     available = release_available_quality_tiers(release)
     if available:
         payload["available_quality_tiers"] = sorted(available)
@@ -223,8 +221,8 @@ def release_from_cache_payload(raw: object) -> Release | None:
         track_count = int(raw.get("track_count", 0))
     except (TypeError, ValueError):
         track_count = 0
-    peak_quality_tier_raw = raw.get("peak_quality_tier", QUALITY_FILTER_COMPRESSED)
-    peak_quality_tier = QUALITY_FILTER_COMPRESSED
+    peak_quality_tier = ""
+    peak_quality_tier_raw = raw.get("peak_quality_tier")
     if (
         isinstance(peak_quality_tier_raw, str)
         and peak_quality_tier_raw in _VALID_QUALITY_FILTERS
@@ -240,6 +238,12 @@ def release_from_cache_payload(raw: object) -> Release | None:
         )
         if parsed:
             available_quality_tiers = parsed
+    catalog_quality_ready = raw.get("catalog_quality_ready")
+    if catalog_quality_ready is None:
+        source = Source(source_raw)
+        catalog_quality_ready = source == Source.LOCAL
+    elif not isinstance(catalog_quality_ready, bool):
+        catalog_quality_ready = bool(catalog_quality_ready)
     return Release(
         id=release_id,
         title=title,
@@ -255,6 +259,7 @@ def release_from_cache_payload(raw: object) -> Release | None:
         duration_sec=float(duration) if duration is not None else None,
         peak_quality_tier=peak_quality_tier,
         available_quality_tiers=available_quality_tiers,
+        catalog_quality_ready=catalog_quality_ready,
     )
 
 
@@ -319,14 +324,13 @@ def refresh_local_release_art_uris(
 def cached_releases_have_quality_tiers(
     payloads: tuple[dict[str, Any], ...] | list[dict[str, Any]],
 ) -> bool:
-    """True when every cached row includes a valid peak_quality_tier."""
+    """True when every cached row uses the catalog_quality_ready cache schema."""
     if not payloads:
         return False
     for item in payloads:
         if not isinstance(item, dict):
             return False
-        tier = item.get("peak_quality_tier")
-        if not isinstance(tier, str) or tier not in _VALID_QUALITY_FILTERS:
+        if "catalog_quality_ready" not in item:
             return False
     return True
 
@@ -562,6 +566,8 @@ def quality_tiers_in_selection(
     """Distinct quality tiers in *releases*, in stable bucket order."""
     present: set[str] = set()
     for release in releases:
+        if not release.catalog_quality_ready:
+            continue
         present.update(release_available_quality_tiers(release))
     return tuple(tier for tier in _QUALITY_TIER_ORDER if tier in present)
 

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from tunes_player.core.backends.tidal.convert import (
     _resolve_tidal_release_type,
     release_from_tidal,
-    resolve_tidal_grid_peak_quality_tier,
+    release_stub_from_tidal,
 )
 from tunes_player.core.models import ReleaseType
 from tunes_player.core.release_quality import (
@@ -76,7 +76,6 @@ class TidalConvertTests(unittest.TestCase):
             artists=[SimpleNamespace(name="Artist")],
             release_date=None,
         )
-        session = _FakeSession(full_type="ALBUM")
 
         class _SpySession(_FakeSession):
             def album(self, album_id: object) -> SimpleNamespace:
@@ -93,6 +92,9 @@ class TidalConvertTests(unittest.TestCase):
             num_tracks=2,
             artists=[SimpleNamespace(name="Artist")],
             release_date=None,
+            audio_quality="LOSSLESS",
+            media_metadata_tags=None,
+            audio_modes=[],
             tracks=lambda: [
                 SimpleNamespace(audio_quality="HIGH", media_metadata_tags=None),
                 SimpleNamespace(
@@ -102,10 +104,12 @@ class TidalConvertTests(unittest.TestCase):
             ],
         )
         session = _FakeSession()
-        release = release_from_tidal(session, sparse, resolve_peak_quality=True)
+        tracks = list(sparse.tracks())
+        release = release_from_tidal(session, sparse, tracks=tracks)
         self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_HI_RES)
+        self.assertTrue(release.catalog_quality_ready)
 
-    def test_release_from_tidal_skips_track_fetch_by_default(self) -> None:
+    def test_release_stub_is_pending_without_tiers(self) -> None:
         sparse = SimpleNamespace(
             id=42,
             type="ALBUM",
@@ -117,31 +121,36 @@ class TidalConvertTests(unittest.TestCase):
             media_metadata_tags=None,
             audio_modes=[],
             tracks=lambda: (_ for _ in ()).throw(
-                AssertionError("tracks() must not run for grid conversion"),
+                AssertionError("tracks() must not run for stub conversion"),
+            ),
+        )
+        session = _FakeSession()
+        release = release_stub_from_tidal(session, sparse)
+        self.assertFalse(release.catalog_quality_ready)
+        self.assertEqual(release.available_quality_tiers, frozenset())
+        self.assertEqual(release.peak_quality_tier, "")
+
+    def test_classified_release_from_album_metadata(self) -> None:
+        sparse = SimpleNamespace(
+            id=42,
+            type="ALBUM",
+            name="Hi-Fi",
+            num_tracks=2,
+            artists=[SimpleNamespace(name="Artist")],
+            release_date=None,
+            audio_quality="LOSSLESS",
+            media_metadata_tags=None,
+            audio_modes=[],
+            tracks=lambda: (_ for _ in ()).throw(
+                AssertionError("tracks() must not run for album-only classification"),
             ),
         )
         session = _FakeSession()
         release = release_from_tidal(session, sparse)
         self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_CD)
+        self.assertTrue(release.catalog_quality_ready)
 
-    def test_resolve_tidal_grid_peak_quality_refetches_sparse_album(self) -> None:
-        sparse = SimpleNamespace(id=99, audio_quality="", media_metadata_tags=None, audio_modes=[])
-        session = _FakeSession(full_type="ALBUM")
-
-        class _RefetchSession(_FakeSession):
-            def album(self, album_id: object) -> SimpleNamespace:
-                return SimpleNamespace(
-                    id=album_id,
-                    audio_quality="HI_RES_LOSSLESS",
-                    media_metadata_tags=["HIRES_LOSSLESS"],
-                    audio_modes=[],
-                    sample_rate=96000,
-                )
-
-        tier = resolve_tidal_grid_peak_quality_tier(_RefetchSession(), sparse)
-        self.assertEqual(tier, QUALITY_FILTER_HI_RES)
-
-    def test_release_peak_quality_fetches_sparse_album_tracks(self) -> None:
+    def test_release_peak_quality_from_track_list(self) -> None:
         sparse = SimpleNamespace(
             id=77,
             type="ALBUM",
@@ -149,14 +158,18 @@ class TidalConvertTests(unittest.TestCase):
             num_tracks=1,
             artists=[SimpleNamespace(name="Artist")],
             release_date=None,
+            audio_quality="",
+            media_metadata_tags=None,
+            audio_modes=[],
         )
         session = _FakeSession(
             tracks=[
                 SimpleNamespace(audio_quality="HIGH", media_metadata_tags=None),
             ],
         )
-        release = release_from_tidal(session, sparse, resolve_peak_quality=True)
-        self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_COMPRESSED)
+        tracks = list(session._tracks)
+        release = release_from_tidal(session, sparse, tracks=tracks)
+        self.assertIn(QUALITY_FILTER_COMPRESSED, release.available_quality_tiers)
 
 
 if __name__ == "__main__":

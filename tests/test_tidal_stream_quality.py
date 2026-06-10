@@ -6,7 +6,7 @@ import unittest
 from types import SimpleNamespace
 
 from tunes_player.core.backends.tidal.stream_quality import (
-    cap_session_quality_for_policy,
+    cap_session_quality_for_preference,
     negotiate_stream_payload,
     payload_is_hi_res_stream,
     playback_quality_candidates,
@@ -17,21 +17,13 @@ from tunes_player.core.backends.tidal.stream_quality import (
 from tunes_player.core.release_quality import (
     QUALITY_FILTER_CD,
     QUALITY_FILTER_HI_RES,
-    PlaybackQualityPolicy,
-    playback_policy_for_play,
+    playback_preference_from_shell,
 )
 
-_ALL_POLICY = playback_policy_for_play(
-    enabled_quality_tiers=frozenset(),
-    release=None,
-)
-_CD_POLICY = playback_policy_for_play(
-    enabled_quality_tiers=frozenset({QUALITY_FILTER_CD}),
-    release=None,
-)
-_HI_RES_POLICY = playback_policy_for_play(
-    enabled_quality_tiers=frozenset({QUALITY_FILTER_HI_RES}),
-    release=None,
+_ALL_PREFERENCE = playback_preference_from_shell(frozenset())
+_CD_PREFERENCE = playback_preference_from_shell(frozenset({QUALITY_FILTER_CD}))
+_HI_RES_PREFERENCE = playback_preference_from_shell(
+    frozenset({QUALITY_FILTER_HI_RES}),
 )
 
 
@@ -45,29 +37,33 @@ class TidalStreamQualityTests(unittest.TestCase):
             "HI_RES_LOSSLESS",
         )
 
-    def test_cd_track_candidates_skip_hi_res_first_when_session_hi_res(self) -> None:
+    def test_cd_track_candidates_respect_cd_preference_on_hi_res_session(self) -> None:
         track = SimpleNamespace(audio_quality="LOSSLESS", media_metadata_tags=None)
         self.assertEqual(
-            playback_quality_candidates("HI_RES_LOSSLESS", track, policy=_ALL_POLICY),
-            ["LOSSLESS", "HI_RES", "HIGH"],
+            playback_quality_candidates(
+                "HI_RES_LOSSLESS",
+                track,
+                preference=_CD_PREFERENCE,
+            ),
+            ["LOSSLESS", "HIGH"],
         )
 
-    def test_cd_policy_caps_hi_res_session_and_track(self) -> None:
+    def test_cd_preference_caps_hi_res_session_and_track(self) -> None:
         track = SimpleNamespace(
             audio_quality="HI_RES_LOSSLESS",
             media_metadata_tags=["HIRES_LOSSLESS"],
         )
         self.assertEqual(
-            cap_session_quality_for_policy("HI_RES_LOSSLESS", _CD_POLICY),
+            cap_session_quality_for_preference("HI_RES_LOSSLESS", _CD_PREFERENCE),
             "LOSSLESS",
         )
         self.assertEqual(
             playback_quality_candidates(
                 "HI_RES_LOSSLESS",
                 track,
-                policy=_CD_POLICY,
+                preference=_CD_PREFERENCE,
             ),
-            ["LOSSLESS"],
+            ["LOSSLESS", "HIGH"],
         )
 
     def test_hi_res_track_candidates(self) -> None:
@@ -79,7 +75,7 @@ class TidalStreamQualityTests(unittest.TestCase):
             playback_quality_candidates(
                 "HI_RES_LOSSLESS",
                 track,
-                policy=_ALL_POLICY,
+                preference=_ALL_PREFERENCE,
             ),
             ["HI_RES_LOSSLESS", "HI_RES", "LOSSLESS", "HIGH"],
         )
@@ -87,7 +83,7 @@ class TidalStreamQualityTests(unittest.TestCase):
     def test_hifi_session_candidates(self) -> None:
         track = SimpleNamespace(audio_quality="LOSSLESS", media_metadata_tags=None)
         self.assertEqual(
-            playback_quality_candidates("LOSSLESS", track, policy=_ALL_POLICY),
+            playback_quality_candidates("LOSSLESS", track, preference=_ALL_PREFERENCE),
             ["LOSSLESS", "HIGH"],
         )
 
@@ -95,7 +91,7 @@ class TidalStreamQualityTests(unittest.TestCase):
         """Catalog HIGH is unreliable; paid sessions should try LOSSLESS first."""
         track = SimpleNamespace(audio_quality="HIGH", media_metadata_tags=None)
         self.assertEqual(
-            playback_quality_candidates("LOSSLESS", track, policy=_ALL_POLICY),
+            playback_quality_candidates("LOSSLESS", track, preference=_ALL_PREFERENCE),
             ["LOSSLESS", "HIGH"],
         )
 
@@ -114,7 +110,7 @@ class TidalStreamQualityTests(unittest.TestCase):
         candidates = playback_quality_candidates(
             "HI_RES_LOSSLESS",
             track,
-            policy=_ALL_POLICY,
+            preference=_CD_PREFERENCE,
         )
         payload, chosen = negotiate_stream_payload(candidates, request)
         self.assertEqual(calls, ["LOSSLESS"])
@@ -140,7 +136,7 @@ class TidalStreamQualityTests(unittest.TestCase):
         candidates = playback_quality_candidates(
             "HI_RES_LOSSLESS",
             track,
-            policy=_ALL_POLICY,
+            preference=_ALL_PREFERENCE,
         )
         payload, chosen = negotiate_stream_payload(candidates, request)
         self.assertEqual(calls, ["HI_RES_LOSSLESS", "HI_RES", "LOSSLESS"])
@@ -157,15 +153,15 @@ class TidalStreamQualityTests(unittest.TestCase):
         track = SimpleNamespace(audio_quality="HIGH", media_metadata_tags=["LOSSLESS"])
         self.assertGreaterEqual(track_peak_quality(track), 2)
 
-    def test_hi_res_policy_prepends_hi_res_on_cd_track(self) -> None:
+    def test_hi_res_preference_prepends_hi_res_on_cd_track(self) -> None:
         track = SimpleNamespace(audio_quality="LOSSLESS", media_metadata_tags=None)
         self.assertEqual(
             playback_quality_candidates(
                 "HI_RES_LOSSLESS",
                 track,
-                policy=_HI_RES_POLICY,
+                preference=_HI_RES_PREFERENCE,
             ),
-            ["HI_RES_LOSSLESS", "HI_RES"],
+            ["HI_RES_LOSSLESS", "HI_RES", "LOSSLESS", "HIGH"],
         )
 
     def test_payload_is_hi_res_stream_uses_sample_rate_not_api_label(self) -> None:
@@ -209,27 +205,54 @@ class TidalStreamQualityTests(unittest.TestCase):
         candidates = playback_quality_candidates(
             "HI_RES_LOSSLESS",
             track,
-            policy=_HI_RES_POLICY,
+            preference=_HI_RES_PREFERENCE,
         )
         payload, chosen = negotiate_stream_payload(
             candidates,
             request,
-            policy=_HI_RES_POLICY,
+            preference=_HI_RES_PREFERENCE,
         )
         self.assertEqual(calls, ["HI_RES_LOSSLESS", "HI_RES"])
         self.assertEqual(chosen, "HI_RES")
         self.assertEqual(payload["sampleRate"], 96000)
 
-    def test_hi_res_policy_strict_candidates(self) -> None:
+    def test_hi_res_preference_includes_lossless_fallback(self) -> None:
         track = SimpleNamespace(audio_quality="LOSSLESS", media_metadata_tags=None)
         self.assertEqual(
             playback_quality_candidates(
                 "HI_RES_LOSSLESS",
                 track,
-                policy=_HI_RES_POLICY,
+                preference=_HI_RES_PREFERENCE,
             ),
-            ["HI_RES_LOSSLESS", "HI_RES"],
+            ["HI_RES_LOSSLESS", "HI_RES", "LOSSLESS", "HIGH"],
         )
+
+    def test_negotiate_retries_lossless_cd_when_hi_res_remains(self) -> None:
+        calls: list[str] = []
+
+        def request(quality: str) -> dict:
+            calls.append(quality)
+            if quality == "LOSSLESS":
+                return {
+                    "audioQuality": "LOSSLESS",
+                    "bitDepth": 16,
+                    "sampleRate": 44100,
+                }
+            return {
+                "audioQuality": "HI_RES",
+                "bitDepth": 24,
+                "sampleRate": 96000,
+            }
+
+        candidates = ["LOSSLESS", "HI_RES", "HIGH"]
+        payload, chosen = negotiate_stream_payload(
+            candidates,
+            request,
+            preference=_ALL_PREFERENCE,
+        )
+        self.assertEqual(calls, ["LOSSLESS", "HI_RES"])
+        self.assertEqual(chosen, "HI_RES")
+        self.assertEqual(payload["sampleRate"], 96000)
 
 
 if __name__ == "__main__":

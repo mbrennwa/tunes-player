@@ -16,8 +16,8 @@ from tunes_player.core.models import (
     Track,
 )
 from tunes_player.core.release_quality import (
-    tier_from_qobuz_album,
-    tiers_from_qobuz_album,
+    classify_qobuz_catalog,
+    peak_quality_tier_from_tiers,
 )
 
 
@@ -64,11 +64,11 @@ def _year_from_album(album: dict[str, Any]) -> int | None:
     return None
 
 
-def release_from_qobuz(
+def _release_common_fields(
     album: dict[str, Any],
     *,
     owned_track_count: int | None = None,
-) -> Release:
+) -> tuple[str, str, int | None, int, object, object, float | None, str | None, str | None]:
     album_id = str(album.get("id") or album.get("qobuz_id") or "")
     title = str(album.get("title") or "Unknown")
     artist_name = _artist_name_from_album(album)
@@ -94,8 +94,39 @@ def release_from_qobuz(
     duration_sec = float(duration) if duration is not None else None
     genre = album.get("genre")
     genre_name = genre.get("name") if isinstance(genre, dict) else None
-    peak_quality_tier = tier_from_qobuz_album(album)
-    available_quality_tiers = tiers_from_qobuz_album(album)
+    art_uri = cover_url(album.get("image"))
+    return (
+        album_id,
+        title,
+        artist_name,
+        expected,
+        track_count,
+        completeness,
+        release_type,
+        duration_sec,
+        str(genre_name) if genre_name else None,
+        art_uri,
+    )
+
+
+def release_stub_from_qobuz(
+    album: dict[str, Any],
+    *,
+    owned_track_count: int | None = None,
+) -> Release:
+    """Phase-1 browse release without catalog quality classification."""
+    (
+        album_id,
+        title,
+        artist_name,
+        expected,
+        track_count,
+        completeness,
+        release_type,
+        duration_sec,
+        genre_name,
+        art_uri,
+    ) = _release_common_fields(album, owned_track_count=owned_track_count)
     return Release(
         id=qobuz_ids.album_id(album_id),
         title=title,
@@ -106,11 +137,51 @@ def release_from_qobuz(
         expected_track_count=expected,
         completeness=completeness,
         release_type=release_type,
-        genre=str(genre_name) if genre_name else None,
-        art_uri=cover_url(album.get("image")),
+        genre=genre_name,
+        art_uri=art_uri,
+        duration_sec=duration_sec,
+        peak_quality_tier="",
+        available_quality_tiers=frozenset(),
+        catalog_quality_ready=False,
+    )
+
+
+def release_from_qobuz(
+    album: dict[str, Any],
+    *,
+    owned_track_count: int | None = None,
+) -> Release:
+    """Classified Qobuz release from album/get JSON."""
+    (
+        album_id,
+        title,
+        artist_name,
+        expected,
+        track_count,
+        completeness,
+        release_type,
+        duration_sec,
+        genre_name,
+        art_uri,
+    ) = _release_common_fields(album, owned_track_count=owned_track_count)
+    available_quality_tiers = classify_qobuz_catalog(album)
+    peak_quality_tier = peak_quality_tier_from_tiers(available_quality_tiers)
+    return Release(
+        id=qobuz_ids.album_id(album_id),
+        title=title,
+        artist_name=artist_name,
+        source=Source.QOBUZ,
+        year=_year_from_album(album),
+        track_count=track_count,
+        expected_track_count=expected,
+        completeness=completeness,
+        release_type=release_type,
+        genre=genre_name,
+        art_uri=art_uri,
         duration_sec=duration_sec,
         peak_quality_tier=peak_quality_tier,
         available_quality_tiers=available_quality_tiers,
+        catalog_quality_ready=True,
     )
 
 

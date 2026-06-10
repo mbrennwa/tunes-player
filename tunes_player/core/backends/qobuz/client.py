@@ -49,6 +49,53 @@ def _user_facing_api_error(message: str, *, endpoint: str) -> str:
     return message
 
 
+_ACOUSTIC_TIER_RANK = {
+    "compressed": 0,
+    "cd": 1,
+    "hi_res": 2,
+}
+
+
+def _qobuz_stream_acoustic_tier(stream: dict[str, Any]) -> str:
+    from tunes_player.core.release_quality import (
+        QUALITY_FILTER_COMPRESSED,
+        _normalize_sample_rate_hz,
+        acoustic_tier_from_stream,
+    )
+
+    if not stream.get("url"):
+        return QUALITY_FILTER_COMPRESSED
+    rate_hz = _normalize_sample_rate_hz(stream.get("sampling_rate"))
+    return acoustic_tier_from_stream(
+        bit_depth=stream.get("bit_depth"),
+        sample_rate_hz=rate_hz,
+        lossless=True,
+    )
+
+
+def _qobuz_minimum_acoustic_tier(preference: object) -> str:
+    from tunes_player.core.release_quality import (
+        QUALITY_FILTER_CD,
+        QUALITY_FILTER_COMPRESSED,
+        QUALITY_FILTER_HI_RES,
+        PlaybackPreference,
+    )
+
+    if not isinstance(preference, PlaybackPreference):
+        return QUALITY_FILTER_COMPRESSED
+    if preference.max_tier == QUALITY_FILTER_HI_RES:
+        return QUALITY_FILTER_HI_RES
+    if preference.max_tier == QUALITY_FILTER_CD:
+        return QUALITY_FILTER_CD
+    if preference.max_tier == QUALITY_FILTER_COMPRESSED:
+        return QUALITY_FILTER_COMPRESSED
+    return QUALITY_FILTER_COMPRESSED
+
+
+def _acoustic_tier_meets_minimum(tier: str, minimum: str) -> bool:
+    return _ACOUSTIC_TIER_RANK.get(tier, 0) >= _ACOUSTIC_TIER_RANK.get(minimum, 0)
+
+
 def sign_get_file_url(
     *,
     track_id: str,
@@ -153,9 +200,7 @@ class QobuzClient:
         for item in albums.get("items") or []:
             if not isinstance(item, dict):
                 continue
-            release = convert.release_from_qobuz(
-                self._enrich_qobuz_album_quality_metadata(item),
-            )
+            release = convert.release_stub_from_qobuz(item)
             if release.id not in seen:
                 seen.add(release.id)
                 releases.append(release)
@@ -167,57 +212,11 @@ class QobuzClient:
             album = item.get("album")
             if not isinstance(album, dict):
                 continue
-            release = convert.release_from_qobuz(
-                self._enrich_qobuz_album_quality_metadata(album),
-            )
+            release = convert.release_stub_from_qobuz(album)
             if release.id not in seen:
                 seen.add(release.id)
                 releases.append(release)
         return releases[:limit]
-
-    def _enrich_qobuz_album_quality_metadata(
-        self,
-        album: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Merge album/get quality fields when search JSON omits hi-res availability."""
-        from tunes_player.core.release_quality import (
-            QUALITY_FILTER_HI_RES,
-            tiers_from_qobuz_album,
-        )
-
-        if QUALITY_FILTER_HI_RES in tiers_from_qobuz_album(album):
-            return album
-        album_id = album.get("id") or album.get("qobuz_id")
-        if album_id is None:
-            return album
-        summary = self._fetch_album_summary(str(album_id))
-        if not isinstance(summary, dict):
-            return album
-        merged = dict(album)
-        for key in (
-            "hires",
-            "hires_streamable",
-            "maximum_bit_depth",
-            "maximum_sampling_rate",
-            "maximum_technical_specifications",
-        ):
-            value = summary.get(key)
-            if value is not None:
-                merged[key] = value
-        summary_tracks = summary.get("tracks")
-        if isinstance(summary_tracks, dict):
-            items = summary_tracks.get("items")
-            if isinstance(items, list) and items:
-                merged_tracks = merged.get("tracks")
-                if not isinstance(merged_tracks, dict):
-                    merged["tracks"] = {"items": items[:5]}
-                else:
-                    existing = list(merged_tracks.get("items") or [])
-                    if not existing:
-                        merged_tracks = dict(merged_tracks)
-                        merged_tracks["items"] = items[:5]
-                        merged["tracks"] = merged_tracks
-        return merged
 
     def list_new_release_items(
         self,
@@ -258,7 +257,7 @@ class QobuzClient:
                         if added_ns < cutoff_ns:
                             continue
                         batch_has_recent = True
-                        release = convert.release_from_qobuz(raw)
+                        release = convert.release_stub_from_qobuz(raw)
                         if release.id in seen:
                             continue
                         seen.add(release.id)
@@ -312,7 +311,7 @@ class QobuzClient:
                     for raw in batch:
                         if not isinstance(raw, dict):
                             continue
-                        release = convert.release_from_qobuz(raw)
+                        release = convert.release_stub_from_qobuz(raw)
                         if release.id in seen:
                             continue
                         seen.add(release.id)
@@ -410,12 +409,12 @@ class QobuzClient:
         self,
         track_id: str,
         *,
-        playback_quality_policy: object | None = None,
+        playback_preference: object | None = None,
     ) -> PlayableSource | None:
         from tunes_player.core.release_quality import (
-            PlaybackQualityPolicy,
-            playback_policy_for_play,
-            qobuz_format_id_for_policy,
+            PlaybackPreference,
+            playback_preference_from_shell,
+            qobuz_format_id_for_preference,
         )
 
         numeric = qobuz_ids.parse_prefixed_id(track_id, "track")
@@ -426,22 +425,19 @@ class QobuzClient:
         if not isinstance(data, dict):
             return None
         metadata = convert.track_from_qobuz(data)
-        policy = (
-            playback_quality_policy
-            if isinstance(playback_quality_policy, PlaybackQualityPolicy)
-            else playback_policy_for_play(
-                enabled_quality_tiers=frozenset(),
-                release=None,
-            )
+        preference = (
+            playback_preference
+            if isinstance(playback_preference, PlaybackPreference)
+            else playback_preference_from_shell(frozenset())
         )
 
-        format_id = qobuz_format_id_for_policy(
+        format_id = qobuz_format_id_for_preference(
             config_format_id=self._format_id,
-            policy=policy,
+            preference=preference,
         )
         stream = self._get_file_url(
             numeric,
-            playback_quality_policy=policy,
+            playback_preference=preference,
         )
         from tunes_player.core.playback_quality import (
             qobuz_format_label_from_stream,
@@ -504,26 +500,55 @@ class QobuzClient:
         self,
         track_id: str,
         *,
-        playback_quality_policy: object | None = None,
+        playback_preference: object | None = None,
     ) -> dict[str, Any]:
         from tunes_player.core.release_quality import (
-            PlaybackQualityPolicy,
-            playback_policy_for_play,
-            qobuz_format_id_for_policy,
+            QUALITY_FILTER_HI_RES,
+            PlaybackPreference,
+            playback_preference_from_shell,
+            qobuz_format_candidates_for_preference,
         )
 
-        policy = (
-            playback_quality_policy
-            if isinstance(playback_quality_policy, PlaybackQualityPolicy)
-            else playback_policy_for_play(
-                enabled_quality_tiers=frozenset(),
-                release=None,
-            )
+        preference = (
+            playback_preference
+            if isinstance(playback_preference, PlaybackPreference)
+            else playback_preference_from_shell(frozenset())
         )
-        format_id = qobuz_format_id_for_policy(
+        candidates = qobuz_format_candidates_for_preference(
             config_format_id=self._format_id,
-            policy=policy,
+            preference=preference,
         )
+        if not candidates:
+            candidates = [27]
+
+        minimum_tier = _qobuz_minimum_acoustic_tier(preference)
+        last_stream: dict[str, Any] | None = None
+        for index, format_id in enumerate(candidates):
+            stream = self._request_file_url(track_id, format_id=format_id)
+            last_stream = stream
+            if not stream.get("url"):
+                continue
+            acoustic_tier = _qobuz_stream_acoustic_tier(stream)
+            is_last = index + 1 >= len(candidates)
+            if _acoustic_tier_meets_minimum(acoustic_tier, minimum_tier) or is_last:
+                if (
+                    minimum_tier == QUALITY_FILTER_HI_RES
+                    and acoustic_tier != QUALITY_FILTER_HI_RES
+                    and is_last
+                ):
+                    log.warning(
+                        "Qobuz track %s: hi-res target but stream resolved to %s "
+                        "(format_id=%s)",
+                        track_id,
+                        acoustic_tier,
+                        format_id,
+                    )
+                return stream
+        if last_stream is not None:
+            return last_stream
+        return self._request_file_url(track_id, format_id=candidates[-1])
+
+    def _request_file_url(self, track_id: str, *, format_id: int) -> dict[str, Any]:
         request_ts = time.time()
         request_sig = sign_get_file_url(
             track_id=track_id,
