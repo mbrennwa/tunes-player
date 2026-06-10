@@ -225,6 +225,27 @@ def payload_is_hi_res_stream(payload: dict[str, Any]) -> bool:
     return is_acoustic_hi_res(payload_sample_rate_hz(payload))
 
 
+def should_warn_hi_res_filter_miss(
+    payload: dict[str, Any],
+    track: _TrackQualityInfo,
+    *,
+    preference: object,
+) -> bool:
+    """True when catalog metadata promised hi-res but playback did not deliver it."""
+    from tunes_player.core.release_quality import (
+        QUALITY_FILTER_HI_RES,
+        PlaybackPreference,
+    )
+
+    if not isinstance(preference, PlaybackPreference):
+        return False
+    if preference.max_tier != QUALITY_FILTER_HI_RES:
+        return False
+    if payload_is_hi_res_stream(payload):
+        return False
+    return track_peak_quality(track) >= _QUALITY_RANK["HI_RES"]
+
+
 def should_retry_after_high(
     payload: dict[str, Any],
     *,

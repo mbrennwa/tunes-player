@@ -836,17 +836,17 @@ class TidalClient:
             preference=preference,
         )
         from tunes_player.core.backends.tidal.stream_quality import (
-            payload_is_hi_res_stream,
+            should_warn_hi_res_filter_miss,
         )
-        from tunes_player.core.release_quality import QUALITY_FILTER_HI_RES
 
         resolved = payload_audio_quality(payload)
-        if (
-            preference.max_tier == QUALITY_FILTER_HI_RES
-            and not payload_is_hi_res_stream(payload)
+        if should_warn_hi_res_filter_miss(
+            payload,
+            tidal_track,
+            preference=preference,
         ):
             log.warning(
-                "TIDAL track %s: hi-res filter active but stream resolved to %s",
+                "TIDAL track %s: catalog hi-res but stream resolved to %s",
                 track_id,
                 resolved,
             )

@@ -11,6 +11,7 @@ from tunes_player.core.backends.tidal.stream_quality import (
     payload_is_hi_res_stream,
     playback_quality_candidates,
     session_quality_for_subscription,
+    should_warn_hi_res_filter_miss,
     subscription_allows_hi_res,
     track_peak_quality,
 )
@@ -253,6 +254,39 @@ class TidalStreamQualityTests(unittest.TestCase):
         self.assertEqual(calls, ["LOSSLESS", "HI_RES"])
         self.assertEqual(chosen, "HI_RES")
         self.assertEqual(payload["sampleRate"], 96000)
+
+    def test_should_warn_hi_res_filter_miss_only_for_catalog_hi_res(self) -> None:
+        cd_track = SimpleNamespace(audio_quality="LOSSLESS", media_metadata_tags=None)
+        hi_res_track = SimpleNamespace(
+            audio_quality="HI_RES_LOSSLESS",
+            media_metadata_tags=["HIRES_LOSSLESS"],
+        )
+        cd_payload = {
+            "audioQuality": "LOSSLESS",
+            "bitDepth": 16,
+            "sampleRate": 44100,
+        }
+        self.assertFalse(
+            should_warn_hi_res_filter_miss(
+                cd_payload,
+                cd_track,
+                preference=_HI_RES_PREFERENCE,
+            ),
+        )
+        self.assertTrue(
+            should_warn_hi_res_filter_miss(
+                cd_payload,
+                hi_res_track,
+                preference=_HI_RES_PREFERENCE,
+            ),
+        )
+        self.assertFalse(
+            should_warn_hi_res_filter_miss(
+                cd_payload,
+                hi_res_track,
+                preference=_CD_PREFERENCE,
+            ),
+        )
 
 
 if __name__ == "__main__":
