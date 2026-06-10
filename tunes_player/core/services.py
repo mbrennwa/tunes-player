@@ -2566,7 +2566,7 @@ class PlayerService:
     def _mpv_volume_level(self) -> float:
         if self._unity_gain_profile():
             return 1.0
-        return self._volume
+        return self._output_volume_level()
 
     def _mpv_audio_device(self) -> str | None:
         if self._volume_controller is None:
