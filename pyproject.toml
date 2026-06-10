@@ -46,6 +46,7 @@ include = ["tunes_player*"]
 
 [tool.setuptools.package-data]
 tunes_player = ["ui/gtk/*.css"]
+"tunes_player.platform.linux.data" = ["*.quirks"]
 
 [tool.deb]
 # Debian/Ubuntu packages provided by the distro (not PyPI).

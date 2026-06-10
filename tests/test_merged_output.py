@@ -88,7 +88,7 @@ class MergedOutputTests(unittest.TestCase):
                 ),
                 patch.object(controller, "_list_sink_endpoints", return_value=[]),
                 patch(
-                    "tunes_player.platform.linux.alsa_mixer.alsa_mixer_available_for_endpoint",
+                    "tunes_player.platform.linux.alsa_mixer.alsa_mixer_adjustable_for_endpoint",
                     return_value=True,
                 ),
             ):
@@ -115,7 +115,7 @@ class MergedOutputTests(unittest.TestCase):
                     return_value="alsa:hw:0:3",
                 ),
                 patch(
-                    "tunes_player.platform.linux.alsa_mixer.alsa_mixer_available_for_endpoint",
+                    "tunes_player.platform.linux.alsa_mixer.alsa_mixer_adjustable_for_endpoint",
                     return_value=False,
                 ),
             ):
@@ -142,7 +142,7 @@ class MergedOutputTests(unittest.TestCase):
                 ),
                 patch.object(controller, "_list_sink_endpoints", return_value=[]),
                 patch(
-                    "tunes_player.platform.linux.alsa_mixer.alsa_mixer_available_for_endpoint",
+                    "tunes_player.platform.linux.alsa_mixer.alsa_mixer_adjustable_for_endpoint",
                     return_value=False,
                 ),
             ):

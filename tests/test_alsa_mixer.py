@@ -88,6 +88,11 @@ Simple mixer control 'Mic',0
             patch("tunes_player.platform.linux.alsa_mixer.subprocess.run", side_effect=fake_run),
             patch("tunes_player.platform.linux.alsa_mixer._read_normalized_level", side_effect=fake_read),
             patch("tunes_player.platform.linux.alsa_mixer._write_normalized_level"),
+            patch("tunes_player.platform.linux.volume_discovery.match_quirk", return_value=None),
+            patch(
+                "tunes_player.platform.linux.volume_discovery.discover_ucm_volume_hint",
+                return_value=None,
+            ),
         ):
             control = discover_output_volume_control(7, verify=True)
         self.assertIsNotNone(control)
@@ -106,6 +111,11 @@ numid=8,iface=MIXER,name='Mic Capture Volume'
             patch(
                 "tunes_player.platform.linux.alsa_mixer.subprocess.run",
                 return_value=subprocess_completed(contents),
+            ),
+            patch("tunes_player.platform.linux.volume_discovery.match_quirk", return_value=None),
+            patch(
+                "tunes_player.platform.linux.volume_discovery.discover_ucm_volume_hint",
+                return_value=None,
             ),
         ):
             self.assertIsNone(discover_output_volume_control(5))
@@ -140,6 +150,11 @@ Simple mixer control 'PCM',0
                 return_value=1.0,
             ),
             patch("tunes_player.platform.linux.alsa_mixer._write_normalized_level"),
+            patch("tunes_player.platform.linux.volume_discovery.match_quirk", return_value=None),
+            patch(
+                "tunes_player.platform.linux.volume_discovery.discover_ucm_volume_hint",
+                return_value=None,
+            ),
         ):
             self.assertIsNone(discover_output_volume_control(9, verify=True))
 

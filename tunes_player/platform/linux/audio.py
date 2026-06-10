@@ -452,9 +452,9 @@ class LinuxOutputController:
         endpoint_id = self._active_alsa_endpoint_id()
         if endpoint_id is None:
             return False
-        from tunes_player.platform.linux.alsa_mixer import alsa_mixer_available_for_endpoint
+        from tunes_player.platform.linux.alsa_mixer import alsa_mixer_adjustable_for_endpoint
 
-        return alsa_mixer_available_for_endpoint(endpoint_id)
+        return alsa_mixer_adjustable_for_endpoint(endpoint_id)
 
     def _active_endpoint(self) -> VolumeEndpoint | None:
         active = self.get_active_endpoint_id()
@@ -479,10 +479,10 @@ class LinuxOutputController:
         resolved = self._resolved_alsa_hw_endpoint_id()
         if resolved is not None:
             from tunes_player.platform.linux.alsa_mixer import (
-                alsa_mixer_available_for_endpoint,
+                alsa_mixer_adjustable_for_endpoint,
             )
 
-            return alsa_mixer_available_for_endpoint(resolved)
+            return alsa_mixer_adjustable_for_endpoint(resolved)
         if is_alsa_endpoint_id(active):
             return self._alsa_has_hardware_volume()
         return self._sink_backend is not None

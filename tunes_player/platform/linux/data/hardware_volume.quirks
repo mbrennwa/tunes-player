@@ -1,0 +1,17 @@
+# Tunes hardware volume quirks — factual device capabilities only.
+#
+# Format:  MATCH fields... => RESULT [mixer=NAME]
+#   Fields:  usb=V:P   fw=TEXT   dev=N   name~REGEX   (* = wildcard, omit = wildcard)
+#   fw=      USB bcdDevice from sysfs (e.g. cat /sys/class/sound/cardN/device/../bcdDevice)
+#   Result:  hw | nohw
+#   mixer=   optional ALSA simple control name when RESULT is hw
+#
+# User overrides: ~/.config/tunes-player/hardware_volume.quirks (same rules, wins on tie)
+# See: https://github.com/mbrennwa/tunes-player/issues/52
+
+# Holo May DAC Gen2.1 Enhanced (152a:87c0). fw = USB bcdDevice, not Holo DFU version strings.
+# 3144: Kitsune "enhanced_3144" fixed-volume build (standard on Linux since 2021-11-29; #52).
+MATCH usb=152a:87c0 fw=3144 => nohw
+
+MATCH usb=0bda:4014 => hw mixer=Speaker
+MATCH usb=0bda:402e => hw mixer=Speaker

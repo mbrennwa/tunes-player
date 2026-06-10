@@ -1425,9 +1425,41 @@ class PlayerService:
         was_device_volume = self._device_volume
         detected = self._has_device_volume(verify_alsa=True)
         self._device_volume = detected
+        if was_device_volume != detected:
+            self._log_hardware_volume_discovery()
         if was_device_volume and not detected:
             self._apply_engine_volume_policy()
             self._emit("playback_changed")
+
+    def _log_hardware_volume_discovery(self) -> None:
+        try:
+            from tunes_player.platform.linux.alsa_mixer import (
+                alsa_card_from_endpoint_id,
+                alsa_device_from_endpoint_id,
+            )
+            from tunes_player.platform.linux.volume_discovery import discover_hardware_volume
+        except ImportError:
+            return
+        active = self._active_endpoint_id()
+        if not is_alsa_endpoint_id(active):
+            controller = self._volume_controller
+            if controller is not None:
+                resolved = getattr(controller, "_resolved_alsa_hw_endpoint_id", None)
+                if callable(resolved):
+                    active = resolved()
+        if not active or not is_alsa_endpoint_id(active):
+            return
+        card = alsa_card_from_endpoint_id(active)
+        device = alsa_device_from_endpoint_id(active)
+        if card is None:
+            return
+        result = discover_hardware_volume(card, device=device, verify=True)
+        log.info(
+            "output hardware volume detection: available=%s source=%s reason=%s",
+            result.control is not None,
+            result.source,
+            result.reason,
+        )
 
     def _playlist_position(self) -> int:
         if not self._playlist_meta:

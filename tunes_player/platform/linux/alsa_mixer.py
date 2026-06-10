@@ -93,6 +93,9 @@ def alsa_device_from_endpoint_id(endpoint_id: str) -> int | None:
 
 def clear_alsa_mixer_cache() -> None:
     _VOLUME_CONTROL_CACHE.clear()
+    from tunes_player.platform.linux.volume_discovery import clear_volume_discovery_cache
+
+    clear_volume_discovery_cache()
 
 
 def discover_output_volume_control(
@@ -105,8 +108,13 @@ def discover_output_volume_control(
     cache_key = (card, device, verify)
     if cache_key in _VOLUME_CONTROL_CACHE:
         return _VOLUME_CONTROL_CACHE[cache_key]
-    discovered = _discover_output_volume_control(card, device=device, verify=verify)
+    from tunes_player.platform.linux.volume_discovery import discover_hardware_volume
+
+    result = discover_hardware_volume(card, device=device, verify=verify)
+    discovered = result.control
     _VOLUME_CONTROL_CACHE[cache_key] = discovered
+    if verify and discovered is not None:
+        _VOLUME_CONTROL_CACHE[(card, device, False)] = discovered
     return discovered
 
 
@@ -137,11 +145,11 @@ def alsa_mixer_control_for_card(card: int) -> str | None:
 
 
 def alsa_mixer_available_for_endpoint(endpoint_id: str) -> bool:
-    return discover_output_volume_control_for_endpoint(endpoint_id) is not None
+    return discover_output_volume_control_for_endpoint(endpoint_id, verify=True) is not None
 
 
 def alsa_mixer_available(card: int) -> bool:
-    return discover_output_volume_control(card) is not None
+    return discover_output_volume_control(card, verify=True) is not None
 
 
 def alsa_mixer_adjustable_for_endpoint(endpoint_id: str) -> bool:
@@ -203,7 +211,30 @@ def _run_amixer(card: int, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _discover_output_volume_control(
+def lookup_mixer_control_by_name(
+    card: int,
+    scontrol: str,
+    *,
+    verify: bool = False,
+) -> AlsaVolumeControl | None:
+    if shutil.which("amixer") is None:
+        return None
+    for candidate in _list_mixer_candidates(card):
+        if candidate.scontrol != scontrol:
+            continue
+        control = AlsaVolumeControl(
+            card=card,
+            numid=candidate.numid,
+            scontrol=candidate.scontrol,
+            min_val=candidate.min_val,
+            max_val=candidate.max_val,
+        )
+        if not verify or _verify_control(card, control):
+            return control
+    return None
+
+
+def discover_alsa_heuristic_volume_control(
     card: int,
     *,
     device: int | None,
