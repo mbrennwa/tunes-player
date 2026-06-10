@@ -33,6 +33,7 @@ from tunes_player.core.home import (
 )
 from tunes_player.core.models import Release, Track
 from tunes_player.core.release_quality import (
+    PlaybackQualityPolicy,
     max_quality_tier,
     tier_from_tidal_album,
     tier_from_tidal_track,
@@ -351,7 +352,11 @@ class TidalClient:
         for item in results.get("tracks", []):
             track = convert.track_from_tidal(session, item)
             if track.album_title and item.album is not None:
-                release = convert.release_from_tidal(session, item.album)
+                release = convert.release_from_tidal(
+                    session,
+                    item.album,
+                    quality_hint_tier=tier_from_tidal_track(item),
+                )
                 if release.id not in seen:
                     seen.add(release.id)
                     releases.append(release)
@@ -638,7 +643,7 @@ class TidalClient:
         self,
         track_id: str,
         *,
-        playback_quality_ceiling: str | None = None,
+        playback_quality_policy: PlaybackQualityPolicy | None = None,
     ) -> PlayableSource | None:
         numeric = tidal_ids.parse_prefixed_id(track_id, "track")
         if numeric is None:
@@ -651,7 +656,7 @@ class TidalClient:
                 session,
                 numeric,
                 track,
-                playback_quality_ceiling=playback_quality_ceiling,
+                playback_quality_policy=playback_quality_policy,
             )
             presentation = payload.get("assetPresentation")
             if presentation == "PREVIEW":
@@ -695,22 +700,33 @@ class TidalClient:
         track_id: int,
         tidal_track: object,
         *,
-        playback_quality_ceiling: str | None = None,
+        playback_quality_policy: PlaybackQualityPolicy | None = None,
     ) -> dict[str, Any]:
         from tunes_player.core.backends.tidal.stream_quality import (
-            cap_session_quality_for_ceiling,
+            cap_session_quality_for_policy,
         )
+        from tunes_player.core.release_quality import playback_policy_for_play
 
-        session_quality = cap_session_quality_for_ceiling(
+        policy = playback_quality_policy or playback_policy_for_play(
+            enabled_quality_tiers=frozenset(),
+            release=None,
+        )
+        session_quality = cap_session_quality_for_policy(
             quality_request_value(session.config.quality),
-            playback_quality_ceiling,
+            policy,
         )
         candidates = playback_quality_candidates(
             session_quality,
             tidal_track,
-            ceiling_tier=playback_quality_ceiling,
+            policy=policy,
         )
-        cache_key = (track_id, playback_quality_ceiling or "", ",".join(candidates))
+        allowed_key = ",".join(sorted(policy.allowed_tiers))
+        cache_key = (
+            track_id,
+            policy.target_tier or "",
+            allowed_key,
+            ",".join(candidates),
+        )
         now = time.monotonic()
         cached = self._stream_cache.get(cache_key)
         if cached is not None:
@@ -722,8 +738,23 @@ class TidalClient:
         payload, chosen = negotiate_stream_payload(
             candidates,
             lambda quality: self._request_stream_payload(session, track_id, quality),
+            policy=policy,
         )
+        from tunes_player.core.backends.tidal.stream_quality import (
+            payload_is_hi_res_stream,
+        )
+        from tunes_player.core.release_quality import QUALITY_FILTER_HI_RES
+
         resolved = payload_audio_quality(payload)
+        if (
+            policy.target_tier == QUALITY_FILTER_HI_RES
+            and not payload_is_hi_res_stream(payload)
+        ):
+            log.warning(
+                "TIDAL track %s: hi-res filter active but stream resolved to %s",
+                track_id,
+                resolved,
+            )
         if resolved == "HIGH":
             log.warning(
                 "TIDAL track %s is streaming at HIGH (320 kbps) after trying %s",

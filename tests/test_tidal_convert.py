@@ -135,6 +135,7 @@ class TidalConvertTests(unittest.TestCase):
                     audio_quality="HI_RES_LOSSLESS",
                     media_metadata_tags=["HIRES_LOSSLESS"],
                     audio_modes=[],
+                    sample_rate=96000,
                 )
 
         tier = resolve_tidal_grid_peak_quality_tier(_RefetchSession(), sparse)

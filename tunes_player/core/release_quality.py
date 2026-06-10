@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -28,6 +29,14 @@ _TIER_RANK = {
 _CD_MIN_BIT_DEPTH = 16
 _CD_SAMPLE_RATE_HZ = 44_100
 
+ALL_QUALITY_TIERS = frozenset(
+    {
+        QUALITY_FILTER_COMPRESSED,
+        QUALITY_FILTER_CD,
+        QUALITY_FILTER_HI_RES,
+    }
+)
+
 _TIDAL_RANK_COMPRESSED_MAX = 1
 _TIDAL_RANK_CD = 2
 
@@ -48,13 +57,18 @@ def _normalize_sample_rate_hz(value: int | float | None) -> int:
     return int(round(rate))
 
 
-def _tier_from_lossless_bit_depth_sample_rate(
+def is_acoustic_hi_res(sample_rate_hz: int) -> bool:
+    """True when lossless sample rate is above CD (44.1 kHz)."""
+    return sample_rate_hz > _CD_SAMPLE_RATE_HZ
+
+
+def acoustic_tier_from_lossless(
     *,
     bit_depth: int,
     sample_rate_hz: int,
 ) -> str:
     """CD is 44.1 kHz lossless (16- or 24-bit); anything above is hi-res."""
-    if sample_rate_hz > _CD_SAMPLE_RATE_HZ:
+    if is_acoustic_hi_res(sample_rate_hz):
         return QUALITY_FILTER_HI_RES
     if (
         bit_depth >= _CD_MIN_BIT_DEPTH
@@ -62,6 +76,32 @@ def _tier_from_lossless_bit_depth_sample_rate(
     ):
         return QUALITY_FILTER_CD
     return QUALITY_FILTER_COMPRESSED
+
+
+def acoustic_tier_from_stream(
+    *,
+    bit_depth: int | None,
+    sample_rate_hz: int,
+    lossless: bool = True,
+) -> str:
+    """Map stream bit depth / sample rate to a filter bucket."""
+    if not lossless:
+        return QUALITY_FILTER_COMPRESSED
+    return acoustic_tier_from_lossless(
+        bit_depth=bit_depth or 0,
+        sample_rate_hz=sample_rate_hz,
+    )
+
+
+def _tier_from_lossless_bit_depth_sample_rate(
+    *,
+    bit_depth: int,
+    sample_rate_hz: int,
+) -> str:
+    return acoustic_tier_from_lossless(
+        bit_depth=bit_depth,
+        sample_rate_hz=sample_rate_hz,
+    )
 
 
 def tiers_from_local(
@@ -141,19 +181,57 @@ def tier_from_tidal_track(track: object) -> str:
     return tier_from_tidal_peak(track_peak_quality(track))
 
 
-def _collect_tidal_album_tier_signals(album: object) -> set[str]:
-    from tunes_player.core.backends.tidal.stream_quality import track_peak_quality
-
-    if not tidal_album_has_quality_metadata(album):
-        return set()
-    signals: set[str] = set()
-    rank = track_peak_quality(album)
-    signals.add(tier_from_tidal_peak(rank))
+def _tidal_album_has_hi_res_mode(album: object) -> bool:
     audio_modes = getattr(album, "audio_modes", None) or []
     for mode in audio_modes:
         key = str(mode).upper().replace(" ", "_")
         if "HI_RES" in key or "HIRES" in key:
-            signals.add(QUALITY_FILTER_HI_RES)
+            return True
+    return False
+
+
+def _tidal_album_sample_rate_hz(album: object) -> int:
+    for attr in ("sample_rate", "sampling_rate", "samplingRate"):
+        value = getattr(album, attr, None)
+        if value is not None:
+            return _normalize_sample_rate_hz(value)
+    tags = getattr(album, "media_metadata_tags", None) or []
+    for tag in tags:
+        text = str(tag).upper()
+        if "KHZ" in text or "HZ" in text:
+            import re
+
+            match = re.search(r"(\d+(?:\.\d+)?)\s*KHZ", text)
+            if match is not None:
+                return _normalize_sample_rate_hz(float(match.group(1)))
+    return 0
+
+
+def _tidal_acoustic_peak_tier(album: object) -> str:
+    """Peak catalog tier from TIDAL metadata using acoustic sample-rate rules."""
+    from tunes_player.core.backends.tidal.stream_quality import track_peak_quality
+
+    rate_hz = _tidal_album_sample_rate_hz(album)
+    if is_acoustic_hi_res(rate_hz):
+        return QUALITY_FILTER_HI_RES
+    if rate_hz == _CD_SAMPLE_RATE_HZ:
+        return QUALITY_FILTER_CD
+
+    rank = track_peak_quality(album)
+    api_tier = tier_from_tidal_peak(rank)
+    if api_tier == QUALITY_FILTER_HI_RES:
+        return QUALITY_FILTER_CD
+    return api_tier
+
+
+def _collect_tidal_album_tier_signals(album: object) -> set[str]:
+    if not tidal_album_has_quality_metadata(album):
+        return set()
+    signals: set[str] = set()
+    peak = _tidal_acoustic_peak_tier(album)
+    signals.add(peak)
+    if _tidal_album_has_hi_res_mode(album) and peak == QUALITY_FILTER_CD:
+        signals.add(QUALITY_FILTER_HI_RES)
     return {tier for tier in signals if tier in _VALID_QUALITY_FILTERS}
 
 
@@ -216,16 +294,24 @@ def _tier_from_qobuz_technical_specifications(spec: object) -> str | None:
     )
 
 
-def _qobuz_album_has_hires_stream(album: dict[str, Any]) -> bool:
-    if album.get("hires") or album.get("hires_streamable"):
+def _qobuz_item_has_hires_above_cd(item: dict[str, Any]) -> bool:
+    rate_hz = _normalize_sample_rate_hz(item.get("maximum_sampling_rate"))
+    if is_acoustic_hi_res(rate_hz):
+        return True
+    technical = _tier_from_qobuz_technical_specifications(
+        item.get("maximum_technical_specifications"),
+    )
+    return technical == QUALITY_FILTER_HI_RES
+
+
+def _qobuz_album_has_hires_above_cd_stream(album: dict[str, Any]) -> bool:
+    if _qobuz_item_has_hires_above_cd(album):
         return True
     tracks = album.get("tracks")
     if not isinstance(tracks, dict):
         return False
     for item in tracks.get("items") or []:
-        if not isinstance(item, dict):
-            continue
-        if item.get("hires") or item.get("hires_streamable"):
+        if isinstance(item, dict) and _qobuz_item_has_hires_above_cd(item):
             return True
     return False
 
@@ -269,9 +355,9 @@ def _collect_qobuz_peak_signals(album: dict[str, Any]) -> set[str]:
 
 
 def _collect_qobuz_available_signals(album: dict[str, Any]) -> set[str]:
-    """Catalog signals including streamable hi-res below the peak sample rate."""
+    """Catalog signals including streamable hi-res above CD when present."""
     signals = set(_collect_qobuz_peak_signals(album))
-    if _qobuz_album_has_hires_stream(album):
+    if _qobuz_album_has_hires_above_cd_stream(album):
         signals.add(QUALITY_FILTER_HI_RES)
     return signals
 
@@ -319,6 +405,52 @@ def max_quality_tier(*tiers: str) -> str:
     return best
 
 
+def min_quality_tier(*tiers: str) -> str:
+    """Return the lowest catalog tier among the given bucket names."""
+    best = QUALITY_FILTER_HI_RES
+    best_rank = len(_TIER_RANK)
+    for tier in tiers:
+        if tier not in _VALID_QUALITY_FILTERS:
+            continue
+        rank = _TIER_RANK[tier]
+        if rank < best_rank:
+            best_rank = rank
+            best = tier
+    return best
+
+
+@dataclass(frozen=True, slots=True)
+class PlaybackQualityPolicy:
+    """Playback quality for one queue: target tier and allowed fallback set."""
+
+    target_tier: str | None
+    allowed_tiers: frozenset[str]
+
+
+def playback_policy_for_play(
+    *,
+    enabled_quality_tiers: frozenset[str],
+    release: Release | None,
+) -> PlaybackQualityPolicy:
+    """Derive playback target from enabled shell filters and release availability."""
+    if not enabled_quality_tiers:
+        return PlaybackQualityPolicy(None, ALL_QUALITY_TIERS)
+    available = (
+        release_available_quality_tiers(release)
+        if release is not None
+        else ALL_QUALITY_TIERS
+    )
+    if not available:
+        available = frozenset({QUALITY_FILTER_COMPRESSED})
+    allowed = frozenset(
+        tier for tier in enabled_quality_tiers if tier in available
+    )
+    if not allowed:
+        allowed = frozenset(enabled_quality_tiers)
+    target = max_quality_tier(*allowed)
+    return PlaybackQualityPolicy(target, allowed)
+
+
 def release_available_quality_tiers(release: Release) -> frozenset[str]:
     """Tiers used for shell quality filter matching."""
     if release.available_quality_tiers:
@@ -363,26 +495,45 @@ _QOBUZ_RANK_TO_FORMAT_ID: dict[int, int] = {
 }
 
 
-def playback_ceiling_tier(enabled_quality_tiers: frozenset[str]) -> str | None:
-    """Highest enabled shell filter tier, or None when all tiers are enabled (no cap)."""
-    if not enabled_quality_tiers:
-        return None
-    return max_quality_tier(*enabled_quality_tiers)
+def _tier_to_qobuz_max_rank(tier: str) -> int:
+    if tier == QUALITY_FILTER_HI_RES:
+        return 3
+    if tier == QUALITY_FILTER_CD:
+        return 1
+    if tier == QUALITY_FILTER_COMPRESSED:
+        return 0
+    return 3
 
 
-def qobuz_format_id_for_playback(
+def _tier_to_qobuz_min_rank(tier: str) -> int:
+    if tier == QUALITY_FILTER_HI_RES:
+        return 2
+    if tier == QUALITY_FILTER_CD:
+        return 1
+    return 0
+
+
+def _qobuz_max_rank_for_policy_target(policy: PlaybackQualityPolicy) -> int:
+    if policy.target_tier is None:
+        if not policy.allowed_tiers:
+            return 3
+        return max(_tier_to_qobuz_max_rank(tier) for tier in policy.allowed_tiers)
+    return _tier_to_qobuz_max_rank(policy.target_tier)
+
+
+def qobuz_format_id_for_policy(
     *,
     config_format_id: int,
-    ceiling_tier: str | None,
+    policy: PlaybackQualityPolicy,
 ) -> int:
-    """Apply shell playback ceiling to the configured Qobuz stream format."""
+    """Apply shell playback policy to the configured Qobuz stream format."""
     config_rank = _QOBUZ_FORMAT_ID_RANK.get(config_format_id, 3)
-    if ceiling_tier is None or ceiling_tier == QUALITY_FILTER_HI_RES:
-        cap_rank = 3
-    elif ceiling_tier == QUALITY_FILTER_CD:
-        cap_rank = 1
-    elif ceiling_tier == QUALITY_FILTER_COMPRESSED:
-        cap_rank = 0
-    else:
-        cap_rank = 3
-    return _QOBUZ_RANK_TO_FORMAT_ID[min(config_rank, cap_rank)]
+    max_target = _qobuz_max_rank_for_policy_target(policy)
+    min_allowed = (
+        min(_tier_to_qobuz_min_rank(tier) for tier in policy.allowed_tiers)
+        if policy.allowed_tiers
+        else 0
+    )
+    effective_rank = min(config_rank, max_target)
+    effective_rank = max(effective_rank, min_allowed)
+    return _QOBUZ_RANK_TO_FORMAT_ID[effective_rank]

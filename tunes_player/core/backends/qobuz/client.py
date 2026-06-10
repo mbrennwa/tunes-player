@@ -410,8 +410,14 @@ class QobuzClient:
         self,
         track_id: str,
         *,
-        playback_quality_ceiling: str | None = None,
+        playback_quality_policy: object | None = None,
     ) -> PlayableSource | None:
+        from tunes_player.core.release_quality import (
+            PlaybackQualityPolicy,
+            playback_policy_for_play,
+            qobuz_format_id_for_policy,
+        )
+
         numeric = qobuz_ids.parse_prefixed_id(track_id, "track")
         if numeric is None:
             return None
@@ -420,15 +426,22 @@ class QobuzClient:
         if not isinstance(data, dict):
             return None
         metadata = convert.track_from_qobuz(data)
-        from tunes_player.core.release_quality import qobuz_format_id_for_playback
+        policy = (
+            playback_quality_policy
+            if isinstance(playback_quality_policy, PlaybackQualityPolicy)
+            else playback_policy_for_play(
+                enabled_quality_tiers=frozenset(),
+                release=None,
+            )
+        )
 
-        format_id = qobuz_format_id_for_playback(
+        format_id = qobuz_format_id_for_policy(
             config_format_id=self._format_id,
-            ceiling_tier=playback_quality_ceiling,
+            policy=policy,
         )
         stream = self._get_file_url(
             numeric,
-            playback_quality_ceiling=playback_quality_ceiling,
+            playback_quality_policy=policy,
         )
         from tunes_player.core.playback_quality import (
             qobuz_format_label_from_stream,
@@ -491,13 +504,25 @@ class QobuzClient:
         self,
         track_id: str,
         *,
-        playback_quality_ceiling: str | None = None,
+        playback_quality_policy: object | None = None,
     ) -> dict[str, Any]:
-        from tunes_player.core.release_quality import qobuz_format_id_for_playback
+        from tunes_player.core.release_quality import (
+            PlaybackQualityPolicy,
+            playback_policy_for_play,
+            qobuz_format_id_for_policy,
+        )
 
-        format_id = qobuz_format_id_for_playback(
+        policy = (
+            playback_quality_policy
+            if isinstance(playback_quality_policy, PlaybackQualityPolicy)
+            else playback_policy_for_play(
+                enabled_quality_tiers=frozenset(),
+                release=None,
+            )
+        )
+        format_id = qobuz_format_id_for_policy(
             config_format_id=self._format_id,
-            ceiling_tier=playback_quality_ceiling,
+            policy=policy,
         )
         request_ts = time.time()
         request_sig = sign_get_file_url(

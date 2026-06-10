@@ -48,7 +48,10 @@ from tunes_player.core.playback.output_profile import (
     compute_output_profile,
 )
 from tunes_player.core.playback_quality import format_playback_status
-from tunes_player.core.release_quality import playback_ceiling_tier
+from tunes_player.core.release_quality import (
+    PlaybackQualityPolicy,
+    playback_policy_for_play,
+)
 from tunes_player.core.volume import (
     VolumeController,
     VolumeEndpoint,
@@ -63,7 +66,7 @@ Unsubscribe = Callable[[], None]
 log = logging.getLogger(__name__)
 _timeline_log = logging.getLogger("tunes_player.playback.timeline")
 _QUEUE_END_MARGIN_SEC = 1.0
-_UNSET_PLAYBACK_QUALITY_CEILING = object()
+_UNSET_PLAYBACK_QUALITY_POLICY = object()
 
 MainThreadHook: TypeAlias = Callable[[Callable[[], None]], None]
 
@@ -176,7 +179,7 @@ class PlayerService:
         self._playlist_meta: list[Track] = []
         self._playlist_build_generation = 0
         self._playlist_prepared: dict[str, _PreparedTrackLoad] = {}
-        self._playlist_playback_quality_ceiling: str | None = None
+        self._playlist_playback_policy: PlaybackQualityPolicy | None = None
         self._current_track: Track | None = None
         self._current_release_id: str | None = None
         self._quality_hint = ""
@@ -1441,6 +1444,23 @@ class PlayerService:
         self._auto_advanced_from_index = None
         self._play_queue_index(index)
 
+    def _playback_policy_for_shell(
+        self,
+        *,
+        release_id: str | None = None,
+        enabled_quality_tiers: frozenset[str] | None = None,
+    ) -> PlaybackQualityPolicy:
+        enabled = (
+            enabled_quality_tiers
+            if enabled_quality_tiers is not None
+            else self.config.config.shell_state.enabled_quality_tiers
+        )
+        release = self.get_release(release_id) if release_id else None
+        return playback_policy_for_play(
+            enabled_quality_tiers=enabled or frozenset(),
+            release=release,
+        )
+
     def play_track(self, track_id: str) -> None:
         if track_id.startswith("tidal:"):
             self._play_tidal_track(track_id)
@@ -1470,7 +1490,13 @@ class PlayerService:
             def apply() -> None:
                 if generation != self._play_release_generation:
                     return
-                self._start_playlist(tracks, start_index=start_index)
+                self._start_playlist(
+                    tracks,
+                    start_index=start_index,
+                    playback_quality_policy=self._playback_policy_for_shell(
+                        release_id=release_id,
+                    ),
+                )
 
             self._run_on_main_thread(apply)
 
@@ -1492,7 +1518,14 @@ class PlayerService:
         if not tracks:
             self._report_error("TIDAL track not found.")
             return
-        self._start_playlist(tracks, start_index=start_index)
+        release_id = self.release_id_for_track(tracks[start_index])
+        self._start_playlist(
+            tracks,
+            start_index=start_index,
+            playback_quality_policy=self._playback_policy_for_shell(
+                release_id=release_id,
+            ),
+        )
 
     def _play_qobuz_track(self, track_id: str) -> None:
         if not self._qobuz.is_configured():
@@ -1511,7 +1544,14 @@ class PlayerService:
         if not tracks:
             self._report_error("Qobuz track not found.")
             return
-        self._start_playlist(tracks, start_index=start_index)
+        release_id = self.release_id_for_track(tracks[start_index])
+        self._start_playlist(
+            tracks,
+            start_index=start_index,
+            playback_quality_policy=self._playback_policy_for_shell(
+                release_id=release_id,
+            ),
+        )
 
     def play_release(
         self,
@@ -1522,12 +1562,12 @@ class PlayerService:
     ) -> None:
         self._play_release_generation += 1
         generation = self._play_release_generation
-        playback_quality_ceiling = playback_ceiling_tier(
-            enabled_quality_tiers or frozenset(),
-        )
-
         def worker() -> None:
             tracks = self.get_release_tracks(release_id)
+            policy = self._playback_policy_for_shell(
+                release_id=release_id,
+                enabled_quality_tiers=enabled_quality_tiers,
+            )
             if not tracks:
 
                 def apply_empty() -> None:
@@ -1546,7 +1586,7 @@ class PlayerService:
                 self._start_playlist(
                     tracks,
                     start_index=start_index_clamped,
-                    playback_quality_ceiling=playback_quality_ceiling,
+                    playback_quality_policy=policy,
                 )
 
             self._run_on_main_thread(apply)
@@ -1583,7 +1623,13 @@ class PlayerService:
                 self._report_error("No tracks in this release.")
             return
         start_index = max(0, min(start_index, len(tracks) - 1))
-        self._start_playlist(tracks, start_index=start_index)
+        self._start_playlist(
+            tracks,
+            start_index=start_index,
+            playback_quality_policy=self._playback_policy_for_shell(
+                release_id=release_id,
+            ),
+        )
 
     def play_album(self, album_id: str, *, start_index: int = 0) -> None:
         self.play_release(album_id, start_index=start_index)
@@ -2325,7 +2371,7 @@ class PlayerService:
             track.id,
             tidal=self._tidal,
             qobuz=self._qobuz,
-            playback_quality_ceiling=self._playlist_playback_quality_ceiling,
+            playback_quality_policy=self._playlist_playback_policy,
         )
         if source is None:
             return
@@ -2400,7 +2446,7 @@ class PlayerService:
                 track.id,
                 tidal=self._tidal,
                 qobuz=self._qobuz,
-                playback_quality_ceiling=self._playlist_playback_quality_ceiling,
+                playback_quality_policy=self._playlist_playback_policy,
             )
         except Exception as exc:
             self._report_error(str(exc), exc=exc)
@@ -2598,7 +2644,7 @@ class PlayerService:
                 track.id,
                 tidal=self._tidal,
                 qobuz=self._qobuz,
-                playback_quality_ceiling=self._playlist_playback_quality_ceiling,
+                playback_quality_policy=self._playlist_playback_policy,
             )
         except Exception as exc:
             return _PreparedTrackLoad(
@@ -2846,12 +2892,12 @@ class PlayerService:
         tracks: list[Track],
         *,
         start_index: int = 0,
-        playback_quality_ceiling: str | None | object = _UNSET_PLAYBACK_QUALITY_CEILING,
+        playback_quality_policy: PlaybackQualityPolicy | object = _UNSET_PLAYBACK_QUALITY_POLICY,
     ) -> None:
         if not tracks:
             return
-        if playback_quality_ceiling is not _UNSET_PLAYBACK_QUALITY_CEILING:
-            self._playlist_playback_quality_ceiling = playback_quality_ceiling  # type: ignore[assignment]
+        if playback_quality_policy is not _UNSET_PLAYBACK_QUALITY_POLICY:
+            self._playlist_playback_policy = playback_quality_policy  # type: ignore[assignment]
         start_index = max(0, min(start_index, len(tracks) - 1))
         self._playlist_build_generation += 1
         build_generation = self._playlist_build_generation

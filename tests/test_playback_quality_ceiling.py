@@ -1,4 +1,4 @@
-"""Tests for shell quality filter playback ceiling (#50)."""
+"""Tests for shell quality filter playback policy snapshot (#50, #54)."""
 
 from __future__ import annotations
 
@@ -9,9 +9,14 @@ from unittest.mock import MagicMock, patch
 
 from tunes_player.core.config import ConfigManager
 from tunes_player.core.models import Source, Track
-from tunes_player.core.release_quality import QUALITY_FILTER_CD
+from tunes_player.core.release_quality import (
+    QUALITY_FILTER_CD,
+    PlaybackQualityPolicy,
+)
 from tunes_player.core.services import PlayerService
-class PlaybackQualityCeilingServiceTests(unittest.TestCase):
+
+
+class PlaybackQualityPolicyServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         config = ConfigManager(Path(self._tmp.name) / "config.json")
@@ -25,33 +30,37 @@ class PlaybackQualityCeilingServiceTests(unittest.TestCase):
             album_title="Album",
             source=Source.QOBUZ,
         )
+        self._cd_policy = PlaybackQualityPolicy(
+            target_tier=QUALITY_FILTER_CD,
+            allowed_tiers=frozenset({QUALITY_FILTER_CD}),
+        )
 
     def tearDown(self) -> None:
         self._service.shutdown()
         self._tmp.cleanup()
 
-    def test_start_playlist_snapshots_ceiling_for_queue(self) -> None:
+    def test_start_playlist_snapshots_policy_for_queue(self) -> None:
         self._service._start_playlist(
             [self._track],
-            playback_quality_ceiling=QUALITY_FILTER_CD,
+            playback_quality_policy=self._cd_policy,
         )
         self.assertEqual(
-            self._service._playlist_playback_quality_ceiling,
-            QUALITY_FILTER_CD,
+            self._service._playlist_playback_policy,
+            self._cd_policy,
         )
 
-    def test_resume_playlist_keeps_existing_ceiling(self) -> None:
-        self._service._playlist_playback_quality_ceiling = QUALITY_FILTER_CD
+    def test_resume_playlist_keeps_existing_policy(self) -> None:
+        self._service._playlist_playback_policy = self._cd_policy
         self._service._playlist_meta = [self._track]
         self._service.config.update_shell_quality_tiers(frozenset())
         self._service._start_playlist([self._track])
         self.assertEqual(
-            self._service._playlist_playback_quality_ceiling,
-            QUALITY_FILTER_CD,
+            self._service._playlist_playback_policy,
+            self._cd_policy,
         )
 
-    def test_build_prepared_track_load_passes_queue_ceiling(self) -> None:
-        self._service._playlist_playback_quality_ceiling = QUALITY_FILTER_CD
+    def test_build_prepared_track_load_passes_queue_policy(self) -> None:
+        self._service._playlist_playback_policy = self._cd_policy
         with patch(
             "tunes_player.core.services.resolve_track",
             return_value=MagicMock(format_label="16-bit / 44.1 kHz"),
@@ -64,8 +73,8 @@ class PlaybackQualityCeilingServiceTests(unittest.TestCase):
         self.assertIsNone(prepared.error)
         resolve.assert_called_once()
         self.assertEqual(
-            resolve.call_args.kwargs["playback_quality_ceiling"],
-            QUALITY_FILTER_CD,
+            resolve.call_args.kwargs["playback_quality_policy"],
+            self._cd_policy,
         )
 
 

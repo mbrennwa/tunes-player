@@ -96,30 +96,55 @@ def session_quality_for_subscription(*, hi_res_entitled: bool) -> str:
     return "LOSSLESS"
 
 
-def _ceiling_max_tidal_rank(ceiling_tier: str | None) -> int | None:
+def _policy_tidal_rank_bounds(
+    policy: object,
+) -> tuple[int, int]:
     from tunes_player.core.release_quality import (
+        ALL_QUALITY_TIERS,
         QUALITY_FILTER_CD,
         QUALITY_FILTER_COMPRESSED,
         QUALITY_FILTER_HI_RES,
+        PlaybackQualityPolicy,
+        max_quality_tier,
+        min_quality_tier,
     )
 
-    if ceiling_tier is None or ceiling_tier == QUALITY_FILTER_HI_RES:
-        return None
-    if ceiling_tier == QUALITY_FILTER_CD:
-        return _QUALITY_RANK["LOSSLESS"]
-    if ceiling_tier == QUALITY_FILTER_COMPRESSED:
-        return _QUALITY_RANK["HIGH"]
-    return None
+    if not isinstance(policy, PlaybackQualityPolicy):
+        return _QUALITY_RANK["HIGH"], _QUALITY_RANK["HI_RES_LOSSLESS"]
+
+    allowed = policy.allowed_tiers or ALL_QUALITY_TIERS
+    tier_rank = {
+        QUALITY_FILTER_COMPRESSED: 0,
+        QUALITY_FILTER_CD: 1,
+        QUALITY_FILTER_HI_RES: 2,
+    }
+    min_tier_api = {
+        QUALITY_FILTER_COMPRESSED: _QUALITY_RANK["HIGH"],
+        QUALITY_FILTER_CD: _QUALITY_RANK["LOSSLESS"],
+        QUALITY_FILTER_HI_RES: _QUALITY_RANK["HI_RES"],
+    }
+    max_tier_api = {
+        QUALITY_FILTER_COMPRESSED: _QUALITY_RANK["HIGH"],
+        QUALITY_FILTER_CD: _QUALITY_RANK["LOSSLESS"],
+        QUALITY_FILTER_HI_RES: _QUALITY_RANK["HI_RES_LOSSLESS"],
+    }
+
+    if policy.target_tier is None:
+        min_tier = min_quality_tier(*allowed)
+        max_tier = max_quality_tier(*allowed)
+    else:
+        min_tier = policy.target_tier
+        max_tier = policy.target_tier
+
+    return min_tier_api[min_tier], max_tier_api[max_tier]
 
 
-def cap_session_quality_for_ceiling(
+def cap_session_quality_for_policy(
     session_quality: str,
-    ceiling_tier: str | None,
+    policy: object,
 ) -> str:
-    """Lower session quality when the shell filter caps playback below subscription."""
-    max_rank = _ceiling_max_tidal_rank(ceiling_tier)
-    if max_rank is None:
-        return session_quality
+    """Lower session quality when playback policy caps below subscription."""
+    _min_rank, max_rank = _policy_tidal_rank_bounds(policy)
     session_rank = _QUALITY_RANK.get(normalize_api_quality(session_quality), 0)
     if session_rank <= max_rank:
         return normalize_api_quality(session_quality)
@@ -129,42 +154,50 @@ def cap_session_quality_for_ceiling(
     return "HIGH"
 
 
-def apply_playback_quality_ceiling(
-    candidates: list[str],
-    ceiling_tier: str | None,
-) -> list[str]:
-    """Drop stream tiers above the shell playback ceiling."""
-    max_rank = _ceiling_max_tidal_rank(ceiling_tier)
-    if max_rank is None:
-        return candidates
-    capped = [item for item in candidates if _QUALITY_RANK.get(item, 0) <= max_rank]
-    return capped or candidates[:1]
-
-
 def playback_quality_candidates(
     session_quality: str,
     track: _TrackQualityInfo,
     *,
-    ceiling_tier: str | None = None,
+    policy: object,
 ) -> list[str]:
     """Ordered audioquality values to try for one track.
 
     Catalog ``audioQuality`` is often ``HIGH`` even when FLAC exists; for any
     lossless-capable session we always attempt ``LOSSLESS`` before ``HIGH``.
+    When hi-res is in the playback policy, try hi-res tiers even if track
+    metadata only reports CD quality.
     """
+    from tunes_player.core.release_quality import (
+        QUALITY_FILTER_HI_RES,
+        PlaybackQualityPolicy,
+    )
+
     session_rank = _QUALITY_RANK.get(normalize_api_quality(session_quality), 0)
-    peak_rank = track_peak_quality(track)
+    min_rank, max_rank = _policy_tidal_rank_bounds(policy)
+
+    try_hi_res = False
+    if isinstance(policy, PlaybackQualityPolicy):
+        if policy.target_tier == QUALITY_FILTER_HI_RES:
+            try_hi_res = session_rank >= _QUALITY_RANK["HI_RES_LOSSLESS"]
+        elif policy.target_tier is None:
+            try_hi_res = (
+                session_rank >= _QUALITY_RANK["HI_RES_LOSSLESS"]
+                and track_peak_quality(track) >= _QUALITY_RANK["HI_RES"]
+            )
 
     candidates: list[str] = []
-    if (
+    if try_hi_res or (
         session_rank >= _QUALITY_RANK["HI_RES_LOSSLESS"]
-        and peak_rank >= _QUALITY_RANK["HI_RES"]
+        and track_peak_quality(track) >= _QUALITY_RANK["HI_RES"]
     ):
         candidates.append("HI_RES_LOSSLESS")
+    if try_hi_res and session_rank >= _QUALITY_RANK["HI_RES"]:
+        candidates.append("HI_RES")
     if session_rank >= _QUALITY_RANK["LOSSLESS"]:
         candidates.append("LOSSLESS")
     if (
-        session_rank >= _QUALITY_RANK["HI_RES"]
+        not try_hi_res
+        and session_rank >= _QUALITY_RANK["HI_RES"]
         and "HI_RES" not in candidates
         and "HI_RES_LOSSLESS" not in candidates
     ):
@@ -177,11 +210,37 @@ def playback_quality_candidates(
         if item not in seen:
             seen.add(item)
             ordered.append(item)
-    return apply_playback_quality_ceiling(ordered, ceiling_tier)
+
+    filtered = [
+        item
+        for item in ordered
+        if min_rank <= _QUALITY_RANK.get(item, 0) <= max_rank
+    ]
+    return filtered or [_LOSSY_API_TIER]
 
 
 def payload_audio_quality(payload: dict[str, Any]) -> str:
     return normalize_api_quality(payload.get("audioQuality"))
+
+
+def payload_sample_rate_hz(payload: dict[str, Any]) -> int:
+    rate = payload.get("sampleRate")
+    if rate is None:
+        return 0
+    try:
+        return int(rate)
+    except (TypeError, ValueError):
+        return 0
+
+
+def payload_is_hi_res_stream(payload: dict[str, Any]) -> bool:
+    """True when the negotiated stream is acoustically above CD quality."""
+    from tunes_player.core.release_quality import is_acoustic_hi_res
+
+    quality = payload_audio_quality(payload)
+    if quality == _LOSSY_API_TIER:
+        return False
+    return is_acoustic_hi_res(payload_sample_rate_hz(payload))
 
 
 def should_retry_after_high(
@@ -197,9 +256,35 @@ def should_retry_after_high(
     return "LOSSLESS" in remaining
 
 
+def should_retry_after_sub_hi_res(
+    payload: dict[str, Any],
+    *,
+    tried: str,
+    remaining: list[str],
+    policy: object,
+) -> bool:
+    """Retry when a hi-res request returned CD/lossless instead of hi-res."""
+    from tunes_player.core.release_quality import (
+        QUALITY_FILTER_HI_RES,
+        PlaybackQualityPolicy,
+    )
+
+    if not isinstance(policy, PlaybackQualityPolicy):
+        return False
+    if QUALITY_FILTER_HI_RES not in policy.allowed_tiers:
+        return False
+    if payload_is_hi_res_stream(payload):
+        return False
+    if tried in ("HI_RES_LOSSLESS", "HI_RES") and remaining:
+        return True
+    return False
+
+
 def negotiate_stream_payload(
     candidates: list[str],
     request: Callable[[str], dict[str, Any]],
+    *,
+    policy: object | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Try quality tiers; downgrade when API returns HIGH for a lossless request."""
     last_payload: dict[str, Any] | None = None
@@ -210,6 +295,13 @@ def negotiate_stream_payload(
         last_quality = quality
         remaining = candidates[index + 1 :]
         if should_retry_after_high(payload, tried=quality, remaining=remaining):
+            continue
+        if should_retry_after_sub_hi_res(
+            payload,
+            tried=quality,
+            remaining=remaining,
+            policy=policy,
+        ):
             continue
         if payload_audio_quality(payload) != _LOSSY_API_TIER or quality == _LOSSY_API_TIER:
             return payload, quality
