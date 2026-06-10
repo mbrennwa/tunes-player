@@ -331,6 +331,7 @@ class MpvEngine:
         self._apply_software_volume()
 
     def set_bit_perfect(self, enabled: bool) -> None:
+        prev_software_volume = self._software_volume
         self._unity_gain = enabled
         self._software_volume = not enabled
         self._set_property("replaygain", "no")
@@ -338,6 +339,8 @@ class MpvEngine:
             self._set_property("volume", 100)
         else:
             self._apply_software_volume()
+        if prev_software_volume != self._software_volume:
+            self._sync_direct_alsa_buffer_policy_for_volume_mode()
 
     def get_position(self) -> float:
         """Return live mpv time-pos."""
@@ -460,7 +463,10 @@ class MpvEngine:
         if self._direct_alsa_device_open:
             return
         _LOG.info("Opening direct ALSA output for playback")
-        for key, value in direct_alsa_engine_options(warmup=True).items():
+        for key, value in direct_alsa_engine_options(
+            warmup=True,
+            software_volume=self._software_volume,
+        ).items():
             try:
                 self._set_property(key, value)
             except Exception as exc:
@@ -534,6 +540,7 @@ class MpvEngine:
             input_class,
             direct_alsa=direct_alsa,
             warmup=warmup,
+            software_volume=self._software_volume,
         )
         log_buffer_policy(input_class, uri, options)
         for key, value in options.items():
@@ -552,6 +559,14 @@ class MpvEngine:
             self._player.command("ao-reload")
         except Exception as exc:
             _LOG.debug("mpv ao-reload failed: %s", exc)
+
+    def _sync_direct_alsa_buffer_policy_for_volume_mode(self) -> None:
+        profile = getattr(self, "_output_profile", None)
+        if profile is None or not profile.direct_alsa or not self._direct_alsa_device_open:
+            return
+        uri = self._loaded_uri or ""
+        self._apply_buffer_policy(uri, profile, warmup=False)
+        self._reload_direct_alsa_output(stop_first=False)
 
     @staticmethod
     def _output_format_key(profile: PlaybackOutputProfile) -> tuple[object, ...]:

@@ -14,12 +14,17 @@ _NETWORK_DEMUXER_READAHEAD_SEC = 8.0
 _NETWORK_CACHE_SEC = 30.0
 _NETWORK_DEMUXER_MAX_BYTES = 64 * 1024 * 1024
 _LOCAL_DEMUXER_READAHEAD_SEC = 1.0
-# Direct ALSA: hardware ALSA buffer for USB jitter; modest decoder queue for AAC
-# decode. Do not set mpv audio-buffer to multi-second values — that desyncs
-# playlist-pos from audible playback (see mpv manual).
+# Direct ALSA bit-perfect: large hardware buffer for USB jitter; modest decoder
+# queue for AAC decode. Do not set mpv audio-buffer to multi-second values —
+# that desyncs playlist-pos from audible playback (see mpv manual).
 _DIRECT_ALSA_ALSA_BUFFER_TIME_US = 10_000_000
 _DIRECT_ALSA_ALSA_PERIODS = 8
 _DIRECT_ALSA_AD_QUEUE_MAX_SEC = 4.0
+# Direct ALSA + mpv software volume: mpv attenuates before the AO ring buffer.
+# Multi-second ALSA/ad queues make audible level lag the UI slider by seconds.
+_DIRECT_ALSA_SOFTVOL_ALSA_BUFFER_TIME_US = 500_000
+_DIRECT_ALSA_SOFTVOL_ALSA_PERIODS = 4
+_DIRECT_ALSA_SOFTVOL_AD_QUEUE_MAX_SEC = 0.25
 _DIRECT_ALSA_CACHE_PAUSE_WAIT_SEC = 1.0
 _DIRECT_ALSA_DEMUXER_READAHEAD_SEC = 8.0
 
@@ -54,6 +59,7 @@ def mpv_options_for_input(
     *,
     direct_alsa: bool,
     warmup: bool = True,
+    software_volume: bool = False,
 ) -> dict[str, object]:
     """Return mpv properties to apply before loading a track."""
     if input_class in (InputClass.NETWORK_FILE, InputClass.STREAM):
@@ -69,12 +75,17 @@ def mpv_options_for_input(
             "cache": "no",
         }
     if direct_alsa:
-        options["alsa_buffer_time"] = _DIRECT_ALSA_ALSA_BUFFER_TIME_US
-        options["alsa_periods"] = _DIRECT_ALSA_ALSA_PERIODS
+        if software_volume:
+            options["alsa_buffer_time"] = _DIRECT_ALSA_SOFTVOL_ALSA_BUFFER_TIME_US
+            options["alsa_periods"] = _DIRECT_ALSA_SOFTVOL_ALSA_PERIODS
+            options["ad_queue_max_secs"] = _DIRECT_ALSA_SOFTVOL_AD_QUEUE_MAX_SEC
+        else:
+            options["alsa_buffer_time"] = _DIRECT_ALSA_ALSA_BUFFER_TIME_US
+            options["alsa_periods"] = _DIRECT_ALSA_ALSA_PERIODS
+            options["ad_queue_max_secs"] = _DIRECT_ALSA_AD_QUEUE_MAX_SEC
         options["demuxer_thread"] = "yes"
         options["ad_lavc_threads"] = 1
         options["ad_queue_enable"] = "yes"
-        options["ad_queue_max_secs"] = _DIRECT_ALSA_AD_QUEUE_MAX_SEC
         if input_class == InputClass.LOCAL:
             # Staged/local files: large ao/ALSA buffers only — demuxer cache adds CPU
             # and background I/O that competes with USB isochronous output.
@@ -98,12 +109,17 @@ def mpv_options_for_input(
     return options
 
 
-def direct_alsa_engine_options(*, warmup: bool = True) -> dict[str, object]:
+def direct_alsa_engine_options(
+    *,
+    warmup: bool = True,
+    software_volume: bool = False,
+) -> dict[str, object]:
     """mpv init options for direct ALSA before the output device first opens."""
     return mpv_options_for_input(
         InputClass.LOCAL,
         direct_alsa=True,
         warmup=warmup,
+        software_volume=software_volume,
     )
 
 

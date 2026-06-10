@@ -79,6 +79,16 @@ class BufferPolicyTests(unittest.TestCase):
         self.assertNotIn("cache_pause_initial", options)
         self.assertEqual(options["demuxer_readahead_secs"], 1.0)
 
+    def test_mpv_options_local_direct_alsa_software_volume(self) -> None:
+        options = mpv_options_for_input(
+            InputClass.LOCAL,
+            direct_alsa=True,
+            software_volume=True,
+        )
+        self.assertEqual(options["ad_queue_max_secs"], 0.25)
+        self.assertEqual(options["alsa_buffer_time"], 500_000)
+        self.assertEqual(options["alsa_periods"], 4)
+
     def test_mpv_options_local_direct_alsa_format_change_warmup(self) -> None:
         options = mpv_options_for_input(
             InputClass.LOCAL,
