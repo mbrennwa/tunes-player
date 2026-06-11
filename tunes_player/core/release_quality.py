@@ -470,6 +470,28 @@ def playback_preference_from_shell(
     return PlaybackPreference(max_quality_tier(*enabled_quality_tiers))
 
 
+def playback_preference_for_tier(tier: str) -> PlaybackPreference:
+    """Fixed playback ceiling for a single quality grid tile."""
+    if tier in _VALID_QUALITY_FILTERS:
+        return PlaybackPreference(tier)
+    return PlaybackPreference(QUALITY_FILTER_HI_RES)
+
+
+def catalog_quality_label_for_release(release: Release) -> str | None:
+    """Human-readable catalog quality for grid tiles."""
+    from tunes_player.core.playback_quality import catalog_tile_quality_label
+
+    tier = release.quality_tier or release.peak_quality_tier
+    if not tier and len(release.available_quality_tiers) == 1:
+        tier = next(iter(release.available_quality_tiers))
+    return catalog_tile_quality_label(
+        bit_depth=release.peak_bit_depth,
+        sample_rate_hz=release.peak_sample_rate_hz,
+        quality_tier=tier,
+        source=release.source,
+    )
+
+
 def release_available_quality_tiers(release: Release) -> frozenset[str]:
     """Tiers used for shell quality filter matching."""
     return release.available_quality_tiers
@@ -490,6 +512,8 @@ def streaming_catalog_quality_needs_enrich(release: Release) -> bool:
     if release.source not in (Source.TIDAL, Source.QOBUZ):
         return False
     if not release.catalog_quality_ready:
+        return True
+    if not (release.genre or "").strip():
         return True
     # Rows enriched before acoustic TIDAL resolution kept cd with no sample rate.
     return release.peak_sample_rate_hz is None

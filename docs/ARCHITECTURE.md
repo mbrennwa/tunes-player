@@ -578,7 +578,7 @@ UI never polls mpv properties directly.
 |-------|-----------------|--------|
 | A | One search box; results tagged Local / Tidal / Deezer / Qobuz | **Done** — `PlayerService.search()` merges local + signed-in backends |
 | B | Merged list, heuristic duplicate titles | Not started |
-| C | Dedup via MusicBrainz / ISRC / UPC | **Partial** — same-source UPC collapse in `core/release_editions.py` |
+| C | Dedup via MusicBrainz / ISRC / UPC | Not started — grid shows one tile per catalog quality tier (`core/release_quality_tiles.py`); shell quality filter is browse-only |
 | D | Unified playlists, “prefer local if duplicate” | Not started |
 
 Search is implemented in **`PlayerService.search()`** (local store first, then TIDAL and

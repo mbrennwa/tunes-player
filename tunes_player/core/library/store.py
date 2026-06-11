@@ -738,8 +738,9 @@ class LibraryStore:
             has_lossy=has_lossy,
         )
         peak_quality_tier = max_quality_tier(*available_quality_tiers)
+        release_id = str(row["release_id"])
         return Release(
-            id=str(row["release_id"]),
+            id=release_id,
             title=row["album"] or "Unknown",
             artist_name=row["album_artist"] or "Unknown Artist",
             source=Source.LOCAL,
@@ -753,6 +754,11 @@ class LibraryStore:
             duration_sec=float(duration) if duration is not None else None,
             peak_quality_tier=peak_quality_tier,
             available_quality_tiers=available_quality_tiers,
+            catalog_release_id=release_id,
+            peak_sample_rate_hz=(
+                int(max_sample_rate) if max_sample_rate is not None else None
+            ),
+            peak_bit_depth=int(max_bit_depth) if max_bit_depth is not None else None,
         )
 
     @staticmethod

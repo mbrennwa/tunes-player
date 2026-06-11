@@ -63,7 +63,6 @@ class ReleasePlaybackToggleTests(unittest.TestCase):
         play_release.assert_called_once_with(
             self._release_id,
             start_index=2,
-            enabled_quality_tiers=None,
         )
 
 

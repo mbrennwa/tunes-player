@@ -5,7 +5,10 @@ from __future__ import annotations
 import unittest
 
 from tunes_player.core.library.store import FileMetadata
+from tunes_player.core.models import Release, Source
 from tunes_player.core.playback_quality import (
+    catalog_tile_quality_label,
+    format_rate_bit_depth_compact,
     local_file_format_label,
     qobuz_format_label_from_stream,
     qobuz_stream_file_metadata,
@@ -16,9 +19,100 @@ from tunes_player.core.playback_quality import (
     tidal_stream_file_metadata,
     tidal_stream_format_label,
 )
+from tunes_player.core.release_quality import (
+    QUALITY_FILTER_CD,
+    QUALITY_FILTER_COMPRESSED,
+    QUALITY_FILTER_HI_RES,
+    catalog_quality_label_for_release,
+)
 
 
 class PlaybackQualityTests(unittest.TestCase):
+    def test_format_rate_bit_depth_compact_infers_depth_from_rate(self) -> None:
+        self.assertEqual(
+            format_rate_bit_depth_compact(
+                bit_depth=None,
+                sample_rate_hz=96_000,
+                quality_tier=QUALITY_FILTER_HI_RES,
+            ),
+            "96/24",
+        )
+
+    def test_format_rate_bit_depth_compact(self) -> None:
+        self.assertEqual(
+            format_rate_bit_depth_compact(bit_depth=16, sample_rate_hz=44_100),
+            "44.1/16",
+        )
+        self.assertEqual(
+            format_rate_bit_depth_compact(bit_depth=24, sample_rate_hz=192_000),
+            "192/24",
+        )
+        self.assertEqual(
+            format_rate_bit_depth_compact(bit_depth=24, sample_rate_hz=96_000),
+            "96/24",
+        )
+
+    def test_catalog_tile_quality_label_lossless(self) -> None:
+        self.assertEqual(
+            catalog_tile_quality_label(
+                bit_depth=24,
+                sample_rate_hz=96_000,
+                quality_tier=QUALITY_FILTER_HI_RES,
+            ),
+            "96/24",
+        )
+
+    def test_catalog_tile_quality_label_cd_fallback(self) -> None:
+        self.assertEqual(
+            catalog_tile_quality_label(
+                bit_depth=None,
+                sample_rate_hz=None,
+                quality_tier=QUALITY_FILTER_CD,
+            ),
+            "44.1/16",
+        )
+
+    def test_catalog_tile_quality_label_compressed(self) -> None:
+        self.assertEqual(
+            catalog_tile_quality_label(
+                bit_depth=None,
+                sample_rate_hz=None,
+                quality_tier=QUALITY_FILTER_COMPRESSED,
+                source=Source.QOBUZ,
+            ),
+            "MP3",
+        )
+        self.assertEqual(
+            catalog_tile_quality_label(
+                bit_depth=None,
+                sample_rate_hz=None,
+                quality_tier=QUALITY_FILTER_COMPRESSED,
+                source=Source.TIDAL,
+            ),
+            "AAC",
+        )
+        self.assertEqual(
+            catalog_tile_quality_label(
+                bit_depth=None,
+                sample_rate_hz=None,
+                quality_tier=QUALITY_FILTER_COMPRESSED,
+                lossy_codec="aac",
+            ),
+            "AAC",
+        )
+
+    def test_catalog_quality_label_for_release(self) -> None:
+        release = Release(
+            id="tidal:album:1@hi_res",
+            title="Album",
+            artist_name="Artist",
+            source=Source.TIDAL,
+            quality_tier=QUALITY_FILTER_HI_RES,
+            peak_bit_depth=24,
+            peak_sample_rate_hz=192_000,
+        )
+        self.assertEqual(catalog_quality_label_for_release(release), "192/24")
+
     def test_lossless_flac(self) -> None:
         meta = FileMetadata(
             path="/a.flac",

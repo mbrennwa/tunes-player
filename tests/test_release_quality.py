@@ -19,6 +19,7 @@ from tunes_player.core.release_quality import (
     is_acoustic_hi_res,
     max_quality_tier,
     min_quality_tier,
+    playback_preference_for_tier,
     playback_preference_from_shell,
     qobuz_format_candidates_for_preference,
     qobuz_format_id_for_preference,
@@ -191,8 +192,21 @@ class ReleaseQualityTests(unittest.TestCase):
             available_quality_tiers=frozenset({QUALITY_FILTER_HI_RES}),
             catalog_quality_ready=True,
             peak_sample_rate_hz=96_000,
+            genre="Pop",
         )
         self.assertFalse(streaming_catalog_quality_needs_enrich(fresh))
+
+    def test_streaming_catalog_needs_enrich_when_genre_missing(self) -> None:
+        release = Release(
+            id="tidal:album:3",
+            title="Album",
+            artist_name="Artist",
+            source=Source.TIDAL,
+            catalog_quality_ready=True,
+            peak_sample_rate_hz=96_000,
+            genre=None,
+        )
+        self.assertTrue(streaming_catalog_quality_needs_enrich(release))
 
     def test_tidal_cd_edition_audio_resolution_stays_cd(self) -> None:
         album = SimpleNamespace(
@@ -300,6 +314,16 @@ class ReleaseQualityTests(unittest.TestCase):
     def test_playback_preference_empty_filter_means_hi_res(self) -> None:
         pref = playback_preference_from_shell(frozenset())
         self.assertEqual(pref.max_tier, QUALITY_FILTER_HI_RES)
+
+    def test_playback_preference_for_tier(self) -> None:
+        self.assertEqual(
+            playback_preference_for_tier(QUALITY_FILTER_CD).max_tier,
+            QUALITY_FILTER_CD,
+        )
+        self.assertEqual(
+            playback_preference_for_tier(QUALITY_FILTER_HI_RES).max_tier,
+            QUALITY_FILTER_HI_RES,
+        )
 
     def test_qobuz_format_id_cd_preference_caps_config(self) -> None:
         preference = PlaybackPreference(max_tier=QUALITY_FILTER_CD)

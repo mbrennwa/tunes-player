@@ -10,9 +10,10 @@ from tunes_player.core.library.release_logic import (
     infer_release_completeness,
     release_type_from_metadata,
 )
-from tunes_player.core.release_editions import (
+from tunes_player.core.release_catalog import (
+    genre_from_tidal_album,
+    peak_bit_depth_from_tidal_album,
     peak_sample_rate_from_tidal_album,
-    upc_from_tidal_album,
 )
 from tunes_player.core.release_quality import (
     QUALITY_FILTER_COMPRESSED,
@@ -112,8 +113,9 @@ def release_stub_from_tidal(
     artist_name, year, expected, track_count, completeness, release_type, art_uri = (
         _release_common_fields(session, album, owned_track_count=owned_track_count)
     )
+    catalog_id = tidal_ids.album_id(album.id)
     return Release(
-        id=tidal_ids.album_id(album.id),
+        id=catalog_id,
         title=album.name or "Unknown",
         artist_name=artist_name,
         source=Source.TIDAL,
@@ -126,7 +128,7 @@ def release_stub_from_tidal(
         peak_quality_tier="",
         available_quality_tiers=frozenset(),
         catalog_quality_ready=False,
-        upc=upc_from_tidal_album(album),
+        catalog_release_id=catalog_id,
     )
 
 
@@ -143,8 +145,9 @@ def release_from_tidal(
     )
     available_quality_tiers = classify_tidal_catalog(album, tracks=tracks)
     peak_quality_tier = peak_quality_tier_from_tiers(available_quality_tiers)
+    catalog_id = tidal_ids.album_id(album.id)
     return Release(
-        id=tidal_ids.album_id(album.id),
+        id=catalog_id,
         title=album.name or "Unknown",
         artist_name=artist_name,
         source=Source.TIDAL,
@@ -153,12 +156,14 @@ def release_from_tidal(
         expected_track_count=expected,
         completeness=completeness,
         release_type=release_type,
+        genre=genre_from_tidal_album(album, fetch_tracks=True),
         art_uri=art_uri,
         peak_quality_tier=peak_quality_tier,
         available_quality_tiers=available_quality_tiers,
         catalog_quality_ready=True,
-        upc=upc_from_tidal_album(album),
+        catalog_release_id=catalog_id,
         peak_sample_rate_hz=peak_sample_rate_from_tidal_album(album),
+        peak_bit_depth=peak_bit_depth_from_tidal_album(album),
     )
 
 

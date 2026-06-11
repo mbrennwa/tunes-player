@@ -188,12 +188,14 @@ def release_to_cache_payload(release: Release) -> dict[str, Any]:
     available = release_available_quality_tiers(release)
     if available:
         payload["available_quality_tiers"] = sorted(available)
-    if release.upc:
-        payload["upc"] = release.upc
-    if release.edition_release_ids:
-        payload["edition_release_ids"] = sorted(release.edition_release_ids)
+    if release.catalog_release_id:
+        payload["catalog_release_id"] = release.catalog_release_id
+    if release.quality_tier in _VALID_QUALITY_FILTERS:
+        payload["quality_tier"] = release.quality_tier
     if release.peak_sample_rate_hz is not None:
         payload["peak_sample_rate_hz"] = release.peak_sample_rate_hz
+    if release.peak_bit_depth is not None:
+        payload["peak_bit_depth"] = release.peak_bit_depth
     return payload
 
 
@@ -250,20 +252,14 @@ def release_from_cache_payload(raw: object) -> Release | None:
         catalog_quality_ready = source == Source.LOCAL
     elif not isinstance(catalog_quality_ready, bool):
         catalog_quality_ready = bool(catalog_quality_ready)
-    upc: str | None = None
-    upc_raw = raw.get("upc")
-    if upc_raw is not None:
-        from tunes_player.core.release_editions import normalize_upc
-
-        upc = normalize_upc(upc_raw)
-    edition_release_ids: frozenset[str] = frozenset()
-    edition_raw = raw.get("edition_release_ids")
-    if isinstance(edition_raw, list):
-        parsed_editions = frozenset(
-            str(item) for item in edition_raw if isinstance(item, str) and item
-        )
-        if parsed_editions:
-            edition_release_ids = parsed_editions
+    catalog_release_id = ""
+    catalog_raw = raw.get("catalog_release_id")
+    if isinstance(catalog_raw, str) and catalog_raw:
+        catalog_release_id = catalog_raw
+    quality_tier = ""
+    quality_tier_raw = raw.get("quality_tier")
+    if isinstance(quality_tier_raw, str) and quality_tier_raw in _VALID_QUALITY_FILTERS:
+        quality_tier = quality_tier_raw
     peak_sample_rate_hz: int | None = None
     rate_raw = raw.get("peak_sample_rate_hz")
     if rate_raw is not None:
@@ -271,6 +267,13 @@ def release_from_cache_payload(raw: object) -> Release | None:
             peak_sample_rate_hz = int(rate_raw)
         except (TypeError, ValueError):
             peak_sample_rate_hz = None
+    peak_bit_depth: int | None = None
+    depth_raw = raw.get("peak_bit_depth")
+    if depth_raw is not None:
+        try:
+            peak_bit_depth = int(depth_raw)
+        except (TypeError, ValueError):
+            peak_bit_depth = None
     return Release(
         id=release_id,
         title=title,
@@ -287,9 +290,10 @@ def release_from_cache_payload(raw: object) -> Release | None:
         peak_quality_tier=peak_quality_tier,
         available_quality_tiers=available_quality_tiers,
         catalog_quality_ready=catalog_quality_ready,
-        upc=upc,
-        edition_release_ids=edition_release_ids,
+        catalog_release_id=catalog_release_id,
+        quality_tier=quality_tier,
         peak_sample_rate_hz=peak_sample_rate_hz,
+        peak_bit_depth=peak_bit_depth,
     )
 
 

@@ -54,12 +54,14 @@ class Release:
     available_quality_tiers: frozenset[str] = frozenset()
     # False for streaming browse stubs until album lookup classifies quality.
     catalog_quality_ready: bool = True
-    # Normalized digits-only UPC/EAN from provider album/get; None when absent.
-    upc: str | None = None
-    # Provider album ids in a UPC merge group; empty when not collapsed.
-    edition_release_ids: frozenset[str] = frozenset()
-    # Peak album sample rate (Hz) for edition tie-break within a quality bucket.
+    # Provider album id for API/track fetch (equals id when not a synthetic tile).
+    catalog_release_id: str = ""
+    # Single quality bucket this grid tile represents after tier expansion.
+    quality_tier: str = ""
+    # Peak album sample rate (Hz) for tile labels and acoustic tier mapping.
     peak_sample_rate_hz: int | None = None
+    # Peak bit depth for tile labels (streaming catalog metadata).
+    peak_bit_depth: int | None = None
 
     @property
     def has_compressed(self) -> bool:

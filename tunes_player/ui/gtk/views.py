@@ -12,6 +12,11 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.models import Release, ReleaseCompleteness, Source, Track
+from tunes_player.core.release_quality import (
+    catalog_quality_label_for_release,
+    playback_preference_for_tier,
+)
+from tunes_player.core.release_quality_tiles import parse_quality_tier_suffix
 from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.album_grid import (
     ALBUM_GRID_SPACING,
@@ -38,6 +43,9 @@ _RELEASE_ART_PLAY_SIZE_RATIO = 0.30
 _RELEASE_ART_PLAY_INSET_RATIO = 0.036
 _RELEASE_ART_PLAY_MIN_SIZE = 36
 _RELEASE_ART_PLAY_MAX_SIZE = 66
+# Pango ellipsize modes (Gtk.Label.ellipsize); avoid Gtk.EllipsizeMode (not in all bindings).
+_ELLIPSIZE_NONE = 0
+_ELLIPSIZE_END = 3
 
 
 class PlaceholderView(Gtk.Box):
@@ -133,6 +141,22 @@ def _format_release_track_count(release: Release) -> str | None:
     if release.track_count:
         return _track_count_label(release.track_count)
     return None
+
+
+def _release_catalog_meta_line(release: Release, *extra_parts: str | None) -> str:
+    """Third metadata line: tracks · source · quality (optional extra segments)."""
+    return join_detail(
+        _format_release_track_count(release),
+        source_label(release.source),
+        catalog_quality_label_for_release(release),
+        *extra_parts,
+    )
+
+
+def _release_artist_line_text(release: Release) -> str:
+    """Second metadata line: artist · year · genre."""
+    year = str(release.year) if release.year else None
+    return join_detail(release.artist_name, year, release.genre)
 
 
 def _sync_release_art_play_button(
@@ -476,9 +500,10 @@ class ReleaseDetailView(Gtk.Box):
         header_row.set_vexpand(False)
         header.append(header_row)
 
+        tile_tier = release.quality_tier or parse_quality_tier_suffix(release.id) or ""
         tracks = service.get_release_tracks(
             release.id,
-            playback_preference=service.playback_preference_for_shell(),
+            playback_preference=playback_preference_for_tier(tile_tier),
         )
 
         art_frame = _square_art_with_play(
@@ -530,18 +555,12 @@ class ReleaseDetailView(Gtk.Box):
         details_text.append(title)
 
         details_text.append(
-            _detail_artist_year_row(release, on_artist_search=on_artist_search)
+            _detail_artist_line(release, on_artist_search=on_artist_search)
         )
 
         duration = format_duration(release.duration_sec)
-        track_count = _format_release_track_count(release)
         info = Gtk.Label(
-            label=join_detail(
-                track_count,
-                duration,
-                release.genre,
-                source_label(release.source),
-            ),
+            label=_release_catalog_meta_line(release, duration),
             xalign=0.0,
             ellipsize=3,
         )
@@ -1229,61 +1248,39 @@ def _square_art_with_play(
     return frame
 
 
-def _detail_artist_year_row(
+def _detail_artist_line(
     release: Release,
     *,
     on_artist_search: Callable[[str], None] | None,
-) -> Gtk.Box:
-    """Detail header row: artist (optionally linked) and release year."""
-    row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-    row.set_halign(Gtk.Align.START)
-
-    if on_artist_search is not None:
-        row.append(
-            _artist_name_link(
-                release.artist_name,
-                on_activate=lambda name=release.artist_name: on_artist_search(name),
-            )
-        )
-    else:
-        artist = Gtk.Label(label=release.artist_name, xalign=0.0, ellipsize=3)
-        artist.add_css_class("title-4")
-        artist.add_css_class("dim-label")
-        artist.set_wrap(False)
-        artist.set_halign(Gtk.Align.START)
-        row.append(artist)
-
-    year = str(release.year) if release.year else None
-    if year:
-        year_label = Gtk.Label(label=f" · {year}", xalign=0.0, ellipsize=3)
-        year_label.add_css_class("title-4")
-        year_label.add_css_class("dim-label")
-        year_label.set_wrap(False)
-        year_label.set_halign(Gtk.Align.START)
-        row.append(year_label)
-    return row
-
-
-def _artist_name_link(name: str, *, on_activate: Callable[[], None]) -> Gtk.Button:
-    label = Gtk.Label(label=name, xalign=0.0, ellipsize=3)
+) -> Gtk.Widget:
+    """Detail header: artist · year · genre (single line, ellipsized at end)."""
+    text = _release_artist_line_text(release)
+    label = Gtk.Label(label=text, xalign=0.0, ellipsize=_ELLIPSIZE_END)
     label.add_css_class("title-4")
     label.add_css_class("dim-label")
     label.set_wrap(False)
     label.set_halign(Gtk.Align.START)
+    label.set_hexpand(True)
+    if on_artist_search is None:
+        return label
 
     button = Gtk.Button()
     button.add_css_class("flat")
     button.add_css_class("artist-link")
     button.set_child(label)
-    button.set_halign(Gtk.Align.START)
+    button.set_halign(Gtk.Align.FILL)
+    button.set_hexpand(True)
     button.set_tooltip_text("Search for releases by this artist")
     button.set_cursor_from_name("pointer")
-    button.connect("clicked", lambda *_args: on_activate())
+    button.connect(
+        "clicked",
+        lambda *_args: on_artist_search(release.artist_name),
+    )
     return button
 
 
 def _overlay_label(text: str, *, extra_classes: tuple[str, ...] = ()) -> Gtk.Label:
-    label = Gtk.Label(label=text, xalign=0.0, ellipsize=3)
+    label = Gtk.Label(label=text, xalign=0.0, ellipsize=_ELLIPSIZE_END)
     label.set_halign(Gtk.Align.START)
     label.set_wrap(False)
     for css_class in extra_classes:
@@ -1291,46 +1288,33 @@ def _overlay_label(text: str, *, extra_classes: tuple[str, ...] = ()) -> Gtk.Lab
     return label
 
 
-def _overlay_artist_link(name: str, *, on_activate: Callable[[], None]) -> Gtk.Button:
-    label = Gtk.Label(label=name, xalign=0.0, ellipsize=3)
-    label.add_css_class("album-card-meta")
-    label.set_halign(Gtk.Align.START)
-    label.set_wrap(False)
+def _overlay_artist_line(
+    release: Release,
+    *,
+    on_artist_search: Callable[[str], None] | None,
+) -> Gtk.Widget:
+    """Grid tile overlay: artist · year · genre (single line, ellipsized at end)."""
+    label = _overlay_label(
+        _release_artist_line_text(release),
+        extra_classes=("album-card-meta",),
+    )
+    label.set_hexpand(True)
+    if on_artist_search is None:
+        return label
 
     button = Gtk.Button()
     button.add_css_class("flat")
     button.add_css_class("artist-link")
     button.set_child(label)
-    button.set_halign(Gtk.Align.START)
+    button.set_halign(Gtk.Align.FILL)
+    button.set_hexpand(True)
     button.set_tooltip_text("Search for releases by this artist")
     button.set_cursor_from_name("pointer")
-    button.connect("clicked", lambda *_args: on_activate())
+    button.connect(
+        "clicked",
+        lambda *_args: on_artist_search(release.artist_name),
+    )
     return button
-
-
-def _overlay_artist_year_row(
-    release: Release,
-    *,
-    on_artist_search: Callable[[str], None] | None,
-) -> Gtk.Box:
-    """Grid tile overlay: artist (optionally linked) and release year."""
-    row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-    row.set_halign(Gtk.Align.START)
-
-    if on_artist_search is not None:
-        row.append(
-            _overlay_artist_link(
-                release.artist_name,
-                on_activate=lambda name=release.artist_name: on_artist_search(name),
-            )
-        )
-    else:
-        row.append(_overlay_label(release.artist_name, extra_classes=("album-card-meta",)))
-
-    year = str(release.year) if release.year else None
-    if year:
-        row.append(_overlay_label(f" · {year}", extra_classes=("album-card-meta",)))
-    return row
 
 
 def _release_card(
@@ -1400,12 +1384,10 @@ def _release_card(
     overlay.add_overlay(labels)
 
     labels.append(_overlay_label(release.title, extra_classes=("album-card-title",)))
-    labels.append(_overlay_artist_year_row(release, on_artist_search=on_artist_search))
-    meta = join_detail(
-        _format_release_track_count(release),
-        release.genre,
-        source_label(release.source),
-    )
+    artist_line = _overlay_artist_line(release, on_artist_search=on_artist_search)
+    artist_line.set_hexpand(True)
+    labels.append(artist_line)
+    meta = _release_catalog_meta_line(release)
     labels.append(_overlay_label(meta, extra_classes=("album-card-meta",)))
 
     return shell

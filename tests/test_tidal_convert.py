@@ -150,7 +150,7 @@ class TidalConvertTests(unittest.TestCase):
         self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_CD)
         self.assertTrue(release.catalog_quality_ready)
 
-    def test_classified_release_reads_upc(self) -> None:
+    def test_classified_release_reads_catalog_id_and_sample_rate(self) -> None:
         sparse = SimpleNamespace(
             id=42,
             type="ALBUM",
@@ -163,36 +163,18 @@ class TidalConvertTests(unittest.TestCase):
             audio_modes=[],
             barcodeId="0060254735180",
             sample_rate=96_000,
+            get_audio_resolution=lambda: [(24, 96_000)],
             tracks=lambda: (_ for _ in ()).throw(
                 AssertionError("tracks() must not run for album-only classification"),
             ),
         )
         session = _FakeSession()
         release = release_from_tidal(session, sparse)
-        self.assertEqual(release.upc, "60254735180")
+        self.assertEqual(release.catalog_release_id, "tidal:album:42")
         self.assertEqual(release.peak_sample_rate_hz, 96_000)
+        self.assertEqual(release.peak_bit_depth, 24)
 
-    def test_classified_release_reads_modern_tidal_upc_field(self) -> None:
-        sparse = SimpleNamespace(
-            id=43,
-            type="ALBUM",
-            name="Hi-Fi",
-            num_tracks=2,
-            artists=[SimpleNamespace(name="Artist")],
-            release_date=None,
-            audio_quality="LOSSLESS",
-            media_metadata_tags=None,
-            audio_modes=[],
-            upc=60254735180,
-            tracks=lambda: (_ for _ in ()).throw(
-                AssertionError("tracks() must not run for album-only classification"),
-            ),
-        )
-        session = _FakeSession()
-        release = release_from_tidal(session, sparse)
-        self.assertEqual(release.upc, "60254735180")
-
-    def test_stub_reads_upc_when_present(self) -> None:
+    def test_stub_sets_catalog_release_id(self) -> None:
         sparse = SimpleNamespace(
             id=44,
             type="ALBUM",
@@ -204,7 +186,7 @@ class TidalConvertTests(unittest.TestCase):
         )
         session = _FakeSession()
         release = release_stub_from_tidal(session, sparse)
-        self.assertEqual(release.upc, "60254735180")
+        self.assertEqual(release.catalog_release_id, "tidal:album:44")
         self.assertFalse(release.catalog_quality_ready)
 
     def test_release_peak_quality_from_track_list(self) -> None:

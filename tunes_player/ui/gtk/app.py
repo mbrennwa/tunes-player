@@ -17,7 +17,10 @@ from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.logging_config import configure_logging
 from tunes_player.core.models import Release, Source
-from tunes_player.core.release_editions import log_grid_release_upcs
+from tunes_player.core.release_quality_tiles import (
+    log_grid_quality_tiles,
+    parse_catalog_release_id,
+)
 from tunes_player.core.release_quality import streaming_catalog_quality_needs_enrich
 from tunes_player.core.services import PlayerService
 from tunes_player.core.shell_state import (
@@ -386,7 +389,7 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _store_selection_cache(self, state: ShellState, releases: list[Release]) -> None:
         self._cached_selection_key = self._selection_cache_key(state)
-        self._cached_releases = self._service.collapse_releases_with_cache(list(releases))
+        self._cached_releases = self._service.expand_releases_with_cache(list(releases))
         self._sync_release_type_multi()
         self._sync_genre_filter()
         self._sync_quality_filter()
@@ -823,7 +826,7 @@ class TunesWindow(Adw.ApplicationWindow):
             return None
         if not cached_releases_have_quality_tiers(state.cached_releases):
             releases = self._refresh_cached_release_quality(releases)
-        return self._service.collapse_releases_with_cache(releases)
+        return self._service.expand_releases_with_cache(releases)
 
     def _load_releases_for_state(self, state: ShellState) -> list[Release]:
         restored = self._restore_persisted_releases(state)
@@ -945,11 +948,20 @@ class TunesWindow(Adw.ApplicationWindow):
     def _start_catalog_quality_enrich(self, token: int) -> None:
         if self._shell_state.base == ShellBase.ALL_LOCAL:
             return
-        pending_ids = [
-            release.id
-            for release in self._cached_releases
-            if streaming_catalog_quality_needs_enrich(release)
-        ]
+        pending_ids: list[str] = []
+        seen_catalog_ids: set[str] = set()
+        for release in self._cached_releases:
+            if not streaming_catalog_quality_needs_enrich(release):
+                continue
+            catalog_id = (
+                release.catalog_release_id
+                or parse_catalog_release_id(release.id)
+                or release.id
+            )
+            if catalog_id in seen_catalog_ids:
+                continue
+            seen_catalog_ids.add(catalog_id)
+            pending_ids.append(catalog_id)
         if not pending_ids:
             return
 
@@ -991,30 +1003,47 @@ class TunesWindow(Adw.ApplicationWindow):
     def _patch_enriched_release(self, token: int, enriched: Release) -> bool:
         if token != self._load_token:
             return False
+        catalog_id = enriched.catalog_release_id or enriched.id
+        catalog_releases: dict[str, Release] = {}
         patched = False
-        updated: list[Release] = []
         for release in self._cached_releases:
-            if release.id == enriched.id:
-                updated.append(enriched)
+            release_catalog_id = (
+                release.catalog_release_id
+                or parse_catalog_release_id(release.id)
+                or release.id
+            )
+            if release_catalog_id == catalog_id:
+                catalog_releases[catalog_id] = enriched
                 patched = True
-            else:
-                updated.append(release)
+            elif release_catalog_id not in catalog_releases:
+                catalog_releases[release_catalog_id] = release
         if not patched:
-            return False
-        self._cached_releases = self._service.collapse_releases_with_cache(updated)
-        return self._refresh_grid_after_edition_collapse()
+            catalog_releases[catalog_id] = enriched
+        self._cached_releases = self._service.expand_releases_with_cache(
+            list(catalog_releases.values()),
+        )
+        return self._refresh_grid_after_quality_expand()
 
     def _finish_catalog_enrich(self, token: int) -> bool:
         if token != self._load_token:
             return False
-        self._cached_releases = self._service.collapse_releases_with_cache(
-            list(self._cached_releases),
+        catalog_releases: dict[str, Release] = {}
+        for release in self._cached_releases:
+            catalog_id = (
+                release.catalog_release_id
+                or parse_catalog_release_id(release.id)
+                or release.id
+            )
+            if catalog_id not in catalog_releases:
+                catalog_releases[catalog_id] = release
+        self._cached_releases = self._service.expand_releases_with_cache(
+            list(catalog_releases.values()),
         )
-        self._refresh_grid_after_edition_collapse()
+        self._refresh_grid_after_quality_expand()
         self._sync_quality_filter()
         return False
 
-    def _refresh_grid_after_edition_collapse(self) -> bool:
+    def _refresh_grid_after_quality_expand(self) -> bool:
         filtered = self._filtered_from_cache(self._shell_state)
         title = self._grid_title(self._shell_state)
         self._show_grid(
@@ -1101,7 +1130,6 @@ class TunesWindow(Adw.ApplicationWindow):
             on_release_play=lambda release_id: self._service.play_or_toggle_release(
                 release_id,
                 start_index=0,
-                enabled_quality_tiers=self._enabled_quality_tiers_for_playback(),
             ),
             on_artist_search=self._search_for_artist,
             empty_message=empty_message,
@@ -1120,7 +1148,7 @@ class TunesWindow(Adw.ApplicationWindow):
             filtered_count=len(releases),
             catalog_count=catalog_count,
         )
-        log_grid_release_upcs(releases)
+        log_grid_quality_tiles(releases)
 
     def _catalog_releases_for_message(self, state: ShellState) -> list[Release]:
         if self._cache_matches(state) and self._cached_releases:
@@ -1178,11 +1206,7 @@ class TunesWindow(Adw.ApplicationWindow):
         if state.current_track is None and not state.queue:
             release_id = self._release_id_for_current_view()
             if release_id is not None:
-                self._service.play_release(
-                    release_id,
-                    start_index=0,
-                    enabled_quality_tiers=self._enabled_quality_tiers_for_playback(),
-                )
+                self._service.play_release(release_id, start_index=0)
                 return
         self._service.toggle_play_pause()
 

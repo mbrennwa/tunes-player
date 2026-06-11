@@ -15,9 +15,9 @@ from tunes_player.core.models import (
     Source,
     Track,
 )
-from tunes_player.core.release_editions import (
+from tunes_player.core.release_catalog import (
+    peak_bit_depth_from_qobuz_album,
     peak_sample_rate_from_qobuz_album,
-    upc_from_qobuz_album,
 )
 from tunes_player.core.release_quality import (
     classify_qobuz_catalog,
@@ -97,7 +97,12 @@ def _release_common_fields(
     duration = album.get("duration")
     duration_sec = float(duration) if duration is not None else None
     genre = album.get("genre")
-    genre_name = genre.get("name") if isinstance(genre, dict) else None
+    if isinstance(genre, dict):
+        genre_name = genre.get("name")
+    elif isinstance(genre, str):
+        genre_name = genre
+    else:
+        genre_name = None
     art_uri = cover_url(album.get("image"))
     return (
         album_id,
@@ -131,8 +136,9 @@ def release_stub_from_qobuz(
         genre_name,
         art_uri,
     ) = _release_common_fields(album, owned_track_count=owned_track_count)
+    catalog_id = qobuz_ids.album_id(album_id)
     return Release(
-        id=qobuz_ids.album_id(album_id),
+        id=catalog_id,
         title=title,
         artist_name=artist_name,
         source=Source.QOBUZ,
@@ -147,7 +153,7 @@ def release_stub_from_qobuz(
         peak_quality_tier="",
         available_quality_tiers=frozenset(),
         catalog_quality_ready=False,
-        upc=upc_from_qobuz_album(album),
+        catalog_release_id=catalog_id,
     )
 
 
@@ -171,8 +177,9 @@ def release_from_qobuz(
     ) = _release_common_fields(album, owned_track_count=owned_track_count)
     available_quality_tiers = classify_qobuz_catalog(album)
     peak_quality_tier = peak_quality_tier_from_tiers(available_quality_tiers)
+    catalog_id = qobuz_ids.album_id(album_id)
     return Release(
-        id=qobuz_ids.album_id(album_id),
+        id=catalog_id,
         title=title,
         artist_name=artist_name,
         source=Source.QOBUZ,
@@ -187,8 +194,9 @@ def release_from_qobuz(
         peak_quality_tier=peak_quality_tier,
         available_quality_tiers=available_quality_tiers,
         catalog_quality_ready=True,
-        upc=upc_from_qobuz_album(album),
+        catalog_release_id=catalog_id,
         peak_sample_rate_hz=peak_sample_rate_from_qobuz_album(album),
+        peak_bit_depth=peak_bit_depth_from_qobuz_album(album),
     )
 
 

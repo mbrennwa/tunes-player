@@ -48,13 +48,15 @@ from tunes_player.core.playback.output_profile import (
     compute_output_profile,
 )
 from tunes_player.core.playback_quality import format_playback_status
-from tunes_player.core.release_editions import (
-    collapse_releases_by_upc,
-    resolve_edition_release_id,
-)
 from tunes_player.core.release_quality import (
     PlaybackPreference,
+    playback_preference_for_tier,
     playback_preference_from_shell,
+)
+from tunes_player.core.release_quality_tiles import (
+    expand_releases_by_quality_tier,
+    parse_catalog_release_id,
+    playback_tier_for_release_id,
 )
 from tunes_player.core.volume import (
     VolumeController,
@@ -186,7 +188,7 @@ class PlayerService:
         self._playlist_playback_preference: PlaybackPreference | None = None
         self._current_track: Track | None = None
         self._current_release_id: str | None = None
-        self._edition_summaries: dict[str, Release] = {}
+        self._release_summaries: dict[str, Release] = {}
         self._quality_hint = ""
         self._tidal_playback_format_label: str | None = None
         self._tidal_playback_format_track_id: str | None = None
@@ -352,9 +354,9 @@ class PlayerService:
             by_release_id.values(),
             key=lambda item: (-item.added_ns, item.release.title.casefold()),
         )
-        collapsed = self._collapse_discover_items(deduped)
+        expanded = self._expand_discover_items(deduped)
         return sorted(
-            collapsed,
+            expanded,
             key=lambda item: (-item.added_ns, item.release.title.casefold()),
         )[:NEW_MUSIC_MERGE_LIMIT]
 
@@ -438,36 +440,41 @@ class PlayerService:
             by_release_id.values(),
             key=lambda item: (-item.added_ns, item.release.title.casefold()),
         )
-        collapsed = self._collapse_discover_items(deduped)
+        expanded = self._expand_discover_items(deduped)
         return sorted(
-            collapsed,
+            expanded,
             key=lambda item: (-item.added_ns, item.release.title.casefold()),
         )[:SUGGESTIONS_MERGE_LIMIT]
 
-    def cache_edition_summary(self, release: Release) -> None:
-        self._edition_summaries[release.id] = release
+    def cache_release_summary(self, release: Release) -> None:
+        self._release_summaries[release.id] = release
 
-    def collapse_releases_with_cache(self, releases: list[Release]) -> list[Release]:
+    def expand_releases_with_cache(self, releases: list[Release]) -> list[Release]:
         for release in releases:
-            self.cache_edition_summary(release)
-        collapsed = collapse_releases_by_upc(releases)
-        for release in collapsed:
-            self.cache_edition_summary(release)
-        return collapsed
+            self.cache_release_summary(release)
+        expanded = expand_releases_by_quality_tier(releases)
+        for release in expanded:
+            self.cache_release_summary(release)
+        return expanded
 
-    def _collapse_discover_items(
+    def _expand_discover_items(
         self,
         items: list[RecentlyAddedItem],
     ) -> list[RecentlyAddedItem]:
         if not items:
             return []
         by_id = {item.release.id: item for item in items}
-        collapsed = self.collapse_releases_with_cache(
+        expanded = self.expand_releases_with_cache(
             [item.release for item in items],
         )
         result: list[RecentlyAddedItem] = []
-        for release in collapsed:
-            candidate_ids = release.edition_release_ids or frozenset({release.id})
+        seen_tiles: set[str] = set()
+        for release in expanded:
+            if release.id in seen_tiles:
+                continue
+            seen_tiles.add(release.id)
+            catalog_id = release.catalog_release_id or parse_catalog_release_id(release.id)
+            candidate_ids = {release.id, catalog_id}
             best: RecentlyAddedItem | None = None
             for release_id in candidate_ids:
                 item = by_id.get(release_id)
@@ -483,61 +490,46 @@ class PlayerService:
 
     def get_release_summary(self, release_id: str) -> Release | None:
         """Lightweight release lookup for grids (no full track list)."""
-        if release_id.startswith("tidal:"):
+        catalog_id = parse_catalog_release_id(release_id)
+        if catalog_id.startswith("tidal:"):
             if not self._tidal.is_logged_in():
                 return None
             try:
-                return self._tidal.get_release_summary(release_id)
+                return self._tidal.get_release_summary(catalog_id)
             except TidalUnavailableError:
                 return None
-        if release_id.startswith("qobuz:"):
+        if catalog_id.startswith("qobuz:"):
             if not self._qobuz.is_logged_in():
                 return None
             try:
-                return self._qobuz.get_release_summary(release_id)
+                return self._qobuz.get_release_summary(catalog_id)
             except QobuzUnavailableError:
                 return None
-        return self._store.get_release(release_id)
+        return self._store.get_release(catalog_id)
 
     def get_release(self, release_id: str) -> Release | None:
-        if release_id.startswith("tidal:"):
+        cached = self._release_summaries.get(release_id)
+        if cached is not None:
+            return cached
+        catalog_id = parse_catalog_release_id(release_id)
+        if catalog_id.startswith("tidal:"):
             if not self._tidal.is_logged_in():
                 return None
             try:
-                return self._tidal.get_release(release_id)
+                return self._tidal.get_release(catalog_id)
             except TidalUnavailableError:
                 return None
-        if release_id.startswith("qobuz:"):
+        if catalog_id.startswith("qobuz:"):
             if not self._qobuz.is_logged_in():
                 return None
             try:
-                return self._qobuz.get_release(release_id)
+                return self._qobuz.get_release(catalog_id)
             except QobuzUnavailableError:
                 return None
-        return self._store.get_release(release_id)
+        return self._store.get_release(catalog_id)
 
     def get_album(self, album_id: str) -> Album | None:
         return self.get_release(album_id)
-
-    def resolve_playback_release_id(
-        self,
-        release_id: str,
-        *,
-        preference: PlaybackPreference | None = None,
-    ) -> str:
-        preference = preference or self._playback_preference_for_shell()
-        canonical = self._edition_summaries.get(release_id)
-        if canonical is None:
-            canonical = self.get_release_summary(release_id)
-        if canonical is None:
-            return release_id
-        if not canonical.edition_release_ids:
-            return release_id
-        return resolve_edition_release_id(
-            canonical,
-            preference=preference,
-            summaries=self._edition_summaries,
-        )
 
     def get_release_tracks(
         self,
@@ -545,15 +537,22 @@ class PlayerService:
         *,
         playback_preference: PlaybackPreference | None = None,
     ) -> list[Track]:
+        tier = playback_tier_for_release_id(
+            release_id,
+            summaries=self._release_summaries,
+        )
         preference = (
             playback_preference
             if playback_preference is not None
-            else self._playback_preference_for_shell()
+            else playback_preference_for_tier(tier)
         )
-        resolved_id = self.resolve_playback_release_id(
-            release_id,
-            preference=preference,
+        cached = self._release_summaries.get(release_id)
+        catalog_id = (
+            cached.catalog_release_id
+            if cached is not None and cached.catalog_release_id
+            else parse_catalog_release_id(release_id)
         )
+        resolved_id = catalog_id
         if resolved_id.startswith("tidal:"):
             if not self._tidal.is_logged_in():
                 return []
@@ -1560,6 +1559,13 @@ class PlayerService:
         self._auto_advanced_from_index = None
         self._play_queue_index(index)
 
+    def playback_preference_for_release_id(self, release_id: str) -> PlaybackPreference:
+        tier = playback_tier_for_release_id(
+            release_id,
+            summaries=self._release_summaries,
+        )
+        return playback_preference_for_tier(tier)
+
     def playback_preference_for_shell(
         self,
         *,
@@ -1588,7 +1594,7 @@ class PlayerService:
         else:
             release = self.get_release_summary(release_id)
         if release is not None:
-            self.cache_edition_summary(release)
+            self.cache_release_summary(release)
         return release
 
     def play_track(self, track_id: str) -> None:
@@ -1682,14 +1688,15 @@ class PlayerService:
         release_id: str,
         *,
         start_index: int = 0,
-        enabled_quality_tiers: frozenset[str] | None = None,
     ) -> None:
         self._play_release_generation += 1
         generation = self._play_release_generation
         def worker() -> None:
-            preference = self._playback_preference_for_shell(
-                enabled_quality_tiers=enabled_quality_tiers,
+            tier = playback_tier_for_release_id(
+                release_id,
+                summaries=self._release_summaries,
             )
+            preference = playback_preference_for_tier(tier)
             tracks = self.get_release_tracks(
                 release_id,
                 playback_preference=preference,
@@ -1780,16 +1787,11 @@ class PlayerService:
         release_id: str,
         *,
         start_index: int = 0,
-        enabled_quality_tiers: frozenset[str] | None = None,
     ) -> None:
         if self._current_track is not None and self._current_release_id == release_id:
             self.toggle_play_pause()
             return
-        self.play_release(
-            release_id,
-            start_index=start_index,
-            enabled_quality_tiers=enabled_quality_tiers,
-        )
+        self.play_release(release_id, start_index=start_index)
 
     def toggle_play_pause(self) -> None:
         if self._current_track is None and self._playlist_meta:

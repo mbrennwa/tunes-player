@@ -1,0 +1,114 @@
+"""Tests for provider album peak rate/depth extraction."""
+
+from __future__ import annotations
+
+import unittest
+from types import SimpleNamespace
+
+from tunes_player.core.release_catalog import (
+    genre_from_tidal_album,
+    genre_from_tidal_album_json,
+    genre_from_tidal_openapi_payload,
+    peak_bit_depth_from_qobuz_album,
+    peak_rate_depth_from_qobuz_album,
+    peak_rate_depth_from_tidal_album,
+    peak_sample_rate_from_qobuz_album,
+)
+
+
+class QobuzPeakExtractionTests(unittest.TestCase):
+    def test_reads_maximum_fields(self) -> None:
+        album = {
+            "maximum_bit_depth": 24,
+            "maximum_sampling_rate": 192,
+        }
+        depth, rate = peak_rate_depth_from_qobuz_album(album)
+        self.assertEqual(depth, 24)
+        self.assertEqual(rate, 192_000)
+
+    def test_parses_technical_specifications(self) -> None:
+        album = {
+            "maximum_technical_specifications": "24-bit / 96 kHz",
+            "hires": True,
+        }
+        self.assertEqual(peak_sample_rate_from_qobuz_album(album), 96_000)
+        self.assertEqual(peak_bit_depth_from_qobuz_album(album), 24)
+
+    def test_prefers_highest_track_rate(self) -> None:
+        album = {
+            "maximum_sampling_rate": 44.1,
+            "maximum_bit_depth": 16,
+            "tracks": {
+                "items": [
+                    {"maximum_sampling_rate": 192, "maximum_bit_depth": 24},
+                ],
+            },
+        }
+        depth, rate = peak_rate_depth_from_qobuz_album(album)
+        self.assertEqual(depth, 24)
+        self.assertEqual(rate, 192_000)
+
+
+class TidalGenreExtractionTests(unittest.TestCase):
+    def test_parses_genre_list_from_album_json(self) -> None:
+        data = {"genres": [{"name": "Pop/R&B"}]}
+        self.assertEqual(genre_from_tidal_album_json(data), "Pop/R&B")
+
+    def test_parses_openapi_track_genre_payload(self) -> None:
+        payload = {
+            "included": [
+                {"type": "genres", "id": "1", "attributes": {"genreName": "Pop"}},
+            ],
+        }
+        self.assertEqual(genre_from_tidal_openapi_payload(payload), "Pop")
+
+    def test_fetches_genre_from_first_track_openapi(self) -> None:
+        class _Response:
+            ok = True
+
+            @staticmethod
+            def json() -> dict:
+                return {
+                    "included": [
+                        {
+                            "type": "genres",
+                            "id": "2",
+                            "attributes": {"genreName": "Rock"},
+                        },
+                    ],
+                }
+
+        class _Request:
+            def request(self, method: str, path: str, **kwargs: object) -> _Response:
+                self.last = (method, path, kwargs)
+                return _Response()
+
+        session = SimpleNamespace(
+            request=_Request(),
+            config=SimpleNamespace(openapi_v2_location="https://openapi.tidal.com/v2/"),
+        )
+        album = type(
+            "Album",
+            (),
+            {
+                "id": 691734,
+                "session": session,
+                "tracks": lambda self, limit=1: [type("Track", (), {"id": 691735})()],
+            },
+        )()
+        self.assertEqual(genre_from_tidal_album(album, fetch_tracks=True), "Rock")
+
+
+class TidalPeakExtractionTests(unittest.TestCase):
+    def test_uses_max_audio_resolution(self) -> None:
+        album = SimpleNamespace(
+            sample_rate=44_100,
+            get_audio_resolution=lambda: [(16, 44_100), (24, 96_000)],
+        )
+        depth, rate = peak_rate_depth_from_tidal_album(album)
+        self.assertEqual(depth, 24)
+        self.assertEqual(rate, 96_000)
+
+
+if __name__ == "__main__":
+    unittest.main()

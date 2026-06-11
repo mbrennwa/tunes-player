@@ -38,6 +38,55 @@ def _format_sample_rate_hz(hz: int) -> str:
     return f"{khz:g} kHz"
 
 
+def _compact_rate_khz(hz: int) -> str:
+    """Sample rate for grid tiles (e.g. 44.1, 96, 192)."""
+    khz = hz / 1000
+    if abs(khz - round(khz)) < 0.01:
+        return str(int(round(khz)))
+    return f"{khz:g}"
+
+
+def format_rate_bit_depth_compact(
+    *,
+    bit_depth: int | float | str | None,
+    sample_rate_hz: int | float | str | None,
+    quality_tier: str = "",
+) -> str | None:
+    """Compact catalog tile label: rate kHz / bit depth (e.g. 44.1/16, 192/24)."""
+    from tunes_player.core.release_quality import (
+        QUALITY_FILTER_CD,
+        QUALITY_FILTER_HI_RES,
+        is_acoustic_hi_res,
+    )
+
+    try:
+        depth = int(bit_depth) if bit_depth is not None else None
+    except (TypeError, ValueError):
+        depth = None
+    if depth is not None and depth <= 0:
+        depth = None
+    rate_hz = _normalize_qobuz_sample_rate_hz(sample_rate_hz)
+    if rate_hz is not None and rate_hz <= 0:
+        rate_hz = None
+
+    if rate_hz and depth is None:
+        if quality_tier == QUALITY_FILTER_CD:
+            depth = 16
+        elif quality_tier == QUALITY_FILTER_HI_RES or is_acoustic_hi_res(rate_hz):
+            depth = 24
+        else:
+            depth = 16
+    if depth and rate_hz is None:
+        if quality_tier == QUALITY_FILTER_CD:
+            rate_hz = 44_100
+        elif quality_tier == QUALITY_FILTER_HI_RES:
+            rate_hz = 96_000
+
+    if depth is None or rate_hz is None:
+        return None
+    return f"{_compact_rate_khz(rate_hz)}/{depth}"
+
+
 def format_rate_label(hz: int) -> str:
     """Short rate label for resample notes (e.g. 192 kHz)."""
     return _format_sample_rate_hz(hz)
@@ -208,9 +257,50 @@ def _is_lossless_local(codec: str, metadata: FileMetadata) -> bool:
     return metadata.bit_depth is not None and metadata.sample_rate is not None
 
 
-def _lossy_codec_label(codec: str) -> str:
-    if codec in _LOSSY_CODEC_LABELS:
-        return _LOSSY_CODEC_LABELS[codec]
+def lossy_codec_label(codec: str) -> str:
+    normalized = codec.casefold()
+    if normalized in _LOSSY_CODEC_LABELS:
+        return _LOSSY_CODEC_LABELS[normalized]
     if codec:
         return codec.upper()
     return "Lossy"
+
+
+def _lossy_codec_label(codec: str) -> str:
+    return lossy_codec_label(codec)
+
+
+def catalog_tile_quality_label(
+    *,
+    bit_depth: int | None,
+    sample_rate_hz: int | None,
+    quality_tier: str = "",
+    source: object | None = None,
+    lossy_codec: str | None = None,
+) -> str | None:
+    """Grid tile quality: rate/depth for lossless, codec name for compressed."""
+    from tunes_player.core.models import Source
+    from tunes_player.core.release_quality import (
+        QUALITY_FILTER_CD,
+        QUALITY_FILTER_COMPRESSED,
+        _VALID_QUALITY_FILTERS,
+    )
+
+    tier = quality_tier if quality_tier in _VALID_QUALITY_FILTERS else ""
+    if tier == QUALITY_FILTER_COMPRESSED:
+        if lossy_codec:
+            return lossy_codec_label(lossy_codec)
+        if source == Source.TIDAL:
+            return "AAC"
+        return "MP3"
+
+    label = format_rate_bit_depth_compact(
+        bit_depth=bit_depth,
+        sample_rate_hz=sample_rate_hz,
+        quality_tier=tier,
+    )
+    if label:
+        return label
+    if tier == QUALITY_FILTER_CD:
+        return "44.1/16"
+    return None

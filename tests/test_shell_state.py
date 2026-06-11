@@ -345,29 +345,26 @@ class TestReleaseCachePayload(unittest.TestCase):
         self.assertEqual(len(restored), 2)
         self.assertEqual(restored[0].id, "local:1")
 
-    def test_edition_fields_round_trip_cache(self) -> None:
+    def test_quality_tile_fields_round_trip_cache(self) -> None:
         release = Release(
-            id="qobuz:album:1",
-            title="Merged",
+            id="qobuz:album:1@hi_res",
+            title="Album",
             artist_name="Artist",
             source=Source.QOBUZ,
             peak_quality_tier=QUALITY_FILTER_HI_RES,
-            available_quality_tiers=frozenset(
-                {QUALITY_FILTER_CD, QUALITY_FILTER_HI_RES},
-            ),
-            upc="0060254735180",
-            edition_release_ids=frozenset({"qobuz:album:1", "qobuz:album:2"}),
+            available_quality_tiers=frozenset({QUALITY_FILTER_HI_RES}),
+            catalog_release_id="qobuz:album:1",
+            quality_tier=QUALITY_FILTER_HI_RES,
             peak_sample_rate_hz=192_000,
+            peak_bit_depth=24,
         )
         payload = release_to_cache_payload(release)
         restored = release_from_cache_payload(payload)
         assert restored is not None
-        self.assertEqual(restored.upc, "60254735180")
-        self.assertEqual(
-            restored.edition_release_ids,
-            frozenset({"qobuz:album:1", "qobuz:album:2"}),
-        )
+        self.assertEqual(restored.catalog_release_id, "qobuz:album:1")
+        self.assertEqual(restored.quality_tier, QUALITY_FILTER_HI_RES)
         self.assertEqual(restored.peak_sample_rate_hz, 192_000)
+        self.assertEqual(restored.peak_bit_depth, 24)
 
 
 class TestGenreSelectionHelpers(unittest.TestCase):
