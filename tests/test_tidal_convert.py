@@ -163,7 +163,6 @@ class TidalConvertTests(unittest.TestCase):
             audio_modes=[],
             barcodeId="0060254735180",
             sample_rate=96_000,
-            get_audio_resolution=lambda: [(24, 96_000)],
             tracks=lambda: (_ for _ in ()).throw(
                 AssertionError("tracks() must not run for album-only classification"),
             ),

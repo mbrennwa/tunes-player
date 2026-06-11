@@ -12,8 +12,10 @@ from tunes_player.core.library.release_logic import (
 )
 from tunes_player.core.release_catalog import (
     genre_from_tidal_album,
+    media_tags_from_tidal_openapi_payload,
     peak_bit_depth_from_tidal_album,
     peak_sample_rate_from_tidal_album,
+    tidal_first_track_openapi_payload,
 )
 from tunes_player.core.release_quality import (
     QUALITY_FILTER_COMPRESSED,
@@ -143,7 +145,18 @@ def release_from_tidal(
     artist_name, year, expected, track_count, completeness, release_type, art_uri = (
         _release_common_fields(session, album, owned_track_count=owned_track_count)
     )
-    available_quality_tiers = classify_tidal_catalog(album, tracks=tracks)
+    first_track_id = getattr(tracks[0], "id", None) if tracks else None
+    openapi_track_payload = tidal_first_track_openapi_payload(
+        album,
+        fetch_tracks=not tracks,
+        first_track_id=first_track_id,
+    )
+    supplemental_media_tags = media_tags_from_tidal_openapi_payload(openapi_track_payload)
+    available_quality_tiers = classify_tidal_catalog(
+        album,
+        tracks=tracks,
+        supplemental_media_tags=supplemental_media_tags,
+    )
     peak_quality_tier = peak_quality_tier_from_tiers(available_quality_tiers)
     catalog_id = tidal_ids.album_id(album.id)
     return Release(
@@ -156,11 +169,16 @@ def release_from_tidal(
         expected_track_count=expected,
         completeness=completeness,
         release_type=release_type,
-        genre=genre_from_tidal_album(album, fetch_tracks=True),
+        genre=genre_from_tidal_album(
+            album,
+            fetch_tracks=not tracks,
+            first_track_id=first_track_id,
+            openapi_track_payload=openapi_track_payload,
+        ),
         art_uri=art_uri,
         peak_quality_tier=peak_quality_tier,
         available_quality_tiers=available_quality_tiers,
-        catalog_quality_ready=True,
+        catalog_quality_ready=bool(available_quality_tiers),
         catalog_release_id=catalog_id,
         peak_sample_rate_hz=peak_sample_rate_from_tidal_album(album),
         peak_bit_depth=peak_bit_depth_from_tidal_album(album),

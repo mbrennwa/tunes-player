@@ -84,7 +84,7 @@ _LOADING_MESSAGES = {
     ShellBase.SUGGESTION: "Finding suggestions...",
     ShellBase.ALL_LOCAL: "Loading local library…",
 }
-_CATALOG_ENRICH_CONCURRENCY = 6
+_CATALOG_ENRICH_CONCURRENCY = 2
 
 log = logging.getLogger(__name__)
 

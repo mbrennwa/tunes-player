@@ -725,6 +725,12 @@ tunes_player/core/backends/
   spotify/     # (deferred — #4)
 ```
 
+**TIDAL catalog quality (grid enrich):** CD vs hi-res filter buckets use album/track
+`media_metadata_tags` / OpenAPI `mediaTags`. Peak rate/depth labels use album fields when
+present, otherwise a **serialized, cached** first-track stream resolution probe
+(`core/backends/tidal/catalog_stream_probe.py`) so enrich does not burst the same
+rate limit as playback. Playback stream URLs are still resolved only at play time.
+
 ### Auth and credentials
 
 - **Tidal:** OAuth via developer registration; tokens in config (see `platformdirs`).

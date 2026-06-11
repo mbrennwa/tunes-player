@@ -5,6 +5,9 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
+from tunes_player.core.backends.tidal.catalog_stream_probe import (
+    clear_tidal_catalog_stream_probe_cache,
+)
 from tunes_player.core.release_catalog import (
     genre_from_tidal_album,
     genre_from_tidal_album_json,
@@ -100,14 +103,37 @@ class TidalGenreExtractionTests(unittest.TestCase):
 
 
 class TidalPeakExtractionTests(unittest.TestCase):
-    def test_uses_max_audio_resolution(self) -> None:
-        album = SimpleNamespace(
-            sample_rate=44_100,
-            get_audio_resolution=lambda: [(16, 44_100), (24, 96_000)],
-        )
+    def setUp(self) -> None:
+        clear_tidal_catalog_stream_probe_cache()
+
+    def test_uses_album_sample_rate_metadata(self) -> None:
+        album = SimpleNamespace(sample_rate=96_000, bit_depth=24)
         depth, rate = peak_rate_depth_from_tidal_album(album)
         self.assertEqual(depth, 24)
         self.assertEqual(rate, 96_000)
+
+    def test_uses_stream_probe_when_metadata_has_no_rate(self) -> None:
+        album = SimpleNamespace(
+            id=145412913,
+            audio_quality="LOSSLESS",
+            media_metadata_tags=["LOSSLESS", "HIRES_LOSSLESS"],
+            get_audio_resolution=lambda: [(24, 88_200)],
+        )
+        depth, rate = peak_rate_depth_from_tidal_album(album)
+        self.assertEqual(rate, 88_200)
+        self.assertEqual(depth, 24)
+
+    def test_skips_stream_probe_for_lossy_album(self) -> None:
+        album = SimpleNamespace(
+            audio_quality="HIGH",
+            media_metadata_tags=None,
+            get_audio_resolution=lambda: (_ for _ in ()).throw(
+                AssertionError("stream probe must not run for lossy"),
+            ),
+        )
+        depth, rate = peak_rate_depth_from_tidal_album(album)
+        self.assertIsNone(rate)
+        self.assertIsNone(depth)
 
 
 if __name__ == "__main__":

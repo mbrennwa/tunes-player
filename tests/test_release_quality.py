@@ -122,13 +122,15 @@ class ReleaseQualityTests(unittest.TestCase):
             QUALITY_FILTER_COMPRESSED,
         )
 
-    def test_tidal_album_api_hi_res_label_at_cd_rate_is_cd(self) -> None:
+    def test_tidal_album_measured_cd_rate_stays_cd_despite_hires_tags(self) -> None:
         album = SimpleNamespace(
             audio_quality="HI_RES_LOSSLESS",
             media_metadata_tags=["HIRES_LOSSLESS"],
             audio_modes=[],
+            sample_rate=44_100,
         )
-        self.assertEqual(tier_from_tidal_album(album), QUALITY_FILTER_CD)
+        tiers = classify_tidal_catalog(album)
+        self.assertIn(QUALITY_FILTER_CD, tiers)
 
     def test_tidal_album_without_metadata_has_no_tier(self) -> None:
         album = SimpleNamespace(audio_quality="", media_metadata_tags=None, audio_modes=[])
@@ -157,18 +159,82 @@ class ReleaseQualityTests(unittest.TestCase):
         )
         self.assertEqual(tier_from_tidal_album(album), QUALITY_FILTER_HI_RES)
 
-    def test_tidal_hi_res_edition_uses_audio_resolution(self) -> None:
-        """Separate hi-res catalog IDs can report LOSSLESS + HIRES tag without album rate."""
+    def test_tidal_hi_res_edition_uses_media_tags(self) -> None:
+        """Separate hi-res catalog IDs expose HIRES_LOSSLESS in media tags."""
         album = SimpleNamespace(
             audio_quality="LOSSLESS",
             media_metadata_tags=["LOSSLESS", "HIRES_LOSSLESS"],
             audio_modes=["STEREO"],
-            get_audio_resolution=lambda: [(24, 96_000)],
         )
         self.assertEqual(tier_from_tidal_album(album), QUALITY_FILTER_HI_RES)
         self.assertEqual(
             classify_tidal_catalog(album),
             frozenset({QUALITY_FILTER_HI_RES}),
+        )
+
+    def test_tidal_cd_edition_lossless_tags_only(self) -> None:
+        album = SimpleNamespace(
+            audio_quality="LOSSLESS",
+            media_metadata_tags=["LOSSLESS"],
+            audio_modes=["STEREO"],
+        )
+        self.assertEqual(tier_from_tidal_album(album), QUALITY_FILTER_CD)
+
+    def test_tidal_probe_failure_does_not_default_to_cd(self) -> None:
+        """Broken stream probe must not classify a hi-res edition as CD."""
+        album = SimpleNamespace(
+            audio_quality="LOSSLESS",
+            media_metadata_tags=["LOSSLESS", "HIRES_LOSSLESS"],
+            audio_modes=["STEREO"],
+            get_audio_resolution=lambda: (_ for _ in ()).throw(RuntimeError("rate limited")),
+        )
+        self.assertEqual(tier_from_tidal_album(album), QUALITY_FILTER_HI_RES)
+        self.assertNotIn(
+            QUALITY_FILTER_CD,
+            classify_tidal_catalog(album),
+        )
+
+    def test_tidal_batch_style_cd_filter_leaves_one_death_magnetic(self) -> None:
+        from tunes_player.core.release_quality_tiles import expand_releases_by_quality_tier
+        from tunes_player.core.shell_state import apply_quality_filter
+
+        cd_album = SimpleNamespace(
+            audio_quality="LOSSLESS",
+            media_metadata_tags=["LOSSLESS"],
+            audio_modes=["STEREO"],
+        )
+        hi_res_album = SimpleNamespace(
+            audio_quality="LOSSLESS",
+            media_metadata_tags=["LOSSLESS", "HIRES_LOSSLESS"],
+            audio_modes=["STEREO"],
+        )
+        enriched = [
+            Release(
+                id="tidal:album:1",
+                title="Death Magnetic",
+                artist_name="Metallica",
+                source=Source.TIDAL,
+                peak_quality_tier=QUALITY_FILTER_CD,
+                available_quality_tiers=classify_tidal_catalog(cd_album),
+                catalog_quality_ready=True,
+                peak_sample_rate_hz=44_100,
+            ),
+            Release(
+                id="tidal:album:2",
+                title="Death Magnetic",
+                artist_name="Metallica",
+                source=Source.TIDAL,
+                peak_quality_tier=QUALITY_FILTER_HI_RES,
+                available_quality_tiers=classify_tidal_catalog(hi_res_album),
+                catalog_quality_ready=True,
+                peak_sample_rate_hz=96_000,
+            ),
+        ]
+        expanded = expand_releases_by_quality_tier(enriched)
+        filtered = apply_quality_filter(expanded, frozenset({QUALITY_FILTER_CD}))
+        self.assertEqual(
+            sum(1 for release in filtered if release.title == "Death Magnetic"),
+            1,
         )
 
     def test_stale_tidal_enrich_missing_sample_rate(self) -> None:
@@ -192,11 +258,10 @@ class ReleaseQualityTests(unittest.TestCase):
             available_quality_tiers=frozenset({QUALITY_FILTER_HI_RES}),
             catalog_quality_ready=True,
             peak_sample_rate_hz=96_000,
-            genre="Pop",
         )
         self.assertFalse(streaming_catalog_quality_needs_enrich(fresh))
 
-    def test_streaming_catalog_needs_enrich_when_genre_missing(self) -> None:
+    def test_streaming_catalog_does_not_re_enrich_for_missing_genre(self) -> None:
         release = Release(
             id="tidal:album:3",
             title="Album",
@@ -206,16 +271,7 @@ class ReleaseQualityTests(unittest.TestCase):
             peak_sample_rate_hz=96_000,
             genre=None,
         )
-        self.assertTrue(streaming_catalog_quality_needs_enrich(release))
-
-    def test_tidal_cd_edition_audio_resolution_stays_cd(self) -> None:
-        album = SimpleNamespace(
-            audio_quality="LOSSLESS",
-            media_metadata_tags=["LOSSLESS"],
-            audio_modes=["STEREO"],
-            get_audio_resolution=lambda: [(16, 44_100)],
-        )
-        self.assertEqual(tier_from_tidal_album(album), QUALITY_FILTER_CD)
+        self.assertFalse(streaming_catalog_quality_needs_enrich(release))
 
     def test_max_quality_tier(self) -> None:
         self.assertEqual(

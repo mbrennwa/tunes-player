@@ -201,24 +201,42 @@ def _tidal_album_has_hi_res_mode(album: object) -> bool:
     return False
 
 
-def _sample_rate_hz_from_tidal_audio_resolution(album: object) -> int:
-    """Peak rate from first-track stream resolution (album/get has no rate field)."""
-    getter = getattr(album, "get_audio_resolution", None)
-    if not callable(getter):
-        return 0
-    try:
-        resolutions = getter()
-    except Exception:
-        return 0
-    peak = 0
-    for item in resolutions or []:
-        try:
-            rate_hz = int(item[1])
-        except (IndexError, TypeError, ValueError):
+_HI_RES_MEDIA_TAGS = frozenset({"HIRES_LOSSLESS", "HI_RES_LOSSLESS"})
+
+
+def _tidal_media_tag_set(
+    album: object,
+    *,
+    supplemental_tags: set[str] | None = None,
+) -> set[str]:
+    """Normalized TIDAL media tags from album metadata (no stream probes)."""
+    from tunes_player.core.backends.tidal.stream_quality import normalize_api_quality
+
+    tags: set[str] = set(supplemental_tags or ())
+    for source in (
+        getattr(album, "media_metadata_tags", None),
+        getattr(album, "mediaTags", None),
+    ):
+        if not source:
             continue
-        if rate_hz > peak:
-            peak = rate_hz
-    return peak
+        try:
+            for tag in source:
+                normalized = normalize_api_quality(str(tag))
+                if normalized:
+                    tags.add(normalized)
+        except TypeError:
+            pass
+    return tags
+
+
+def _catalog_tiers_from_tidal_tags(tags: set[str]) -> set[str]:
+    """Map TIDAL mediaTags to browse quality filter buckets."""
+    tiers: set[str] = set()
+    if tags & _HI_RES_MEDIA_TAGS:
+        tiers.add(QUALITY_FILTER_HI_RES)
+    elif "LOSSLESS" in tags:
+        tiers.add(QUALITY_FILTER_CD)
+    return tiers
 
 
 def _tidal_album_sample_rate_hz(album: object) -> int:
@@ -239,7 +257,16 @@ def _tidal_album_sample_rate_hz(album: object) -> int:
                 rate_hz = _normalize_sample_rate_hz(float(match.group(1)))
                 if rate_hz > 0:
                     return rate_hz
-    return _sample_rate_hz_from_tidal_audio_resolution(album)
+    from tunes_player.core.backends.tidal.catalog_stream_probe import (
+        peak_rate_depth_from_tidal_stream_probe,
+    )
+    from tunes_player.core.release_catalog import _tidal_album_needs_stream_probe
+
+    if _tidal_album_needs_stream_probe(album):
+        _, probed_rate = peak_rate_depth_from_tidal_stream_probe(album)
+        if probed_rate is not None and probed_rate > 0:
+            return probed_rate
+    return 0
 
 
 def peak_sample_rate_hz_from_tidal_album(album: object) -> int | None:
@@ -247,30 +274,50 @@ def peak_sample_rate_hz_from_tidal_album(album: object) -> int | None:
     return rate_hz if rate_hz > 0 else None
 
 
-def _tidal_acoustic_peak_tier(album: object) -> str:
-    """Peak catalog tier from TIDAL metadata using acoustic sample-rate rules."""
+def _tidal_acoustic_peak_tier(
+    album: object,
+    *,
+    supplemental_tags: set[str] | None = None,
+) -> str:
+    """Peak catalog tier from TIDAL album metadata (no stream probes)."""
     from tunes_player.core.backends.tidal.stream_quality import track_peak_quality
 
     rate_hz = _tidal_album_sample_rate_hz(album)
-    if is_acoustic_hi_res(rate_hz):
+    if rate_hz > 0:
+        if is_acoustic_hi_res(rate_hz):
+            return QUALITY_FILTER_HI_RES
+        if rate_hz == _CD_SAMPLE_RATE_HZ:
+            return QUALITY_FILTER_CD
+
+    tags = _tidal_media_tag_set(album, supplemental_tags=supplemental_tags)
+    tag_tiers = _catalog_tiers_from_tidal_tags(tags)
+    if QUALITY_FILTER_HI_RES in tag_tiers:
         return QUALITY_FILTER_HI_RES
-    if rate_hz == _CD_SAMPLE_RATE_HZ:
+    if QUALITY_FILTER_CD in tag_tiers:
         return QUALITY_FILTER_CD
 
     rank = track_peak_quality(album)
     api_tier = tier_from_tidal_peak(rank)
-    if api_tier == QUALITY_FILTER_HI_RES:
-        return QUALITY_FILTER_CD
-    return api_tier
+    if api_tier in _VALID_QUALITY_FILTERS:
+        return api_tier
+    return ""
 
 
-def _collect_tidal_album_tier_signals(album: object) -> set[str]:
+def _collect_tidal_album_tier_signals(
+    album: object,
+    *,
+    supplemental_tags: set[str] | None = None,
+) -> set[str]:
     if not tidal_album_has_quality_metadata(album):
         return set()
-    signals: set[str] = set()
-    peak = _tidal_acoustic_peak_tier(album)
-    signals.add(peak)
-    if _tidal_album_has_hi_res_mode(album) and peak == QUALITY_FILTER_CD:
+    tags = _tidal_media_tag_set(album)
+    if not tags and supplemental_tags:
+        tags = set(supplemental_tags)
+    signals = set(_catalog_tiers_from_tidal_tags(tags))
+    peak = _tidal_acoustic_peak_tier(album, supplemental_tags=tags if tags else None)
+    if peak in _VALID_QUALITY_FILTERS:
+        signals.add(peak)
+    if _tidal_album_has_hi_res_mode(album) and QUALITY_FILTER_CD in signals:
         signals.add(QUALITY_FILTER_HI_RES)
     return {tier for tier in signals if tier in _VALID_QUALITY_FILTERS}
 
@@ -278,14 +325,19 @@ def _collect_tidal_album_tier_signals(album: object) -> set[str]:
 def classify_tidal_catalog(
     album: object,
     tracks: list[object] | None = None,
+    *,
+    supplemental_media_tags: set[str] | None = None,
 ) -> frozenset[str]:
     """Catalog tiers a TIDAL album supports (facts from album metadata and tracks)."""
-    from tunes_player.core.backends.tidal.stream_quality import track_peak_quality
-
-    tiers = set(_collect_tidal_album_tier_signals(album))
+    tiers = set(
+        _collect_tidal_album_tier_signals(
+            album,
+            supplemental_tags=supplemental_media_tags,
+        ),
+    )
     if tracks:
         for track in tracks:
-            tier = tier_from_tidal_peak(track_peak_quality(track))
+            tier = tier_from_tidal_track(track)
             if tier in _VALID_QUALITY_FILTERS:
                 tiers.add(tier)
     return frozenset(tiers)
@@ -512,8 +564,6 @@ def streaming_catalog_quality_needs_enrich(release: Release) -> bool:
     if release.source not in (Source.TIDAL, Source.QOBUZ):
         return False
     if not release.catalog_quality_ready:
-        return True
-    if not (release.genre or "").strip():
         return True
     # Rows enriched before acoustic TIDAL resolution kept cd with no sample rate.
     return release.peak_sample_rate_hz is None

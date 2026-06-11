@@ -5,11 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from tunes_player.core.release_quality import (
-    _normalize_sample_rate_hz,
-    _sample_rate_hz_from_tidal_audio_resolution,
-    peak_sample_rate_hz_from_tidal_album,
-)
+from tunes_player.core.release_quality import _normalize_sample_rate_hz
 
 _TECH_SPEC_RE = re.compile(
     r"(\d+)\s*(?:bit|-bit).*?(\d+(?:\.\d+)?)\s*khz",
@@ -105,38 +101,63 @@ def peak_bit_depth_from_qobuz_album(album: dict[str, Any]) -> int | None:
     return None
 
 
+def _tidal_album_needs_stream_probe(album: object) -> bool:
+    from tunes_player.core.backends.tidal.stream_quality import track_peak_quality
+
+    audio_quality = getattr(album, "audio_quality", None)
+    if audio_quality is None or not str(audio_quality).strip():
+        tags = getattr(album, "media_metadata_tags", None) or getattr(album, "mediaTags", None)
+        if not tags:
+            return False
+    rank = track_peak_quality(album)
+    return rank >= 2
+
+
 def peak_rate_depth_from_tidal_album(album: object) -> tuple[int | None, int | None]:
-    """Peak lossless rate/depth from TIDAL album metadata and audio resolution."""
+    """Peak lossless rate/depth from TIDAL album metadata and serialized stream probe."""
     best_rate = 0
     best_depth: int | None = None
-    getter = getattr(album, "get_audio_resolution", None)
-    if callable(getter):
-        try:
-            resolutions = getter()
-        except Exception:
-            resolutions = None
-        for item in resolutions or []:
+    for attr in ("bit_depth", "bitDepth"):
+        value = getattr(album, attr, None)
+        if value is not None:
             try:
-                depth = int(item[0])
-                rate_hz = int(item[1])
-            except (IndexError, TypeError, ValueError):
-                continue
-            if rate_hz > best_rate:
-                best_rate = rate_hz
-                best_depth = depth if depth > 0 else best_depth
+                parsed_depth = int(value)
+            except (TypeError, ValueError):
+                parsed_depth = 0
+            if parsed_depth > 0:
+                best_depth = parsed_depth
     for attr in ("sample_rate", "sampling_rate", "samplingRate"):
         value = getattr(album, attr, None)
         if value is not None:
             rate_hz = _normalize_sample_rate_hz(value)
             if rate_hz > best_rate:
                 best_rate = rate_hz
-    resolution_rate = _sample_rate_hz_from_tidal_audio_resolution(album)
-    if resolution_rate > best_rate:
-        best_rate = resolution_rate
-    if best_rate <= 0:
-        legacy = peak_sample_rate_hz_from_tidal_album(album)
-        if legacy and legacy > 0:
-            best_rate = legacy
+    _khz_re = re.compile(r"(\d+(?:\.\d+)?)\s*KHZ", re.IGNORECASE)
+    for source in (
+        getattr(album, "media_metadata_tags", None),
+        getattr(album, "mediaTags", None),
+    ):
+        if not source:
+            continue
+        for tag in source:
+            text = str(tag).upper()
+            if "KHZ" not in text and "HZ" not in text:
+                continue
+            match = _khz_re.search(text)
+            if match is None:
+                continue
+            rate_hz = _normalize_sample_rate_hz(float(match.group(1)))
+            if rate_hz > best_rate:
+                best_rate = rate_hz
+    if best_rate <= 0 and _tidal_album_needs_stream_probe(album):
+        from tunes_player.core.backends.tidal.catalog_stream_probe import (
+            peak_rate_depth_from_tidal_stream_probe,
+        )
+
+        probed_depth, probed_rate = peak_rate_depth_from_tidal_stream_probe(album)
+        if probed_rate is not None and probed_rate > 0:
+            best_rate = probed_rate
+            best_depth = probed_depth
     if best_rate <= 0:
         return None, None
     if best_depth is None or best_depth <= 0:
@@ -210,13 +231,14 @@ def genre_from_tidal_openapi_payload(payload: object) -> str | None:
     return None
 
 
-def _genre_from_tidal_openapi_resource(
+def fetch_tidal_openapi_resource(
     session: object,
     resource: str,
     resource_id: object,
     *,
     include: str = "genres",
-) -> str | None:
+) -> dict | None:
+    """Fetch one TIDAL OpenAPI v2 resource; returns parsed JSON or None."""
     request_factory = getattr(session, "request", None)
     config = getattr(session, "config", None)
     openapi_base = getattr(config, "openapi_v2_location", None) if config is not None else None
@@ -231,17 +253,70 @@ def _genre_from_tidal_openapi_resource(
         )
         if not getattr(response, "ok", False):
             return None
-        return genre_from_tidal_openapi_payload(response.json())
+        payload = response.json()
+        return payload if isinstance(payload, dict) else None
     except Exception:
         return None
 
 
+def tidal_track_openapi_attrs(session: object, track_id: object) -> dict | None:
+    payload = fetch_tidal_openapi_resource(session, "tracks", track_id)
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    attrs = data.get("attributes")
+    return attrs if isinstance(attrs, dict) else None
+
+
+def media_tags_from_tidal_openapi_attrs(attrs: dict) -> set[str]:
+    from tunes_player.core.backends.tidal.stream_quality import normalize_api_quality
+
+    tags: set[str] = set()
+    media_tags = attrs.get("mediaTags")
+    if not media_tags:
+        return tags
+    try:
+        for tag in media_tags:
+            normalized = normalize_api_quality(str(tag))
+            if normalized:
+                tags.add(normalized)
+    except TypeError:
+        pass
+    return tags
+
+
 def genre_from_tidal_openapi_album(session: object, album_id: object) -> str | None:
-    return _genre_from_tidal_openapi_resource(session, "albums", album_id)
+    payload = fetch_tidal_openapi_resource(session, "albums", album_id)
+    if payload is None:
+        return None
+    return genre_from_tidal_openapi_payload(payload)
 
 
 def genre_from_tidal_openapi_track(session: object, track_id: object) -> str | None:
-    return _genre_from_tidal_openapi_resource(session, "tracks", track_id)
+    payload = fetch_tidal_openapi_resource(session, "tracks", track_id)
+    if payload is None:
+        return None
+    return genre_from_tidal_openapi_payload(payload)
+
+
+def genre_from_tidal_openapi_payload_dict(payload: dict | None) -> str | None:
+    if payload is None:
+        return None
+    return genre_from_tidal_openapi_payload(payload)
+
+
+def media_tags_from_tidal_openapi_payload(payload: dict | None) -> set[str]:
+    if not isinstance(payload, dict):
+        return set()
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return set()
+    attrs = data.get("attributes")
+    if not isinstance(attrs, dict):
+        return set()
+    return media_tags_from_tidal_openapi_attrs(attrs)
 
 
 def genre_from_tidal_album_json(data: object) -> str | None:
@@ -266,40 +341,75 @@ def genre_from_tidal_album_json(data: object) -> str | None:
     return None
 
 
-def genre_from_tidal_album(album: object, *, fetch_tracks: bool = False) -> str | None:
-    """Best-effort genre label from TIDAL album or first-track OpenAPI metadata."""
-    album_id = getattr(album, "id", None)
-    session = getattr(album, "session", None)
-    if album_id is not None and session is not None:
-        label = genre_from_tidal_openapi_album(session, album_id)
-        if label:
-            return label
+def genre_from_tidal_album(
+    album: object,
+    *,
+    fetch_tracks: bool = False,
+    first_track_id: object | None = None,
+    openapi_track_payload: dict | None = None,
+) -> str | None:
+    """Best-effort genre from TIDAL album fields or first-track OpenAPI metadata.
+
+    TIDAL album endpoints do not expose genre; when ``fetch_tracks`` is set we read
+    ``tracks/{id}?include=genres`` (one track list + one OpenAPI call at most).
+    """
     for attr in ("genre", "mainGenre", "primaryGenre"):
         label = _normalize_genre_label(getattr(album, attr, None))
         if label:
             return label
-    request_factory = getattr(session, "request", None) if session is not None else None
-    if album_id is not None and request_factory is not None:
-        try:
-            response = request_factory.request("GET", f"albums/{album_id}")
-            if getattr(response, "ok", False):
-                label = genre_from_tidal_album_json(response.json())
-                if label:
-                    return label
-        except Exception:
-            pass
-    if not fetch_tracks:
+    session = getattr(album, "session", None)
+    if session is None:
         return None
-    tracks_getter = getattr(album, "tracks", None)
-    if callable(tracks_getter) and session is not None:
-        try:
-            tracks = tracks_getter(limit=1)
-        except Exception:
-            tracks = None
-        if tracks:
-            track_id = getattr(tracks[0], "id", None)
-            if track_id is not None:
-                label = genre_from_tidal_openapi_track(session, track_id)
-                if label:
-                    return label
+    track_id = first_track_id
+    if track_id is None and fetch_tracks:
+        tracks_getter = getattr(album, "tracks", None)
+        if callable(tracks_getter):
+            try:
+                tracks = tracks_getter(limit=1)
+            except Exception:
+                tracks = None
+            if tracks:
+                track_id = getattr(tracks[0], "id", None)
+    if openapi_track_payload is not None:
+        label = genre_from_tidal_openapi_payload_dict(openapi_track_payload)
+        if label:
+            return label
+    if track_id is not None and openapi_track_payload is None:
+        return genre_from_tidal_openapi_track(session, track_id)
     return None
+
+
+def _session_supports_tidal_openapi(session: object) -> bool:
+    config = getattr(session, "config", None)
+    request_factory = getattr(session, "request", None)
+    return (
+        config is not None
+        and getattr(config, "openapi_v2_location", None)
+        and request_factory is not None
+        and callable(getattr(request_factory, "request", None))
+    )
+
+
+def tidal_first_track_openapi_payload(
+    album: object,
+    *,
+    fetch_tracks: bool = False,
+    first_track_id: object | None = None,
+) -> dict | None:
+    """OpenAPI track JSON for the first album track (genre + mediaTags)."""
+    session = getattr(album, "session", None)
+    if session is None or not _session_supports_tidal_openapi(session):
+        return None
+    track_id = first_track_id
+    if track_id is None and fetch_tracks:
+        tracks_getter = getattr(album, "tracks", None)
+        if callable(tracks_getter):
+            try:
+                tracks = tracks_getter(limit=1)
+            except Exception:
+                tracks = None
+            if tracks:
+                track_id = getattr(tracks[0], "id", None)
+    if track_id is None:
+        return None
+    return fetch_tidal_openapi_resource(session, "tracks", track_id)
