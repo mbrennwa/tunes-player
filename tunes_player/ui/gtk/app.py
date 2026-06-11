@@ -17,6 +17,8 @@ from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.logging_config import configure_logging
 from tunes_player.core.models import Release, Source
+from tunes_player.core.release_editions import log_grid_release_upcs
+from tunes_player.core.release_quality import streaming_catalog_quality_needs_enrich
 from tunes_player.core.services import PlayerService
 from tunes_player.core.shell_state import (
     SearchScope,
@@ -384,7 +386,7 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _store_selection_cache(self, state: ShellState, releases: list[Release]) -> None:
         self._cached_selection_key = self._selection_cache_key(state)
-        self._cached_releases = list(releases)
+        self._cached_releases = self._service.collapse_releases_with_cache(list(releases))
         self._sync_release_type_multi()
         self._sync_genre_filter()
         self._sync_quality_filter()
@@ -821,7 +823,7 @@ class TunesWindow(Adw.ApplicationWindow):
             return None
         if not cached_releases_have_quality_tiers(state.cached_releases):
             releases = self._refresh_cached_release_quality(releases)
-        return releases
+        return self._service.collapse_releases_with_cache(releases)
 
     def _load_releases_for_state(self, state: ShellState) -> list[Release]:
         restored = self._restore_persisted_releases(state)
@@ -946,8 +948,7 @@ class TunesWindow(Adw.ApplicationWindow):
         pending_ids = [
             release.id
             for release in self._cached_releases
-            if not release.catalog_quality_ready
-            and release.source in (Source.TIDAL, Source.QOBUZ)
+            if streaming_catalog_quality_needs_enrich(release)
         ]
         if not pending_ids:
             return
@@ -1000,7 +1001,20 @@ class TunesWindow(Adw.ApplicationWindow):
                 updated.append(release)
         if not patched:
             return False
-        self._cached_releases = updated
+        self._cached_releases = self._service.collapse_releases_with_cache(updated)
+        return self._refresh_grid_after_edition_collapse()
+
+    def _finish_catalog_enrich(self, token: int) -> bool:
+        if token != self._load_token:
+            return False
+        self._cached_releases = self._service.collapse_releases_with_cache(
+            list(self._cached_releases),
+        )
+        self._refresh_grid_after_edition_collapse()
+        self._sync_quality_filter()
+        return False
+
+    def _refresh_grid_after_edition_collapse(self) -> bool:
         filtered = self._filtered_from_cache(self._shell_state)
         title = self._grid_title(self._shell_state)
         self._show_grid(
@@ -1009,12 +1023,6 @@ class TunesWindow(Adw.ApplicationWindow):
             title=title,
         )
         self._schedule_persist()
-        return False
-
-    def _finish_catalog_enrich(self, token: int) -> bool:
-        if token != self._load_token:
-            return False
-        self._sync_quality_filter()
         return False
 
     def _async_load_error_copy(
@@ -1112,6 +1120,7 @@ class TunesWindow(Adw.ApplicationWindow):
             filtered_count=len(releases),
             catalog_count=catalog_count,
         )
+        log_grid_release_upcs(releases)
 
     def _catalog_releases_for_message(self, state: ShellState) -> list[Release]:
         if self._cache_matches(state) and self._cached_releases:

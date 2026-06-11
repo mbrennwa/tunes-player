@@ -476,7 +476,10 @@ class ReleaseDetailView(Gtk.Box):
         header_row.set_vexpand(False)
         header.append(header_row)
 
-        tracks = service.get_release_tracks(release.id)
+        tracks = service.get_release_tracks(
+            release.id,
+            playback_preference=service.playback_preference_for_shell(),
+        )
 
         art_frame = _square_art_with_play(
             release,

@@ -10,6 +10,10 @@ from tunes_player.core.library.release_logic import (
     infer_release_completeness,
     release_type_from_metadata,
 )
+from tunes_player.core.release_editions import (
+    peak_sample_rate_from_tidal_album,
+    upc_from_tidal_album,
+)
 from tunes_player.core.release_quality import (
     QUALITY_FILTER_COMPRESSED,
     classify_tidal_catalog,
@@ -122,6 +126,7 @@ def release_stub_from_tidal(
         peak_quality_tier="",
         available_quality_tiers=frozenset(),
         catalog_quality_ready=False,
+        upc=upc_from_tidal_album(album),
     )
 
 
@@ -152,6 +157,8 @@ def release_from_tidal(
         peak_quality_tier=peak_quality_tier,
         available_quality_tiers=available_quality_tiers,
         catalog_quality_ready=True,
+        upc=upc_from_tidal_album(album),
+        peak_sample_rate_hz=peak_sample_rate_from_tidal_album(album),
     )
 
 

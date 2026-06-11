@@ -15,6 +15,10 @@ from tunes_player.core.models import (
     Source,
     Track,
 )
+from tunes_player.core.release_editions import (
+    peak_sample_rate_from_qobuz_album,
+    upc_from_qobuz_album,
+)
 from tunes_player.core.release_quality import (
     classify_qobuz_catalog,
     peak_quality_tier_from_tiers,
@@ -143,6 +147,7 @@ def release_stub_from_qobuz(
         peak_quality_tier="",
         available_quality_tiers=frozenset(),
         catalog_quality_ready=False,
+        upc=upc_from_qobuz_album(album),
     )
 
 
@@ -182,6 +187,8 @@ def release_from_qobuz(
         peak_quality_tier=peak_quality_tier,
         available_quality_tiers=available_quality_tiers,
         catalog_quality_ready=True,
+        upc=upc_from_qobuz_album(album),
+        peak_sample_rate_hz=peak_sample_rate_from_qobuz_album(album),
     )
 
 

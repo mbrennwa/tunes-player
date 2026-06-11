@@ -54,6 +54,12 @@ class Release:
     available_quality_tiers: frozenset[str] = frozenset()
     # False for streaming browse stubs until album lookup classifies quality.
     catalog_quality_ready: bool = True
+    # Normalized digits-only UPC/EAN from provider album/get; None when absent.
+    upc: str | None = None
+    # Provider album ids in a UPC merge group; empty when not collapsed.
+    edition_release_ids: frozenset[str] = frozenset()
+    # Peak album sample rate (Hz) for edition tie-break within a quality bucket.
+    peak_sample_rate_hz: int | None = None
 
     @property
     def has_compressed(self) -> bool:

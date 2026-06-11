@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from tunes_player.core.models import Release
+from tunes_player.core.models import Release, Source
 
 QUALITY_FILTER_COMPRESSED = "compressed"
 QUALITY_FILTER_CD = "cd"
@@ -202,11 +201,33 @@ def _tidal_album_has_hi_res_mode(album: object) -> bool:
     return False
 
 
+def _sample_rate_hz_from_tidal_audio_resolution(album: object) -> int:
+    """Peak rate from first-track stream resolution (album/get has no rate field)."""
+    getter = getattr(album, "get_audio_resolution", None)
+    if not callable(getter):
+        return 0
+    try:
+        resolutions = getter()
+    except Exception:
+        return 0
+    peak = 0
+    for item in resolutions or []:
+        try:
+            rate_hz = int(item[1])
+        except (IndexError, TypeError, ValueError):
+            continue
+        if rate_hz > peak:
+            peak = rate_hz
+    return peak
+
+
 def _tidal_album_sample_rate_hz(album: object) -> int:
     for attr in ("sample_rate", "sampling_rate", "samplingRate"):
         value = getattr(album, attr, None)
         if value is not None:
-            return _normalize_sample_rate_hz(value)
+            rate_hz = _normalize_sample_rate_hz(value)
+            if rate_hz > 0:
+                return rate_hz
     tags = getattr(album, "media_metadata_tags", None) or []
     for tag in tags:
         text = str(tag).upper()
@@ -215,8 +236,15 @@ def _tidal_album_sample_rate_hz(album: object) -> int:
 
             match = re.search(r"(\d+(?:\.\d+)?)\s*KHZ", text)
             if match is not None:
-                return _normalize_sample_rate_hz(float(match.group(1)))
-    return 0
+                rate_hz = _normalize_sample_rate_hz(float(match.group(1)))
+                if rate_hz > 0:
+                    return rate_hz
+    return _sample_rate_hz_from_tidal_audio_resolution(album)
+
+
+def peak_sample_rate_hz_from_tidal_album(album: object) -> int | None:
+    rate_hz = _tidal_album_sample_rate_hz(album)
+    return rate_hz if rate_hz > 0 else None
 
 
 def _tidal_acoustic_peak_tier(album: object) -> str:
@@ -455,6 +483,16 @@ def release_quality_filter_bucket(release: Release) -> str:
         return tier
     tiers = release.available_quality_tiers
     return max_quality_tier(*tiers) if tiers else ""
+
+
+def streaming_catalog_quality_needs_enrich(release: Release) -> bool:
+    """True when album lookup is still needed (or stale) for streaming quality tiers."""
+    if release.source not in (Source.TIDAL, Source.QOBUZ):
+        return False
+    if not release.catalog_quality_ready:
+        return True
+    # Rows enriched before acoustic TIDAL resolution kept cd with no sample rate.
+    return release.peak_sample_rate_hz is None
 
 
 def release_matches_quality_filter(

@@ -23,6 +23,7 @@ from tunes_player.core.release_quality import (
     qobuz_format_candidates_for_preference,
     qobuz_format_id_for_preference,
     release_matches_quality_filter,
+    streaming_catalog_quality_needs_enrich,
     tier_from_local,
     tier_from_qobuz_album,
     tiers_from_qobuz_album,
@@ -154,6 +155,53 @@ class ReleaseQualityTests(unittest.TestCase):
             audio_modes=["HI_RES_LOSSLESS"],
         )
         self.assertEqual(tier_from_tidal_album(album), QUALITY_FILTER_HI_RES)
+
+    def test_tidal_hi_res_edition_uses_audio_resolution(self) -> None:
+        """Separate hi-res catalog IDs can report LOSSLESS + HIRES tag without album rate."""
+        album = SimpleNamespace(
+            audio_quality="LOSSLESS",
+            media_metadata_tags=["LOSSLESS", "HIRES_LOSSLESS"],
+            audio_modes=["STEREO"],
+            get_audio_resolution=lambda: [(24, 96_000)],
+        )
+        self.assertEqual(tier_from_tidal_album(album), QUALITY_FILTER_HI_RES)
+        self.assertEqual(
+            classify_tidal_catalog(album),
+            frozenset({QUALITY_FILTER_HI_RES}),
+        )
+
+    def test_stale_tidal_enrich_missing_sample_rate(self) -> None:
+        stale = Release(
+            id="tidal:album:1",
+            title="Album",
+            artist_name="Artist",
+            source=Source.TIDAL,
+            peak_quality_tier=QUALITY_FILTER_CD,
+            available_quality_tiers=frozenset({QUALITY_FILTER_CD}),
+            catalog_quality_ready=True,
+            peak_sample_rate_hz=None,
+        )
+        self.assertTrue(streaming_catalog_quality_needs_enrich(stale))
+        fresh = Release(
+            id="tidal:album:2",
+            title="Album",
+            artist_name="Artist",
+            source=Source.TIDAL,
+            peak_quality_tier=QUALITY_FILTER_HI_RES,
+            available_quality_tiers=frozenset({QUALITY_FILTER_HI_RES}),
+            catalog_quality_ready=True,
+            peak_sample_rate_hz=96_000,
+        )
+        self.assertFalse(streaming_catalog_quality_needs_enrich(fresh))
+
+    def test_tidal_cd_edition_audio_resolution_stays_cd(self) -> None:
+        album = SimpleNamespace(
+            audio_quality="LOSSLESS",
+            media_metadata_tags=["LOSSLESS"],
+            audio_modes=["STEREO"],
+            get_audio_resolution=lambda: [(16, 44_100)],
+        )
+        self.assertEqual(tier_from_tidal_album(album), QUALITY_FILTER_CD)
 
     def test_max_quality_tier(self) -> None:
         self.assertEqual(

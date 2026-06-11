@@ -177,6 +177,35 @@ class TestReleaseFromQobuz(unittest.TestCase):
         self.assertIsNotNone(release.art_uri)
         self.assertEqual(release.release_type.value, "album")
 
+    def test_reads_upc_and_sample_rate(self) -> None:
+        album = {
+            "id": "12345",
+            "title": "Test Album",
+            "artist": {"name": "Artist One"},
+            "tracks_count": 10,
+            "upc": "0060254735180",
+            "maximum_sampling_rate": 192,
+            "maximum_bit_depth": 24,
+            "hires": True,
+        }
+        release = release_from_qobuz(album)
+        self.assertEqual(release.upc, "60254735180")
+        self.assertEqual(release.peak_sample_rate_hz, 192_000)
+
+    def test_stub_reads_upc_from_search_payload(self) -> None:
+        from tunes_player.core.backends.qobuz.convert import release_stub_from_qobuz
+
+        album = {
+            "id": "search1",
+            "title": "Search Album",
+            "artist": {"name": "Artist One"},
+            "tracks_count": 10,
+            "upc": 60254735180,
+        }
+        release = release_stub_from_qobuz(album)
+        self.assertEqual(release.upc, "60254735180")
+        self.assertFalse(release.catalog_quality_ready)
+
     def test_product_type_ep(self) -> None:
         album = {
             "id": "ep1",
