@@ -27,6 +27,7 @@ from tunes_player.core.shell_state import (
     SearchScope,
     ShellBase,
     ShellState,
+    apply_catalog_enrich_scope_filters,
     apply_shell_view_filters,
     cached_releases_compatible_with_available,
     cached_releases_have_quality_tiers,
@@ -945,12 +946,22 @@ class TunesWindow(Adw.ApplicationWindow):
         self._start_catalog_quality_enrich(token)
         return False
 
+    def _releases_for_catalog_enrich(self) -> list[Release]:
+        state = self._shell_state
+        return apply_catalog_enrich_scope_filters(
+            self._cached_releases,
+            enabled_sources=state.enabled_sources,
+            enabled_genres=state.enabled_genres,
+            enabled_release_types=state.enabled_release_types,
+            available_sources=self._available_sources(),
+        )
+
     def _start_catalog_quality_enrich(self, token: int) -> None:
         if self._shell_state.base == ShellBase.ALL_LOCAL:
             return
         pending_ids: list[str] = []
         seen_catalog_ids: set[str] = set()
-        for release in self._cached_releases:
+        for release in self._releases_for_catalog_enrich():
             if not streaming_catalog_quality_needs_enrich(release):
                 continue
             catalog_id = (
@@ -964,6 +975,10 @@ class TunesWindow(Adw.ApplicationWindow):
             pending_ids.append(catalog_id)
         if not pending_ids:
             return
+
+        visible_ids_before = tuple(
+            release.id for release in self._filtered_from_cache(self._shell_state)
+        )
 
         def work() -> None:
             import concurrent.futures
@@ -992,7 +1007,7 @@ class TunesWindow(Adw.ApplicationWindow):
                     if enriched is None:
                         continue
                     GLib.idle_add(self._patch_enriched_release, token, enriched)
-            GLib.idle_add(self._finish_catalog_enrich, token)
+            GLib.idle_add(self._finalize_catalog_enrich, token, visible_ids_before)
 
         threading.Thread(
             target=work,
@@ -1022,9 +1037,13 @@ class TunesWindow(Adw.ApplicationWindow):
         self._cached_releases = self._service.expand_releases_with_cache(
             list(catalog_releases.values()),
         )
-        return self._refresh_grid_after_quality_expand()
+        return False
 
-    def _finish_catalog_enrich(self, token: int) -> bool:
+    def _finalize_catalog_enrich(
+        self,
+        token: int,
+        visible_ids_before: tuple[str, ...],
+    ) -> bool:
         if token != self._load_token:
             return False
         catalog_releases: dict[str, Release] = {}
@@ -1039,8 +1058,12 @@ class TunesWindow(Adw.ApplicationWindow):
         self._cached_releases = self._service.expand_releases_with_cache(
             list(catalog_releases.values()),
         )
-        self._refresh_grid_after_quality_expand()
         self._sync_quality_filter()
+        visible_ids_after = tuple(
+            release.id for release in self._filtered_from_cache(self._shell_state)
+        )
+        if visible_ids_after != visible_ids_before:
+            return self._refresh_grid_after_quality_expand()
         return False
 
     def _refresh_grid_after_quality_expand(self) -> bool:

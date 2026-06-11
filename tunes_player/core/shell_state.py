@@ -669,6 +669,31 @@ def apply_shell_sort(
     )
 
 
+def apply_catalog_enrich_scope_filters(
+    releases: list[Release],
+    *,
+    enabled_sources: frozenset[Source],
+    enabled_genres: frozenset[str],
+    enabled_release_types: frozenset[str],
+    available_sources: frozenset[Source],
+) -> list[Release]:
+    """Releases eligible for background catalog enrich.
+
+    Applies source/genre/release-type filters but not quality filter
+    (enrich is what makes quality filter work).
+    """
+    return apply_shell_view_filters(
+        releases,
+        enabled_sources=enabled_sources,
+        enabled_genres=enabled_genres,
+        enabled_release_types=enabled_release_types,
+        enabled_quality_tiers=frozenset(),
+        available_sources=available_sources,
+        sort_key=None,
+        sort_descending=True,
+    )
+
+
 def apply_shell_view_filters(
     releases: list[Release],
     *,
