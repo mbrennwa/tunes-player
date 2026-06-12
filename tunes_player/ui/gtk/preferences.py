@@ -23,6 +23,7 @@ from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.util import escape_markup, open_external_uri, read_clipboard_text
 
 _FOLDER_WATCH_LABEL = "Watch folder"
+_QOBUZ_CRED_AUTOSAVE_MS = 500
 _VOLUME_MODE_SUBTITLES = {
     "hardware": "Device hardware volume control",
     "software": "Software volume control in Tunes",
@@ -163,24 +164,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
             self._qobuz_app_secret_row.set_text(cfg.qobuz_app_secret)
         qobuz_group.add(self._qobuz_app_secret_row)
 
-        self._qobuz_save_creds_row = Adw.ActionRow(
-            title="Save Qobuz credentials",
-            subtitle="Required before sign-in",
-        )
-        qobuz_save_btn = Gtk.Button(label="Save")
-        qobuz_save_btn.set_valign(Gtk.Align.CENTER)
-        qobuz_save_btn.connect("clicked", self._on_qobuz_save_credentials_clicked)
-        self._qobuz_save_creds_row.add_suffix(qobuz_save_btn)
-        self._qobuz_save_creds_row.set_activatable_widget(qobuz_save_btn)
-        qobuz_group.add(self._qobuz_save_creds_row)
-
-        self._qobuz_email_row = Adw.EntryRow(title="Email")
-        qobuz_group.add(self._qobuz_email_row)
-
-        self._qobuz_password_row = Adw.PasswordEntryRow(title="Password")
-        qobuz_group.add(self._qobuz_password_row)
-
-        self._qobuz_status_row = Adw.ActionRow(title="Account")
+        self._qobuz_status_row = Adw.ActionRow(title="")
         self._qobuz_sign_in_btn = Gtk.Button(label="Sign in")
         self._qobuz_sign_in_btn.connect("clicked", self._on_qobuz_sign_in_clicked)
         self._qobuz_sign_out_btn = Gtk.Button(label="Sign out")
@@ -192,6 +176,11 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._qobuz_status_row.add_suffix(qobuz_btn_box)
         qobuz_group.add(self._qobuz_status_row)
         sources_page.add(qobuz_group)
+
+        self._qobuz_autosave_id: int = 0
+        self._qobuz_sign_in_dialog: Adw.Dialog | None = None
+        self._qobuz_app_id_row.connect("changed", self._on_qobuz_credentials_changed)
+        self._qobuz_app_secret_row.connect("changed", self._on_qobuz_credentials_changed)
 
         self.add(sources_page)
         self.add(audio_page)
@@ -761,59 +750,158 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._reload_tidal_status()
 
     def _reload_qobuz_status(self) -> None:
+        if self._qobuz_sign_in_dialog is not None:
+            return
         service = self._service
         creds_ok = service.qobuz_configured()
-        self._qobuz_save_creds_row.set_subtitle(
-            "Saved" if creds_ok else "Required before sign-in"
-        )
-        can_sign_in = creds_ok
         if service.qobuz_is_logged_in():
             label = service.qobuz_account_label()
-            self._qobuz_status_row.set_subtitle(
+            self._qobuz_status_row.set_title(
                 f"Connected as {label}" if label else "Connected"
             )
             self._qobuz_sign_in_btn.set_sensitive(False)
             self._qobuz_sign_out_btn.set_sensitive(True)
-            self._qobuz_email_row.set_sensitive(False)
-            self._qobuz_password_row.set_sensitive(False)
         else:
             if not creds_ok:
-                self._qobuz_status_row.set_subtitle("Save App ID and App Secret first")
+                self._qobuz_status_row.set_title("Enter App ID and App Secret")
             else:
-                self._qobuz_status_row.set_subtitle("Not connected")
-            self._qobuz_sign_in_btn.set_sensitive(can_sign_in)
+                self._qobuz_status_row.set_title("Not connected")
+            self._qobuz_sign_in_btn.set_sensitive(creds_ok)
             self._qobuz_sign_out_btn.set_sensitive(False)
-            self._qobuz_email_row.set_sensitive(True)
-            self._qobuz_password_row.set_sensitive(True)
 
-    def _on_qobuz_save_credentials_clicked(self, *_args: object) -> None:
+    def _on_qobuz_credentials_changed(self, *_args: object) -> None:
+        if self._qobuz_sign_in_dialog is not None:
+            return
+        if self._qobuz_autosave_id:
+            GLib.source_remove(self._qobuz_autosave_id)
+        self._qobuz_autosave_id = GLib.timeout_add(
+            _QOBUZ_CRED_AUTOSAVE_MS,
+            self._autosave_qobuz_credentials,
+        )
+
+    def _autosave_qobuz_credentials(self) -> bool:
+        self._qobuz_autosave_id = 0
         app_id = self._qobuz_app_id_row.get_text().strip()
         app_secret = self._qobuz_app_secret_row.get_text()
         if not app_id or not app_secret:
-            self._qobuz_save_creds_row.set_subtitle("App ID and App Secret are both required")
-            return
+            self._reload_qobuz_status()
+            return False
         try:
             self._service.qobuz_set_credentials(app_id, app_secret)
         except Exception as exc:
-            self._qobuz_save_creds_row.set_subtitle(f"Save failed: {exc}")
-            return
-        self._qobuz_password_row.set_text("")
+            self._qobuz_status_row.set_title(f"Save failed: {exc}")
+            return False
         self._reload_qobuz_status()
+        return False
 
     def _on_qobuz_sign_in_clicked(self, *_args: object) -> None:
-        email = self._qobuz_email_row.get_text().strip()
-        password = self._qobuz_password_row.get_text()
-        if not email or not password:
-            self._qobuz_status_row.set_subtitle("Email and password are required")
+        if not self._service.qobuz_configured():
+            self._qobuz_status_row.set_title("Enter App ID and App Secret")
             return
-        try:
-            self._service.qobuz_login(email, password)
-        except Exception as exc:
-            self._qobuz_status_row.set_subtitle(f"Sign-in failed: {exc}")
-            return
-        self._qobuz_password_row.set_text("")
-        self._reload_qobuz_status()
-        self._service.notify_sources_changed()
+        self._present_qobuz_sign_in()
+
+    def _present_qobuz_sign_in(self) -> None:
+        dialog = Adw.Dialog()
+        dialog.set_title("Connect Qobuz")
+        dialog.set_content_width(420)
+        self._qobuz_sign_in_dialog = dialog
+
+        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        header.set_show_start_title_buttons(False)
+        toolbar.add_top_bar(header)
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        content.set_margin_top(8)
+        content.set_margin_bottom(8)
+        content.set_margin_start(12)
+        content.set_margin_end(12)
+
+        error_label = Gtk.Label(label="", xalign=0, wrap=True)
+        error_label.add_css_class("dim-label")
+        error_label.set_visible(False)
+        content.append(error_label)
+
+        email_label = Gtk.Label(label="Email", xalign=0)
+        email_label.add_css_class("heading")
+        content.append(email_label)
+
+        email_entry = Gtk.Entry()
+        email_entry.set_hexpand(True)
+        email_entry.set_input_purpose(Gtk.InputPurpose.EMAIL)
+        content.append(email_entry)
+
+        password_label = Gtk.Label(label="Password", xalign=0)
+        password_label.add_css_class("heading")
+        content.append(password_label)
+
+        password_entry = Gtk.Entry()
+        password_entry.set_hexpand(True)
+        password_entry.set_visibility(False)
+        password_entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+        content.append(password_entry)
+
+        toolbar.set_content(content)
+
+        bottom = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=8,
+            margin_top=8,
+            margin_bottom=12,
+            margin_start=12,
+            margin_end=12,
+        )
+        sign_in_btn = Gtk.Button(label="Sign in")
+        sign_in_btn.add_css_class("suggested-action")
+        sign_in_btn.add_css_class("pill")
+        sign_in_btn.set_halign(Gtk.Align.FILL)
+        sign_in_btn.set_hexpand(True)
+        bottom.append(sign_in_btn)
+        toolbar.add_bottom_bar(bottom)
+
+        dialog.set_child(toolbar)
+
+        def show_error(message: str) -> None:
+            error_label.set_label(message)
+            error_label.set_visible(bool(message))
+
+        def close_dialog() -> None:
+            if self._qobuz_sign_in_dialog is dialog:
+                self._qobuz_sign_in_dialog = None
+            dialog.close()
+
+        def on_sign_in(*_args: object) -> None:
+            email = email_entry.get_text().strip()
+            password = password_entry.get_text()
+            if not email or not password:
+                show_error("Email and password are required")
+                return
+            try:
+                self._service.qobuz_login(email, password)
+            except Exception as exc:
+                show_error(f"Sign-in failed: {exc}")
+                return
+            password_entry.set_text("")
+            close_dialog()
+            self._reload_qobuz_status()
+            self._service.notify_sources_changed()
+
+        def on_closed(*_args: object) -> None:
+            if self._qobuz_sign_in_dialog is dialog:
+                self._qobuz_sign_in_dialog = None
+            self._reload_qobuz_status()
+
+        sign_in_btn.connect("clicked", on_sign_in)
+        email_entry.connect("activate", on_sign_in)
+        password_entry.connect("activate", on_sign_in)
+        dialog.connect("closed", on_closed)
+        dialog.present(self)
+
+        def focus_email() -> bool:
+            email_entry.grab_focus()
+            return False
+
+        GLib.idle_add(focus_email)
 
     def _on_qobuz_sign_out_clicked(self, *_args: object) -> None:
         self._service.qobuz_logout()
