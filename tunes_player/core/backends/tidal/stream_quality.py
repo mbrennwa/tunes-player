@@ -246,6 +246,20 @@ def should_warn_hi_res_filter_miss(
     return track_peak_quality(track) >= _QUALITY_RANK["HI_RES"]
 
 
+def should_warn_lossy_stream_fallback(
+    candidates: list[str],
+    resolved: str,
+) -> bool:
+    """True when lossless tiers were tried but playback resolved to lossy."""
+    if normalize_api_quality(resolved) != _LOSSY_API_TIER:
+        return False
+    lossy_rank = _QUALITY_RANK[_LOSSY_API_TIER]
+    return any(
+        _QUALITY_RANK.get(normalize_api_quality(item), 0) > lossy_rank
+        for item in candidates
+    )
+
+
 def should_retry_after_high(
     payload: dict[str, Any],
     *,

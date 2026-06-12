@@ -12,6 +12,7 @@ from tunes_player.core.backends.tidal.stream_quality import (
     playback_quality_candidates,
     session_quality_for_subscription,
     should_warn_hi_res_filter_miss,
+    should_warn_lossy_stream_fallback,
     subscription_allows_hi_res,
     track_peak_quality,
 )
@@ -286,6 +287,18 @@ class TidalStreamQualityTests(unittest.TestCase):
                 hi_res_track,
                 preference=_CD_PREFERENCE,
             ),
+        )
+
+
+class TestLossyStreamFallbackWarning(unittest.TestCase):
+    def test_no_warn_when_only_high_was_tried(self) -> None:
+        self.assertFalse(
+            should_warn_lossy_stream_fallback(["HIGH"], "HIGH"),
+        )
+
+    def test_warn_when_lossless_was_tried(self) -> None:
+        self.assertTrue(
+            should_warn_lossy_stream_fallback(["LOSSLESS", "HIGH"], "HIGH"),
         )
 
 

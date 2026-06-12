@@ -530,15 +530,27 @@ def playback_preference_for_tier(tier: str) -> PlaybackPreference:
 
 
 def catalog_quality_label_for_release(release: Release) -> str | None:
-    """Human-readable catalog quality for grid tiles."""
+    """Human-readable catalog quality for grid tiles and release detail."""
     from tunes_player.core.playback_quality import catalog_tile_quality_label
+    from tunes_player.core.release_quality_tiles import (
+        parse_quality_tier_suffix,
+        tier_sample_metadata,
+    )
 
-    tier = release.quality_tier or release.peak_quality_tier
+    tier = (
+        release.quality_tier
+        or parse_quality_tier_suffix(release.id)
+        or release.peak_quality_tier
+    )
     if not tier and len(release.available_quality_tiers) == 1:
         tier = next(iter(release.available_quality_tiers))
+    if tier:
+        depth, rate_hz = tier_sample_metadata(release, tier)
+    else:
+        depth, rate_hz = release.peak_bit_depth, release.peak_sample_rate_hz
     return catalog_tile_quality_label(
-        bit_depth=release.peak_bit_depth,
-        sample_rate_hz=release.peak_sample_rate_hz,
+        bit_depth=depth,
+        sample_rate_hz=rate_hz,
         quality_tier=tier,
         source=release.source,
     )

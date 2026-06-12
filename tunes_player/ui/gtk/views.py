@@ -29,6 +29,7 @@ from tunes_player.ui.gtk.release_grid import (
 )
 from tunes_player.ui.gtk.art import ArtLoader
 from tunes_player.ui.gtk.util import (
+    effective_release_duration_sec,
     escape_markup,
     format_duration,
     format_track_number,
@@ -558,7 +559,7 @@ class ReleaseDetailView(Gtk.Box):
             _detail_artist_line(release, on_artist_search=on_artist_search)
         )
 
-        duration = format_duration(release.duration_sec)
+        duration = format_duration(effective_release_duration_sec(release, tracks))
         info = Gtk.Label(
             label=_release_catalog_meta_line(release, duration),
             xalign=0.0,

@@ -16,7 +16,7 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from tunes_player.core.models import Source, Track
+from tunes_player.core.models import Release, Source, Track
 
 
 def load_app_css() -> None:
@@ -75,6 +75,19 @@ def format_duration(seconds: float | None) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
+
+
+def effective_release_duration_sec(
+    release: Release,
+    tracks: list[Track] | None = None,
+) -> float | None:
+    """Release duration from metadata, or summed from loaded tracks."""
+    if release.duration_sec is not None:
+        return release.duration_sec
+    if not tracks:
+        return None
+    total = sum(float(track.duration_sec or 0) for track in tracks)
+    return total if total > 0 else None
 
 
 def normalize_http_uri(uri: str) -> str:

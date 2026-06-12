@@ -15,6 +15,7 @@ from tunes_player.core.release_quality import (
     PlaybackPreference,
 )
 from tunes_player.core.services import PlayerService
+from tunes_player.ui.gtk.util import effective_release_duration_sec
 
 
 class GetReleaseTracksPlaybackTests(unittest.TestCase):
@@ -83,6 +84,89 @@ class GetReleaseTracksPlaybackTests(unittest.TestCase):
         self._service.cache_release_summary(tile)
         pref = self._service.playback_preference_for_release_id(tile.id)
         self.assertEqual(pref.max_tier, QUALITY_FILTER_HI_RES)
+
+
+class GetReleaseDurationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        config = ConfigManager(Path(self._tmpdir.name) / "config.toml")
+        config.load()
+        self._service = PlayerService(config=config)
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    def test_get_release_refetches_when_cached_without_duration(self) -> None:
+        tile_id = "tidal:album:404893856@cd"
+        catalog_id = "tidal:album:404893856"
+        cached = Release(
+            id=tile_id,
+            title="Album",
+            artist_name="Artist",
+            source=Source.TIDAL,
+            track_count=10,
+            completeness=ReleaseCompleteness.COMPLETE,
+            peak_quality_tier=QUALITY_FILTER_CD,
+            available_quality_tiers=frozenset({QUALITY_FILTER_CD}),
+            catalog_release_id=catalog_id,
+            quality_tier=QUALITY_FILTER_CD,
+            catalog_quality_ready=True,
+        )
+        self._service.cache_release_summary(cached)
+        fetched = Release(
+            id=catalog_id,
+            title="Album",
+            artist_name="Artist",
+            source=Source.TIDAL,
+            track_count=10,
+            completeness=ReleaseCompleteness.COMPLETE,
+            peak_quality_tier=QUALITY_FILTER_CD,
+            available_quality_tiers=frozenset({QUALITY_FILTER_CD, QUALITY_FILTER_HI_RES}),
+            catalog_release_id=catalog_id,
+            catalog_quality_ready=True,
+            duration_sec=2_700.0,
+        )
+
+        with patch.object(
+            self._service._tidal,
+            "get_release",
+            return_value=fetched,
+        ) as get_release:
+            with patch.object(self._service._tidal, "is_logged_in", return_value=True):
+                result = self._service.get_release(tile_id)
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.id, tile_id)
+        self.assertEqual(result.duration_sec, 2_700.0)
+        get_release.assert_called_once_with(catalog_id)
+
+    def test_effective_release_duration_sec_sums_tracks(self) -> None:
+        release = Release(
+            id="tidal:album:1",
+            title="Album",
+            artist_name="Artist",
+            source=Source.TIDAL,
+        )
+        tracks = [
+            Track(
+                id="tidal:track:1",
+                title="One",
+                artist_name="Artist",
+                release_title="Album",
+                source=Source.TIDAL,
+                duration_sec=180.0,
+            ),
+            Track(
+                id="tidal:track:2",
+                title="Two",
+                artist_name="Artist",
+                release_title="Album",
+                source=Source.TIDAL,
+                duration_sec=210.0,
+            ),
+        ]
+        self.assertEqual(effective_release_duration_sec(release, tracks), 390.0)
 
 
 if __name__ == "__main__":

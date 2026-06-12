@@ -41,6 +41,20 @@ def parse_catalog_release_id(release_id: str) -> str:
     return release_id[: -len(tier) - 1]
 
 
+def tier_sample_metadata(
+    release: Release,
+    tier: str,
+) -> tuple[int | None, int | None]:
+    """Bit depth and sample rate to display for a specific quality tier."""
+    return _bit_depth_sample_rate_for_tier(release, tier)
+
+
+def release_for_quality_tier(release: Release, tier: str) -> Release:
+    """Apply grid tile tier metadata (for detail view / playback context)."""
+    catalog_id = _catalog_id_for_release(release)
+    return _tile_for_tier(release, tier, catalog_id=catalog_id)
+
+
 def quality_tile_id(catalog_release_id: str, tier: str) -> str:
     if tier not in _VALID_QUALITY_FILTERS:
         return catalog_release_id

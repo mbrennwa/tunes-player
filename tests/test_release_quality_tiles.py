@@ -150,6 +150,27 @@ class ExpandReleasesByQualityTierTests(unittest.TestCase):
             "96/24",
         )
 
+    def test_catalog_label_uses_id_suffix_without_quality_tier_field(self) -> None:
+        """Detail view after get_release cache miss still shows tier label."""
+        base = _release(
+            "tidal:album:404893856",
+            tiers=frozenset({QUALITY_FILTER_CD, QUALITY_FILTER_HI_RES}),
+            peak_sample_rate_hz=96_000,
+            peak_bit_depth=24,
+        )
+        cd_view = replace(
+            base,
+            id="tidal:album:404893856@cd",
+            quality_tier="",
+        )
+        hi_res_view = replace(
+            base,
+            id="tidal:album:404893856@hi_res",
+            quality_tier="",
+        )
+        self.assertEqual(catalog_quality_label_for_release(cd_view), "44.1/16")
+        self.assertEqual(catalog_quality_label_for_release(hi_res_view), "96/24")
+
     def test_three_tier_album(self) -> None:
         release = _release(
             "tidal:album:multi",

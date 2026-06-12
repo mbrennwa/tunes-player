@@ -831,6 +831,7 @@ class TidalClient:
         )
         from tunes_player.core.backends.tidal.stream_quality import (
             should_warn_hi_res_filter_miss,
+            should_warn_lossy_stream_fallback,
         )
 
         resolved = payload_audio_quality(payload)
@@ -844,13 +845,13 @@ class TidalClient:
                 track_id,
                 resolved,
             )
-        if resolved == "HIGH":
+        if should_warn_lossy_stream_fallback(candidates, resolved):
             log.warning(
                 "TIDAL track %s is streaming at HIGH (320 kbps) after trying %s",
                 track_id,
                 ", ".join(candidates),
             )
-        else:
+        elif resolved != "HIGH":
             log.debug(
                 "TIDAL track %s stream tier %s -> %s",
                 track_id,

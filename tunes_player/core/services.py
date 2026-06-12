@@ -56,7 +56,9 @@ from tunes_player.core.release_quality import (
 from tunes_player.core.release_quality_tiles import (
     expand_releases_by_quality_tier,
     parse_catalog_release_id,
+    parse_quality_tier_suffix,
     playback_tier_for_release_id,
+    release_for_quality_tier,
 )
 from tunes_player.core.volume import (
     VolumeController,
@@ -500,24 +502,32 @@ class PlayerService:
 
     def get_release(self, release_id: str) -> Release | None:
         cached = self._release_summaries.get(release_id)
-        if cached is not None:
+        if cached is not None and cached.duration_sec is not None:
             return cached
+        tier = parse_quality_tier_suffix(release_id)
         catalog_id = parse_catalog_release_id(release_id)
+        release: Release | None
         if catalog_id.startswith("tidal:"):
             if not self._tidal.is_logged_in():
                 return None
             try:
-                return self._tidal.get_release(catalog_id)
+                release = self._tidal.get_release(catalog_id)
             except TidalUnavailableError:
                 return None
-        if catalog_id.startswith("qobuz:"):
+        elif catalog_id.startswith("qobuz:"):
             if not self._qobuz.is_logged_in():
                 return None
             try:
-                return self._qobuz.get_release(catalog_id)
+                release = self._qobuz.get_release(catalog_id)
             except QobuzUnavailableError:
                 return None
-        return self._store.get_release(catalog_id)
+        else:
+            release = self._store.get_release(catalog_id)
+        if release is not None and tier is not None:
+            release = release_for_quality_tier(release, tier)
+        if release is not None:
+            self.cache_release_summary(release)
+        return release
 
     def get_release_tracks(
         self,
