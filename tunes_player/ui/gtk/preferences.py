@@ -580,7 +580,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         service = self._service
         if not service.tidal_available():
             self._tidal_status_row.set_subtitle(
-                "tidalapi is not installed (pip install tidalapi)"
+                "TIDAL unavailable (tidalapi could not be loaded)"
             )
             self._tidal_sign_in_btn.set_sensitive(False)
             self._tidal_sign_out_btn.set_sensitive(False)

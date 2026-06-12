@@ -25,6 +25,10 @@ Depends: ${misc:Depends},
           libmpv2,
           python3-mutagen,
           python3-platformdirs
+Recommends: alsa-utils,
+            xdg-utils,
+            wireplumber,
+            pipewire-pulse | pulseaudio-utils
 Description: Tunes — music player for local files and streaming
  Tunes plays local audio files and streaming catalogs from TIDAL and Qobuz
  (Deezer planned) in a GNOME/GTK shell on Linux.

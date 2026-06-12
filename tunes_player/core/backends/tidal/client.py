@@ -1,4 +1,4 @@
-"""TIDAL API access via tidalapi (optional dependency)."""
+"""TIDAL API access via tidalapi."""
 
 from __future__ import annotations
 
@@ -111,7 +111,7 @@ class _CollectedTidalObject:
 
 
 class TidalUnavailableError(RuntimeError):
-    """Raised when tidalapi is not installed or login failed."""
+    """Raised when TIDAL is unavailable or login failed."""
 
 
 class _SessionErrorKind(Enum):
@@ -1051,7 +1051,7 @@ class TidalClient:
         session = self._get_session()
         if session is None:
             raise TidalUnavailableError(
-                "tidalapi is not installed. Install with: pip install 'tunes-player[streaming]'"
+                "TIDAL is unavailable (tidalapi could not be loaded)"
             )
         return session
 
