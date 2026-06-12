@@ -34,7 +34,7 @@ from tunes_player.core.home import (
     suggestion_added_ns,
 )
 from tunes_player.core.library import LibraryScanner, LibraryStore, ScanResult
-from tunes_player.core.library.db import connect, is_locked_error
+from tunes_player.core.library.db import connect, is_locked_error, with_db_retry
 from tunes_player.core.library.store import FileMetadata
 from tunes_player.core.library.scanner import ScanFileError
 from tunes_player.core.library.scan_process import terminate_orphan_library_scans
@@ -783,39 +783,26 @@ class PlayerService:
 
     def _maintain_library_art_blocking(self) -> tuple[int, int]:
         from tunes_player.core.library.art_cache import maintain_album_art
-        from tunes_player.core.library.db import (
-            LOCK_RETRY_ATTEMPTS,
-            LOCK_RETRY_BASE_DELAY_SEC,
-            connect,
-            is_locked_error,
-        )
+        from tunes_player.core.library.db import connect
 
         db_path = self._config_manager.database_path
         data_dir = self._config_manager.data_dir
         self._store.close()
         try:
             with self._library_db_write_lock:
-                last_error: sqlite3.OperationalError | None = None
-                for attempt in range(LOCK_RETRY_ATTEMPTS):
+                def attempt() -> tuple[int, int]:
                     connection = connect(db_path)
                     try:
                         result = maintain_album_art(connection, data_dir=data_dir)
                         connection.commit()
                         return result
-                    except sqlite3.OperationalError as exc:
-                        connection.rollback()
-                        if not is_locked_error(exc) or attempt == LOCK_RETRY_ATTEMPTS - 1:
-                            raise
-                        last_error = exc
-                        time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
                     except Exception:
                         connection.rollback()
                         raise
                     finally:
                         connection.close()
-                if last_error is not None:
-                    raise last_error
-                raise RuntimeError("album art maintenance retry loop exited without result")
+
+                return with_db_retry(attempt)
         finally:
             self._store.reconnect()
 

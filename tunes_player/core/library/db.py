@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import sqlite3
+import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
+
+T = TypeVar("T")
 
 SCHEMA_VERSION = 7
 
@@ -13,6 +18,29 @@ LOCK_RETRY_BASE_DELAY_SEC = 0.15
 
 def is_locked_error(exc: BaseException) -> bool:
     return isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
+
+
+def with_db_retry(
+    operation: Callable[[], T],
+    *,
+    on_locked: Callable[[sqlite3.OperationalError, int], None] | None = None,
+) -> T:
+    """Run *operation*; retry on SQLITE locked errors."""
+    last_error: sqlite3.OperationalError | None = None
+    for attempt in range(LOCK_RETRY_ATTEMPTS):
+        try:
+            return operation()
+        except sqlite3.OperationalError as exc:
+            if on_locked is not None:
+                on_locked(exc, attempt)
+            if not is_locked_error(exc) or attempt == LOCK_RETRY_ATTEMPTS - 1:
+                raise
+            last_error = exc
+            time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("db retry loop exited without result")
+
 
 _SCHEMA = """
 PRAGMA foreign_keys = ON;

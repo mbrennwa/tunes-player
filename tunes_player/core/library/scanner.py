@@ -21,6 +21,7 @@ from tunes_player.core.library.db import (
     LOCK_RETRY_BASE_DELAY_SEC,
     connect,
     is_locked_error,
+    with_db_retry,
 )
 from tunes_player.core.library.formats import (
     codec_for_extension,
@@ -129,23 +130,14 @@ class LibraryScanner:
         batch_notify: ScanBatchCallback | None = None,
     ) -> ScanResult:
         del checkpoint_path  # Resume is handled by fast-skipping indexed files.
-        last_error: sqlite3.OperationalError | None = None
-        for attempt in range(LOCK_RETRY_ATTEMPTS):
-            try:
-                return self._scan_once(
-                    scan_folders=scan_folders,
-                    progress=progress,
-                    expected_total=expected_total,
-                    batch_notify=batch_notify,
-                )
-            except sqlite3.OperationalError as exc:
-                if not is_locked_error(exc) or attempt == LOCK_RETRY_ATTEMPTS - 1:
-                    raise
-                last_error = exc
-                time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("library scan retry loop exited without result")
+        return with_db_retry(
+            lambda: self._scan_once(
+                scan_folders=scan_folders,
+                progress=progress,
+                expected_total=expected_total,
+                batch_notify=batch_notify,
+            )
+        )
 
     def scan_changes(
         self,
@@ -157,24 +149,15 @@ class LibraryScanner:
         batch_notify: ScanBatchCallback | None = None,
     ) -> ScanResult:
         """Index or drop specific paths without walking the whole library folder."""
-        last_error: sqlite3.OperationalError | None = None
-        for attempt in range(LOCK_RETRY_ATTEMPTS):
-            try:
-                return self._scan_changes_once(
-                    folder=folder,
-                    add_paths=add_paths,
-                    remove_paths=remove_paths,
-                    progress=progress,
-                    batch_notify=batch_notify,
-                )
-            except sqlite3.OperationalError as exc:
-                if not is_locked_error(exc) or attempt == LOCK_RETRY_ATTEMPTS - 1:
-                    raise
-                last_error = exc
-                time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("library incremental scan retry loop exited without result")
+        return with_db_retry(
+            lambda: self._scan_changes_once(
+                folder=folder,
+                add_paths=add_paths,
+                remove_paths=remove_paths,
+                progress=progress,
+                batch_notify=batch_notify,
+            )
+        )
 
     def _scan_once(
         self,
@@ -721,8 +704,8 @@ class LibraryScanner:
     def purge_folder(self, folder: str) -> int:
         """Remove all indexed files under *folder* from the library database."""
         root = str(Path(folder).resolve())
-        last_error: sqlite3.OperationalError | None = None
-        for attempt in range(LOCK_RETRY_ATTEMPTS):
+
+        def attempt() -> int:
             connection = connect(self._db_path)
             try:
                 connection.execute("BEGIN IMMEDIATE")
@@ -730,20 +713,13 @@ class LibraryScanner:
                 prune_orphan_album_art(connection, data_dir=self._data_dir)
                 connection.commit()
                 return removed
-            except sqlite3.OperationalError as exc:
-                connection.rollback()
-                if not is_locked_error(exc) or attempt == LOCK_RETRY_ATTEMPTS - 1:
-                    raise
-                last_error = exc
-                time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
             except Exception:
                 connection.rollback()
                 raise
             finally:
                 connection.close()
-        if last_error is not None:
-            raise last_error
-        return 0
+
+        return with_db_retry(attempt)
 
     def purge_unconfigured_folders(self) -> int:
         """Remove indexed files whose path is outside configured music folders."""
@@ -751,8 +727,8 @@ class LibraryScanner:
             str(Path(folder).resolve())
             for folder in self._config.music_folders
         ]
-        last_error: sqlite3.OperationalError | None = None
-        for attempt in range(LOCK_RETRY_ATTEMPTS):
+
+        def attempt() -> int:
             connection = connect(self._db_path)
             try:
                 connection.execute("BEGIN IMMEDIATE")
@@ -760,20 +736,13 @@ class LibraryScanner:
                 prune_orphan_album_art(connection, data_dir=self._data_dir)
                 connection.commit()
                 return removed
-            except sqlite3.OperationalError as exc:
-                connection.rollback()
-                if not is_locked_error(exc) or attempt == LOCK_RETRY_ATTEMPTS - 1:
-                    raise
-                last_error = exc
-                time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
             except Exception:
                 connection.rollback()
                 raise
             finally:
                 connection.close()
-        if last_error is not None:
-            raise last_error
-        return 0
+
+        return with_db_retry(attempt)
 
     def _should_bump_indexed_at(
         self,

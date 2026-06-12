@@ -19,12 +19,7 @@ from tunes_player.core.home import (
     RecentlyAddedItem,
 )
 from tunes_player.core.library import ids
-from tunes_player.core.library.db import (
-    LOCK_RETRY_ATTEMPTS,
-    LOCK_RETRY_BASE_DELAY_SEC,
-    connect,
-    is_locked_error,
-)
+from tunes_player.core.library.db import connect, with_db_retry
 from tunes_player.core.library.release_logic import infer_release_metadata
 from tunes_player.core.models import Album, Release, Source, Track
 
@@ -133,11 +128,6 @@ class LibraryStore:
     ) -> int:
         """Remove indexed files not under *roots* using this store's write connection."""
         from tunes_player.core.library.art_cache import prune_orphan_album_art
-        from tunes_player.core.library.db import (
-            LOCK_RETRY_ATTEMPTS,
-            LOCK_RETRY_BASE_DELAY_SEC,
-            is_locked_error,
-        )
         from tunes_player.core.library.scanner import LibraryScanner
 
         if self._write_connection is None:
@@ -146,26 +136,18 @@ class LibraryStore:
         if connection is None:
             raise RuntimeError("library store write connection unavailable")
 
-        last_error: sqlite3.OperationalError | None = None
-        for attempt in range(LOCK_RETRY_ATTEMPTS):
+        def attempt() -> int:
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 removed = LibraryScanner.purge_files_outside_roots(connection, roots)
                 prune_orphan_album_art(connection, data_dir=data_dir)
                 connection.commit()
                 return removed
-            except sqlite3.OperationalError as exc:
-                connection.rollback()
-                if not is_locked_error(exc) or attempt == LOCK_RETRY_ATTEMPTS - 1:
-                    raise
-                last_error = exc
-                time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
             except Exception:
                 connection.rollback()
                 raise
-        if last_error is not None:
-            raise last_error
-        return 0
+
+        return with_db_retry(attempt, on_locked=lambda _exc, _attempt: connection.rollback())
 
     @_locked_db
     def reconnect(self) -> None:
@@ -495,8 +477,8 @@ class LibraryStore:
         if self._write_connection is None:
             raise RuntimeError("library store write connection is closed")
         when = played_at_ns if played_at_ns is not None else time.time_ns()
-        last_error: sqlite3.OperationalError | None = None
-        for attempt in range(LOCK_RETRY_ATTEMPTS):
+
+        def attempt() -> None:
             try:
                 self._write_connection.execute(
                     """
@@ -506,19 +488,20 @@ class LibraryStore:
                     (track_id, release_id, source, when),
                 )
                 self._write_connection.commit()
-                return
-            except sqlite3.OperationalError as exc:
+            except Exception:
                 try:
                     self._write_connection.rollback()
                 except sqlite3.OperationalError:
                     pass
-                if not is_locked_error(exc) or attempt == LOCK_RETRY_ATTEMPTS - 1:
-                    raise
-                last_error = exc
-                time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("record_play retry loop exited without result")
+                raise
+
+        def rollback_on_locked(_exc: sqlite3.OperationalError, _attempt: int) -> None:
+            try:
+                self._write_connection.rollback()
+            except sqlite3.OperationalError:
+                pass
+
+        with_db_retry(attempt, on_locked=rollback_on_locked)
 
     @_locked_db
     def last_play_at_ns(self, track_id: str) -> int | None:
