@@ -238,6 +238,8 @@ class ConfigManager:
         return self._config
 
     def save(self) -> None:
+        if self._config.volume_control_mode in ("hardware", "software"):
+            self._config.volume_control_mode = None
         self._path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "music_folders": list(self._config.music_folders),

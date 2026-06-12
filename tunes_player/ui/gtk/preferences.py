@@ -24,8 +24,8 @@ from tunes_player.ui.gtk.util import escape_markup, open_external_uri, read_clip
 
 _FOLDER_WATCH_LABEL = "Watch folder"
 _VOLUME_MODE_SUBTITLES = {
-    "hardware": "Device hardware volume control",
-    "software": "Software volume control in Tunes",
+    "hardware": "Device volume when available",
+    "software": "Software volume in Tunes",
     "fixed": "Volume fixed at 100%",
 }
 

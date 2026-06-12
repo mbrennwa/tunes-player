@@ -2059,9 +2059,6 @@ class PlayerService:
             self._sync_audible_position_from_engine()
             self._maybe_auto_advance_queue()
 
-    def poll_playback_health(self) -> None:
-        """Reserved for future playback health hooks (ALSA xrun polling disabled)."""
-
     def shutdown(self) -> None:
         self._tidal.save_session()
         self._pending_scan_jobs.clear()

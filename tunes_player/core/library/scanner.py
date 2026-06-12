@@ -16,7 +16,12 @@ from tunes_player.core.library.art_cache import (
     maintain_album_art,
     prune_orphan_album_art,
 )
-from tunes_player.core.library.db import connect
+from tunes_player.core.library.db import (
+    LOCK_RETRY_ATTEMPTS,
+    LOCK_RETRY_BASE_DELAY_SEC,
+    connect,
+    is_locked_error,
+)
 from tunes_player.core.library.formats import (
     codec_for_extension,
     has_tier1_extension,
@@ -31,12 +36,6 @@ _CandidateOutcome = Literal["indexed", "skipped", "error"]
 
 
 _MAX_RECORDED_FILE_ERRORS = 20
-_LOCK_RETRY_ATTEMPTS = 6
-_LOCK_RETRY_BASE_DELAY_SEC = 0.15
-
-
-def _is_locked_error(exc: BaseException) -> bool:
-    return isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,7 +130,7 @@ class LibraryScanner:
     ) -> ScanResult:
         del checkpoint_path  # Resume is handled by fast-skipping indexed files.
         last_error: sqlite3.OperationalError | None = None
-        for attempt in range(_LOCK_RETRY_ATTEMPTS):
+        for attempt in range(LOCK_RETRY_ATTEMPTS):
             try:
                 return self._scan_once(
                     scan_folders=scan_folders,
@@ -140,10 +139,10 @@ class LibraryScanner:
                     batch_notify=batch_notify,
                 )
             except sqlite3.OperationalError as exc:
-                if not _is_locked_error(exc) or attempt == _LOCK_RETRY_ATTEMPTS - 1:
+                if not is_locked_error(exc) or attempt == LOCK_RETRY_ATTEMPTS - 1:
                     raise
                 last_error = exc
-                time.sleep(_LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
+                time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
         if last_error is not None:
             raise last_error
         raise RuntimeError("library scan retry loop exited without result")
@@ -159,7 +158,7 @@ class LibraryScanner:
     ) -> ScanResult:
         """Index or drop specific paths without walking the whole library folder."""
         last_error: sqlite3.OperationalError | None = None
-        for attempt in range(_LOCK_RETRY_ATTEMPTS):
+        for attempt in range(LOCK_RETRY_ATTEMPTS):
             try:
                 return self._scan_changes_once(
                     folder=folder,
@@ -169,10 +168,10 @@ class LibraryScanner:
                     batch_notify=batch_notify,
                 )
             except sqlite3.OperationalError as exc:
-                if not _is_locked_error(exc) or attempt == _LOCK_RETRY_ATTEMPTS - 1:
+                if not is_locked_error(exc) or attempt == LOCK_RETRY_ATTEMPTS - 1:
                     raise
                 last_error = exc
-                time.sleep(_LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
+                time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
         if last_error is not None:
             raise last_error
         raise RuntimeError("library incremental scan retry loop exited without result")
@@ -673,7 +672,7 @@ class LibraryScanner:
         path_str = parsed.path
         reindex = existing is not None
         last_error: sqlite3.OperationalError | None = None
-        for attempt in range(_LOCK_RETRY_ATTEMPTS):
+        for attempt in range(LOCK_RETRY_ATTEMPTS):
             connection.execute("SAVEPOINT index_file")
             try:
                 track_pk = ids.track_id(path_str)
@@ -698,9 +697,9 @@ class LibraryScanner:
                     connection.execute("RELEASE SAVEPOINT index_file")
                 except sqlite3.OperationalError:
                     pass
-                if _is_locked_error(exc) and attempt < _LOCK_RETRY_ATTEMPTS - 1:
+                if is_locked_error(exc) and attempt < LOCK_RETRY_ATTEMPTS - 1:
                     last_error = exc
-                    time.sleep(_LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
+                    time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
                     continue
                 reason = str(exc).strip() or type(exc).__name__
                 self._record_file_error(file_errors, path_str, reason)
@@ -723,7 +722,7 @@ class LibraryScanner:
         """Remove all indexed files under *folder* from the library database."""
         root = str(Path(folder).resolve())
         last_error: sqlite3.OperationalError | None = None
-        for attempt in range(6):
+        for attempt in range(LOCK_RETRY_ATTEMPTS):
             connection = connect(self._db_path)
             try:
                 connection.execute("BEGIN IMMEDIATE")
@@ -733,10 +732,10 @@ class LibraryScanner:
                 return removed
             except sqlite3.OperationalError as exc:
                 connection.rollback()
-                if not _is_locked_error(exc) or attempt == 5:
+                if not is_locked_error(exc) or attempt == LOCK_RETRY_ATTEMPTS - 1:
                     raise
                 last_error = exc
-                time.sleep(0.15 * (attempt + 1))
+                time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
             except Exception:
                 connection.rollback()
                 raise
@@ -753,7 +752,7 @@ class LibraryScanner:
             for folder in self._config.music_folders
         ]
         last_error: sqlite3.OperationalError | None = None
-        for attempt in range(6):
+        for attempt in range(LOCK_RETRY_ATTEMPTS):
             connection = connect(self._db_path)
             try:
                 connection.execute("BEGIN IMMEDIATE")
@@ -763,10 +762,10 @@ class LibraryScanner:
                 return removed
             except sqlite3.OperationalError as exc:
                 connection.rollback()
-                if not _is_locked_error(exc) or attempt == 5:
+                if not is_locked_error(exc) or attempt == LOCK_RETRY_ATTEMPTS - 1:
                     raise
                 last_error = exc
-                time.sleep(0.15 * (attempt + 1))
+                time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
             except Exception:
                 connection.rollback()
                 raise

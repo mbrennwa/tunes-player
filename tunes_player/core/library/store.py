@@ -442,11 +442,6 @@ class LibraryStore:
         return self._with_connection(search)
 
     @_locked_db
-    def search(self, query: str) -> tuple[list[Album], list[Track]]:
-        releases = self.search_releases(query)
-        return releases, []
-
-    @_locked_db
     def list_recently_added_items(
         self,
         *,
