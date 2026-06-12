@@ -42,10 +42,7 @@ def probe_linux_audio_stack() -> LinuxAudioStackInfo:
                 return LinuxAudioStackInfo(
                     backend="PipeWire",
                     detail="WirePlumber (wpctl)",
-                    settings_hint=(
-                        "ALSA hardware is listed first (preferred for bit-perfect playback). "
-                        "PipeWire sinks are available for mixer volume control."
-                    ),
+                    settings_hint="",
                 )
         combined = f"{result.stdout}\n{result.stderr}".lower()
         if "could not connect" in combined or "failed to connect" in combined:

@@ -24,8 +24,8 @@ from tunes_player.ui.gtk.util import escape_markup, open_external_uri, read_clip
 
 _FOLDER_WATCH_LABEL = "Watch folder"
 _VOLUME_MODE_SUBTITLES = {
-    "hardware": "Device volume when available",
-    "software": "Software volume in Tunes",
+    "hardware": "Device hardware volume control",
+    "software": "Software volume control in Tunes",
     "fixed": "Volume fixed at 100%",
 }
 
@@ -43,7 +43,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self.set_modal(True)
         self.set_title("Settings")
 
-        self._folders_group = Adw.PreferencesGroup(title="Music folders")
+        self._folders_group = Adw.PreferencesGroup(title="Local files")
 
         self._add_row = Adw.ActionRow(title="Add folder…")
         add_button = Gtk.Button(icon_name="list-add-symbolic")
@@ -70,15 +70,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         diagnostics_group.add(self._log_row)
 
         sources_page = Adw.PreferencesPage(title="Sources", icon_name="folder-music-symbolic")
-        local_group = Adw.PreferencesGroup(
-            title="Local files",
-            description=(
-                "Turn on Watch folder to index new or changed files and remove "
-                "deleted ones in the background. A full scan runs at startup."
-            ),
-        )
-        local_group.add(self._folders_group)
-        sources_page.add(local_group)
+        sources_page.add(self._folders_group)
 
         audio = Adw.PreferencesGroup(title="Audio")
         self._audio_group = audio
@@ -145,7 +137,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         application_page.add(application_group)
         application_page.add(diagnostics_group)
 
-        self._tidal_status_row = Adw.ActionRow(title="TIDAL")
+        self._tidal_status_row = Adw.ActionRow(title="")
         self._tidal_sign_in_btn = Gtk.Button(label="Sign in")
         self._tidal_sign_in_btn.connect("clicked", self._on_tidal_sign_in_clicked)
         self._tidal_sign_out_btn = Gtk.Button(label="Sign out")
@@ -155,24 +147,11 @@ class PreferencesWindow(Adw.PreferencesWindow):
         btn_box.append(self._tidal_sign_out_btn)
         btn_box.set_valign(Gtk.Align.CENTER)
         self._tidal_status_row.add_suffix(btn_box)
-        tidal_group = Adw.PreferencesGroup(
-            title="Streaming",
-            description=(
-                "Requires your own TIDAL subscription. Sign-in opens your browser; "
-                "copy the address bar afterward to finish connecting in Tunes."
-            ),
-        )
+        tidal_group = Adw.PreferencesGroup(title="TIDAL")
         tidal_group.add(self._tidal_status_row)
         sources_page.add(tidal_group)
 
-        qobuz_group = Adw.PreferencesGroup(
-            title="Qobuz",
-            description=(
-                "Requires your own Qobuz subscription, App ID, and App Secret "
-                "(Tunes does not ship Qobuz credentials). Obtain them from Qobuz "
-                "or for personal use from your own web-player inspection."
-            ),
-        )
+        qobuz_group = Adw.PreferencesGroup(title="Qobuz")
         cfg = service.config.config
         self._qobuz_app_id_row = Adw.EntryRow(title="App ID")
         if cfg.qobuz_app_id:
@@ -579,7 +558,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
     def _reload_tidal_status(self) -> None:
         service = self._service
         if not service.tidal_available():
-            self._tidal_status_row.set_subtitle(
+            self._tidal_status_row.set_title(
                 "TIDAL unavailable (tidalapi could not be loaded)"
             )
             self._tidal_sign_in_btn.set_sensitive(False)
@@ -590,15 +569,15 @@ class PreferencesWindow(Adw.PreferencesWindow):
             label = service.tidal_account_label()
             base = f"Connected as {label}" if label else "Connected"
             if service.tidal_needs_lossless_relogin():
-                self._tidal_status_row.set_subtitle(
+                self._tidal_status_row.set_title(
                     f"{base} — sign out and sign in again for lossless (CD) quality"
                 )
             else:
-                self._tidal_status_row.set_subtitle(base)
+                self._tidal_status_row.set_title(base)
             self._tidal_sign_in_btn.set_sensitive(False)
             self._tidal_sign_out_btn.set_sensitive(True)
         else:
-            self._tidal_status_row.set_subtitle("Not connected")
+            self._tidal_status_row.set_title("Not connected")
             self._tidal_sign_in_btn.set_sensitive(True)
             self._tidal_sign_out_btn.set_sensitive(False)
 
@@ -606,9 +585,9 @@ class PreferencesWindow(Adw.PreferencesWindow):
         try:
             login_url = self._service.tidal_begin_pkce_login()
         except Exception as exc:
-            self._tidal_status_row.set_subtitle(f"Sign-in failed: {exc}")
+            self._tidal_status_row.set_title(f"Sign-in failed: {exc}")
             return
-        self._tidal_status_row.set_subtitle("Finish sign-in in the dialog…")
+        self._tidal_status_row.set_title("Finish sign-in in the dialog…")
         self._present_tidal_pkce_sign_in(login_url)
 
     def _present_tidal_pkce_sign_in(self, login_url: str) -> None:
@@ -729,7 +708,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         def on_open(*_args: object) -> None:
             ok, err = open_external_uri(login_url)
             if not ok:
-                self._tidal_status_row.set_subtitle(
+                self._tidal_status_row.set_title(
                     err or "Could not open browser"
                 )
 
@@ -745,14 +724,14 @@ class PreferencesWindow(Adw.PreferencesWindow):
             redirect_url = url_entry.get_text().strip()
             if not redirect_url:
                 url_entry.grab_focus()
-                self._tidal_status_row.set_subtitle(
+                self._tidal_status_row.set_title(
                     "Paste the address from your browser’s location bar."
                 )
                 return
             try:
                 self._service.tidal_complete_pkce_login(redirect_url)
             except Exception as exc:
-                self._tidal_status_row.set_subtitle(f"Sign-in failed: {exc}")
+                self._tidal_status_row.set_title(f"Sign-in failed: {exc}")
                 return
             close_dialog()
             self._reload_tidal_status()
