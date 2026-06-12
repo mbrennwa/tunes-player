@@ -563,8 +563,10 @@ collects TIDAL track radio (when playing TIDAL), **continue listening** (`play_h
 TIDAL / Qobuz editorial catalogs, and local **rediscover**, then dedupes by `release.id`.
 
 **Sort order** (higher `added_ns` first): all **local** releases, then streaming by source
-name — **Deezer**, **Qobuz**, **TIDAL** (Deezer not implemented yet). Within each group,
-recent plays or catalog order apply.
+name — **Qobuz**, **TIDAL**. Within each group, recent plays or catalog order apply.
+
+`Source.DEEZER` and `deezer:…` IDs are reserved for a future backend but Deezer does not
+appear in the source filter or UI labels until implemented.
 
 LLM-based recommendations are out of scope. **Last.fm** (optional later): scrobble from
 `play_history`, similar-artist API, opt-in credentials in Settings.

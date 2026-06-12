@@ -46,7 +46,6 @@ def source_label(source: Source) -> str:
     labels = {
         Source.LOCAL: "Local",
         Source.TIDAL: "TIDAL",
-        Source.DEEZER: "Deezer",
         Source.QOBUZ: "Qobuz",
     }
     return labels.get(source, source.value.capitalize())
