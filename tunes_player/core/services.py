@@ -2002,13 +2002,6 @@ class PlayerService:
         if volume_changed:
             self._emit("volume_changed")
 
-    def set_volume_mode(self, mode: VolumeMode) -> None:
-        """Legacy API — prefer set_volume_control_enabled for UI."""
-        if mode == "fixed":
-            self.set_volume_control_enabled(False)
-            return
-        self.set_volume_control_enabled(True)
-
     def exclusive_access_supported(self) -> bool:
         controller = self._volume_controller
         if controller is None:

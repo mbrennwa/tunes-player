@@ -178,7 +178,7 @@ class AudioPolicyTests(unittest.TestCase):
             service.set_volume(0.5)
             self.assertEqual(controller.get_level(), 0.5)
 
-            service.set_volume_mode("fixed")
+            service.set_volume_control_enabled(False)
 
             self.assertEqual(controller.get_level(), 1.0)
             self.assertEqual(service.get_playback_state().volume, 1.0)
@@ -190,10 +190,10 @@ class AudioPolicyTests(unittest.TestCase):
             controller = _SinkVolumeController(config.config)
             service = PlayerService(config=config, volume_controller=controller)
             service.set_volume(0.5)
-            service.set_volume_mode("fixed")
+            service.set_volume_control_enabled(False)
             self.assertEqual(controller.get_level(), 1.0)
 
-            service.set_volume_mode("hardware")
+            service.set_volume_control_enabled(True)
 
             self.assertEqual(controller.get_level(), 1.0)
 
@@ -206,7 +206,7 @@ class AudioPolicyTests(unittest.TestCase):
             service.set_volume(0.5)
             self.assertEqual(controller.get_level(), 0.5)
 
-            service.set_volume_mode("software")
+            service.set_volume_control_enabled(True)
 
             self.assertEqual(controller.get_level(), 0.5)
 
@@ -238,7 +238,7 @@ class AudioPolicyTests(unittest.TestCase):
             config.load()
             controller = _SinkVolumeController(config.config)
             service = PlayerService(config=config, volume_controller=controller)
-            service.set_volume_mode("software")
+            service.set_volume_control_enabled(True)
             service.set_volume(0.35)
             self.assertAlmostEqual(controller.get_level(), 0.35, places=4)
 
@@ -254,7 +254,7 @@ class AudioPolicyTests(unittest.TestCase):
             service.set_volume(0.4)
             self.assertEqual(service.get_playback_state().volume, 0.4)
 
-            service.set_volume_mode("hardware")
+            service.set_volume_control_enabled(True)
 
             self.assertAlmostEqual(controller.get_level(), 0.4, places=4)
 
