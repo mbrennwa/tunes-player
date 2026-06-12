@@ -27,7 +27,7 @@ class PlaybackPreferenceServiceTests(unittest.TestCase):
             id="qobuz:track:1",
             title="Song",
             artist_name="Artist",
-            album_title="Album",
+            release_title="Album",
             source=Source.QOBUZ,
         )
         self._cd_preference = PlaybackPreference(max_tier=QUALITY_FILTER_CD)

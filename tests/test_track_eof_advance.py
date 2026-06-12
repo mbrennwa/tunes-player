@@ -48,7 +48,7 @@ class TrackEofAdvanceTests(unittest.TestCase):
             id=track_id,
             title="Track",
             artist_name="Artist",
-            album_title="Album",
+            release_title="Album",
             source=Source.LOCAL,
             duration_sec=240.0,
         )

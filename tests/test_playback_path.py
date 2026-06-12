@@ -163,7 +163,7 @@ class PlaybackPathNoteMergeTests(unittest.TestCase):
                 id="local:file:test",
                 title="Test",
                 artist_name="Artist",
-                album_title="Album",
+                release_title="Album",
                 source=Source.LOCAL,
             )
             service._playback_input_class = InputClass.NETWORK_FILE

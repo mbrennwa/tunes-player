@@ -84,16 +84,12 @@ class Release:
         return self.completeness == ReleaseCompleteness.SYNTHETIC
 
 
-# Backward-compatible alias during migration.
-Album = Release
-
-
 @dataclass(frozen=True, slots=True)
 class Track:
     id: str
     title: str
     artist_name: str
-    album_title: str | None
+    release_title: str | None
     source: Source
     duration_sec: float | None = None
     art_uri: str | None = None

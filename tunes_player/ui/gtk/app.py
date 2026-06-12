@@ -63,7 +63,7 @@ from tunes_player.ui.gtk.views import (
     ReleaseDetailView,
     ReleaseGridView,
 )
-from tunes_player.ui.gtk.album_grid import ALBUM_GRID_VIEW_MARGIN, album_grid_min_content_width
+from tunes_player.ui.gtk.release_grid import RELEASE_GRID_VIEW_MARGIN, release_grid_min_content_width
 
 _APP_WINDOW_TITLE = "Tunes Player"
 _DEFAULT_SIZE = (960, 640)
@@ -337,17 +337,17 @@ class TunesWindow(Adw.ApplicationWindow):
         self._sync_shell_controls()
 
     def _apply_window_min_width(self) -> None:
-        min_width = album_grid_min_content_width()
+        min_width = release_grid_min_content_width()
         _min_w, min_h = self.get_size_request()
         if min_h < 0:
             min_h = 400
         self.set_size_request(min_width, min_h)
 
-    def _album_grid_inner_width(self) -> int:
+    def _release_grid_inner_width(self) -> int:
         window_width = self.get_width()
         if window_width < 64:
             return 0
-        return max(0, window_width - 2 * ALBUM_GRID_VIEW_MARGIN)
+        return max(0, window_width - 2 * RELEASE_GRID_VIEW_MARGIN)
 
     def _effective_shell_state(self) -> ShellState:
         if not available_sources(self._service):
@@ -1154,7 +1154,7 @@ class TunesWindow(Adw.ApplicationWindow):
             on_artist_search=self._search_for_artist,
             empty_message=empty_message,
             art_loader=self._art_loader,
-            window_inner_width_fn=self._album_grid_inner_width,
+            window_inner_width_fn=self._release_grid_inner_width,
             service=self._service,
             sync_populate=sync_populate,
         )

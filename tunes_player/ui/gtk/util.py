@@ -20,7 +20,7 @@ from tunes_player.core.models import Source, Track
 
 
 def load_app_css() -> None:
-    """Load application Gtk CSS (album grid tiles, etc.)."""
+    """Load application Gtk CSS (release grid tiles, etc.)."""
     css_path = resources.files("tunes_player.ui.gtk").joinpath("style.css")
     provider = Gtk.CssProvider()
     provider.load_from_path(str(css_path))
@@ -52,7 +52,7 @@ def source_label(source: Source) -> str:
 
 
 def format_track_number(track: Track, *, fallback: int | None = None) -> str | None:
-    """Display track index for album lists (e.g. 3 or 2-5 for multi-disc)."""
+    """Display track index for release track lists (e.g. 3 or 2-5 for multi-disc)."""
     number = track.track_number if track.track_number is not None else fallback
     if number is None:
         return None

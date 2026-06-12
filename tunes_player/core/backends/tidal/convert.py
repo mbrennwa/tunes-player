@@ -207,13 +207,13 @@ def artist_from_tidal(artist: TidalArtist) -> Artist:
 def track_from_tidal(session: Session, track: TidalTrack, *, album: TidalAlbum | None = None) -> Track:
     artists = track.artists or []
     artist_name = artists[0].name if artists else "Unknown Artist"
-    album_title = None
+    release_title = None
     art_uri = None
     if album is not None:
-        album_title = album.name
+        release_title = album.name
         art_uri = _album_art(session, album)
     elif track.album is not None:
-        album_title = track.album.name
+        release_title = track.album.name
         art_uri = _album_art(session, track.album)
     duration = None
     if track.duration is not None:
@@ -224,7 +224,7 @@ def track_from_tidal(session: Session, track: TidalTrack, *, album: TidalAlbum |
         id=tidal_ids.track_id(track.id),
         title=track.name or "Unknown Track",
         artist_name=artist_name,
-        album_title=album_title,
+        release_title=release_title,
         source=Source.TIDAL,
         duration_sec=duration,
         art_uri=art_uri,

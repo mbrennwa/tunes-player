@@ -483,7 +483,7 @@ class TidalClient:
                 releases.append(release)
         for item in results.get("tracks", []):
             track = convert.track_from_tidal(session, item)
-            if track.album_title and item.album is not None:
+            if track.release_title and item.album is not None:
                 release = convert.release_stub_from_tidal(session, item.album)
                 if release.id not in seen:
                     seen.add(release.id)
@@ -698,9 +698,6 @@ class TidalClient:
             release = replace(release, duration_sec=duration)
         return release
 
-    def get_album(self, album_id: str) -> Release | None:
-        return self.get_release(album_id)
-
     def get_release_tracks(self, release_id: str) -> list[Track]:
         numeric = tidal_ids.parse_prefixed_id(release_id, "album")
         if numeric is None:
@@ -711,9 +708,6 @@ class TidalClient:
         for item in album.tracks():
             tracks.append(convert.track_from_tidal(session, item, album=album))
         return tracks
-
-    def get_album_tracks(self, album_id: str) -> list[Track]:
-        return self.get_release_tracks(album_id)
 
     def get_track(self, track_id: str) -> Track | None:
         numeric = tidal_ids.parse_prefixed_id(track_id, "track")
@@ -735,7 +729,7 @@ class TidalClient:
         tidal_track = session.track(numeric)
         if tidal_track.album is not None:
             album_id = tidal_ids.album_id(tidal_track.album.id)
-            queue = self.get_album_tracks(album_id)
+            queue = self.get_release_tracks(album_id)
             index = next((i for i, item in enumerate(queue) if item.id == track_id), 0)
             return queue, index
         return [track], 0

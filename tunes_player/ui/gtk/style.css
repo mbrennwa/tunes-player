@@ -1,6 +1,6 @@
-/* Browse views and album grid: allow horizontal shrink with the window */
+/* Browse views and release grid: allow horizontal shrink with the window */
 .view,
-.album-tile-grid {
+.release-tile-grid {
   min-width: 0;
 }
 
@@ -20,25 +20,25 @@
   border-radius: 4px;
 }
 
-/* Album grid tiles: square, cover fills tile, text overlaid at bottom */
-.album-card-frame {
+/* Release grid tiles: square, cover fills tile, text overlaid at bottom */
+.release-card-frame {
   min-width: 0;
   min-height: 0;
 }
 
-.album-card {
+.release-card {
   padding: 0;
   min-width: 0;
   min-height: 0;
   border-radius: 8px;
 }
 
-.album-card-art {
+.release-card-art {
   min-width: 0;
   min-height: 0;
 }
 
-.album-card-overlay {
+.release-card-overlay {
   background-image: linear-gradient(
     to top,
     rgba(0, 0, 0, 0.9) 0%,
@@ -48,24 +48,24 @@
   padding: 0.65rem 0.35rem 0.3rem;
 }
 
-.album-card-overlay .album-card-title {
+.release-card-overlay .release-card-title {
   color: white;
   font-weight: 700;
   font-size: 0.9em;
 }
 
-.album-card-overlay .album-card-meta {
+.release-card-overlay .release-card-meta {
   color: rgba(255, 255, 255, 0.88);
   font-size: 0.75em;
 }
 
-.album-card-overlay button.artist-link {
+.release-card-overlay button.artist-link {
   padding: 0;
   min-height: 0;
   min-width: 0;
 }
 
-.album-card-overlay button.artist-link:hover label {
+.release-card-overlay button.artist-link:hover label {
   text-decoration: underline;
 }
 
@@ -74,14 +74,14 @@
   min-width: 0;
 }
 
-.release-detail-view .album-detail-art {
+.release-detail-view .release-detail-art {
   padding: 0;
   min-width: 0;
   min-height: 0;
   border-radius: 0;
 }
 
-.release-detail-view .album-detail-art picture {
+.release-detail-view .release-detail-art picture {
   border-radius: 0;
 }
 
@@ -121,26 +121,26 @@ button.artist-link:hover label {
 }
 
 /* Play-on-art: hidden until hover or keyboard focus within shell */
-.album-card-shell .release-art-play,
+.release-card-shell .release-art-play,
 .release-art-shell .release-art-play {
   opacity: 0;
   transition: opacity 150ms ease;
 }
 
-.album-card-shell:hover .release-art-play,
-.album-card-shell:focus-within .release-art-play,
+.release-card-shell:hover .release-art-play,
+.release-card-shell:focus-within .release-art-play,
 .release-art-shell:hover .release-art-play,
 .release-art-shell:focus-within .release-art-play {
   opacity: 1;
 }
 
-.album-card-shell .release-art-play:disabled,
+.release-card-shell .release-art-play:disabled,
 .release-art-shell .release-art-play:disabled {
   opacity: 0;
 }
 
-.album-card-shell:hover .release-art-play:disabled,
-.album-card-shell:focus-within .release-art-play:disabled,
+.release-card-shell:hover .release-art-play:disabled,
+.release-card-shell:focus-within .release-art-play:disabled,
 .release-art-shell:hover .release-art-play:disabled,
 .release-art-shell:focus-within .release-art-play:disabled {
   opacity: 0;

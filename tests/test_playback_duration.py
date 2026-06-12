@@ -52,7 +52,7 @@ class PlaybackDurationTests(unittest.TestCase):
             id="local:/music/track.flac",
             title="Track",
             artist_name="Artist",
-            album_title="Album",
+            release_title="Album",
             source=Source.LOCAL,
             duration_sec=duration_sec,
         )
@@ -91,7 +91,7 @@ class PlaybackDurationTests(unittest.TestCase):
             id="local:/music/next.flac",
             title="Next",
             artist_name="Artist",
-            album_title="Album",
+            release_title="Album",
             source=Source.LOCAL,
             duration_sec=200.0,
         )

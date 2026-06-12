@@ -18,14 +18,14 @@ from tunes_player.core.release_quality import (
 )
 from tunes_player.core.release_quality_tiles import parse_quality_tier_suffix
 from tunes_player.core.services import PlayerService
-from tunes_player.ui.gtk.album_grid import (
-    ALBUM_GRID_SPACING,
-    ALBUM_GRID_VIEW_MARGIN,
-    album_grid_content_inner_width,
-    album_grid_layout,
-    album_grid_min_content_width,
-    album_grid_resolve_inner_width,
-    album_grid_visible_card_indices,
+from tunes_player.ui.gtk.release_grid import (
+    RELEASE_GRID_SPACING,
+    RELEASE_GRID_VIEW_MARGIN,
+    release_grid_content_inner_width,
+    release_grid_layout,
+    release_grid_min_content_width,
+    release_grid_resolve_inner_width,
+    release_grid_visible_card_indices,
 )
 from tunes_player.ui.gtk.art import ArtLoader
 from tunes_player.ui.gtk.util import (
@@ -36,9 +36,9 @@ from tunes_player.ui.gtk.util import (
     source_label,
 )
 
-_ALBUM_TILE_ART_PIXELS_SMALL = 384
+_RELEASE_TILE_ART_PIXELS_SMALL = 384
 _ALBUM_DETAIL_ART_MIN = 220
-_ALBUM_TILE_DEFAULT_EDGE = 200
+_RELEASE_TILE_DEFAULT_EDGE = 200
 _RELEASE_ART_PLAY_SIZE_RATIO = 0.30
 _RELEASE_ART_PLAY_INSET_RATIO = 0.036
 _RELEASE_ART_PLAY_MIN_SIZE = 36
@@ -110,7 +110,7 @@ class LoadingDiscoverView(Gtk.Box):
 def _release_art_play_layout(art_size: int) -> tuple[int, int]:
     """Return circular play button diameter and corner inset for *art_size* px artwork."""
     if art_size < 1:
-        art_size = _ALBUM_TILE_DEFAULT_EDGE
+        art_size = _RELEASE_TILE_DEFAULT_EDGE
     button = round(art_size * _RELEASE_ART_PLAY_SIZE_RATIO)
     button = max(_RELEASE_ART_PLAY_MIN_SIZE, min(_RELEASE_ART_PLAY_MAX_SIZE, button))
     inset = max(4, round(art_size * _RELEASE_ART_PLAY_INSET_RATIO))
@@ -228,11 +228,11 @@ class ReleaseGridView(Gtk.ScrolledWindow):
             inner_width_fn=self._album_tile_inner_width,
             service=service,
         )
-        grid.set_margin_top(ALBUM_GRID_VIEW_MARGIN)
-        grid.set_margin_bottom(ALBUM_GRID_VIEW_MARGIN)
-        grid.set_margin_start(ALBUM_GRID_VIEW_MARGIN)
-        grid.set_margin_end(ALBUM_GRID_VIEW_MARGIN)
-        shell = _FixedMinWidthShell(album_grid_min_content_width())
+        grid.set_margin_top(RELEASE_GRID_VIEW_MARGIN)
+        grid.set_margin_bottom(RELEASE_GRID_VIEW_MARGIN)
+        grid.set_margin_start(RELEASE_GRID_VIEW_MARGIN)
+        grid.set_margin_end(RELEASE_GRID_VIEW_MARGIN)
+        shell = _FixedMinWidthShell(release_grid_min_content_width())
         shell.append(grid)
         self.set_child(shell)
         self._tile_grid = grid
@@ -361,16 +361,16 @@ class ReleaseGridView(Gtk.ScrolledWindow):
             width = self.get_allocation().width
         if width < 1:
             return 0
-        return album_grid_content_inner_width(
+        return release_grid_content_inner_width(
             width,
-            margin_start=ALBUM_GRID_VIEW_MARGIN,
-            margin_end=ALBUM_GRID_VIEW_MARGIN,
+            margin_start=RELEASE_GRID_VIEW_MARGIN,
+            margin_end=RELEASE_GRID_VIEW_MARGIN,
         )
 
     def _album_tile_inner_width(self) -> int:
         viewport = self._viewport_inner_width()
         window = self._window_inner_width_fn() if self._window_inner_width_fn else 0
-        inner, self._last_viewport_inner, self._last_window_inner = album_grid_resolve_inner_width(
+        inner, self._last_viewport_inner, self._last_window_inner = release_grid_resolve_inner_width(
             viewport_inner=viewport,
             window_inner=window,
             last_viewport_inner=self._last_viewport_inner,
@@ -448,7 +448,7 @@ class QueueSheet(Adw.Dialog):
 
         state = self._service.get_playback_state()
         if not state.queue:
-            row = Adw.ActionRow(title="Queue is empty", subtitle="Play an album or track")
+            row = Adw.ActionRow(title="Queue is empty", subtitle="Play a release or track")
             row.set_sensitive(False)
             self._list_box.append(row)
             return
@@ -460,7 +460,7 @@ class QueueSheet(Adw.Dialog):
                     join_detail(
                         source_label(track.source),
                         track.artist_name,
-                        track.album_title or None,
+                        track.release_title or None,
                     )
                 ),
             )
@@ -510,7 +510,7 @@ class ReleaseDetailView(Gtk.Box):
             release,
             size=_ALBUM_DETAIL_ART_MIN,
             art_loader=art_loader,
-            css_class="album-detail-art",
+            css_class="release-detail-art",
             on_play=lambda: service.play_or_toggle_release(release.id, start_index=0),
             playable=bool(tracks),
             fill_cell=True,
@@ -701,7 +701,7 @@ def _track_row(
     details.append(title)
 
     subtitle = Gtk.Label(
-        label=join_detail(track.artist_name, track.album_title),
+        label=join_detail(track.artist_name, track.release_title),
         xalign=0,
     )
     subtitle.add_css_class("dim-label")
@@ -765,8 +765,8 @@ class ReleaseTileGrid(Gtk.Box):
         inner_width_fn: Callable[[], int] | None = None,
         service: PlayerService | None = None,
     ) -> None:
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=ALBUM_GRID_SPACING)
-        self.add_css_class("album-tile-grid")
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=RELEASE_GRID_SPACING)
+        self.add_css_class("release-tile-grid")
         self.set_halign(Gtk.Align.START)
         self.set_hexpand(False)
         self.set_vexpand(False)
@@ -781,7 +781,7 @@ class ReleaseTileGrid(Gtk.Box):
         self._cards: list[Gtk.Widget] = []
         self._art_loader: ArtLoader | None = None
         self._on_layout_changed: Callable[[], None] | None = None
-        self._tile_edge = _ALBUM_TILE_DEFAULT_EDGE
+        self._tile_edge = _RELEASE_TILE_DEFAULT_EDGE
         self._layout_key: tuple[int, int, int, int] | None = None
         self._in_relayout = False
         self._tick_callback_id = 0
@@ -838,7 +838,7 @@ class ReleaseTileGrid(Gtk.Box):
         inner = self._available_inner_width()
         if inner < 1:
             return True
-        columns, edge = album_grid_layout(inner)
+        columns, edge = release_grid_layout(inner)
         key = (inner, columns, edge, len(self._cards))
         if key != self._layout_key:
             self.relayout(inner)
@@ -924,7 +924,7 @@ class ReleaseTileGrid(Gtk.Box):
         if not self._cards or inner_width < 1:
             return
 
-        columns, edge = album_grid_layout(inner_width)
+        columns, edge = release_grid_layout(inner_width)
         layout_key = (inner_width, columns, edge, len(self._cards))
         if layout_key == self._layout_key:
             return
@@ -939,7 +939,7 @@ class ReleaseTileGrid(Gtk.Box):
                 _reset_album_tile_size(card)
 
             for start in range(0, len(self._cards), columns):
-                row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=ALBUM_GRID_SPACING)
+                row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=RELEASE_GRID_SPACING)
                 row.set_halign(Gtk.Align.START)
                 row.set_hexpand(False)
                 row.set_hexpand_set(True)
@@ -958,7 +958,7 @@ class ReleaseTileGrid(Gtk.Box):
             return columns, edge
         inner = self._available_inner_width()
         if inner > 0:
-            return album_grid_layout(inner)
+            return release_grid_layout(inner)
         return 1, self._tile_edge
 
     def refresh_card_art_uris(self, art_by_id: dict[str, str | None]) -> None:
@@ -980,13 +980,13 @@ class ReleaseTileGrid(Gtk.Box):
         if columns < 1 or edge < 1:
             return
 
-        start, end = album_grid_visible_card_indices(
+        start, end = release_grid_visible_card_indices(
             card_count=len(self._cards),
             columns=columns,
             tile_edge=edge,
             scroll_y=scroll_y,
             viewport_height=viewport_height,
-            margin_top=ALBUM_GRID_VIEW_MARGIN,
+            margin_top=RELEASE_GRID_VIEW_MARGIN,
         )
         for index in range(start, end):
             self._load_card_art(self._cards[index], edge)
@@ -999,7 +999,7 @@ class ReleaseTileGrid(Gtk.Box):
         raw_uri = getattr(card, "_tunes_art_uri", None)
         art_uri = raw_uri if isinstance(raw_uri, str) else None
         small = bool(getattr(card, "_tunes_art_small", False))
-        load_pixels = edge if not small else min(edge, _ALBUM_TILE_ART_PIXELS_SMALL)
+        load_pixels = edge if not small else min(edge, _RELEASE_TILE_ART_PIXELS_SMALL)
         desired_key = (art_uri, load_pixels)
         if getattr(card, "_tunes_art_loaded_key", None) == desired_key:
             return
@@ -1206,7 +1206,7 @@ def _square_art_with_play(
     *,
     size: int,
     art_loader: ArtLoader | None,
-    css_class: str = "album-card-art",
+    css_class: str = "release-card-art",
     on_play: Callable[[], None] | None = None,
     playable: bool = True,
     fill_cell: bool = False,
@@ -1296,7 +1296,7 @@ def _overlay_artist_line(
     """Grid tile overlay: artist · year · genre (single line, ellipsized at end)."""
     label = _overlay_label(
         _release_artist_line_text(release),
-        extra_classes=("album-card-meta",),
+        extra_classes=("release-card-meta",),
     )
     label.set_hexpand(True)
     if on_artist_search is None:
@@ -1324,12 +1324,12 @@ def _release_card(
     on_artist_search: Callable[[str], None] | None = None,
     small: bool = False,
     art_loader: ArtLoader | None = None,
-    edge: int = _ALBUM_TILE_DEFAULT_EDGE,
+    edge: int = _RELEASE_TILE_DEFAULT_EDGE,
     load_art: bool = False,
 ) -> Gtk.Widget:
     """Square tile: cover fills the cell; title/artist/source overlaid at the bottom."""
     shell = Gtk.Box()
-    shell.add_css_class("album-card-shell")
+    shell.add_css_class("release-card-shell")
     shell.set_size_request(edge, edge)
     # Overlay children hexpand; without hexpand-set the shell grows to fill the row.
     shell.set_hexpand(False)
@@ -1343,7 +1343,7 @@ def _release_card(
 
     tile = Gtk.Box()
     tile.add_css_class("card")
-    tile.add_css_class("album-card")
+    tile.add_css_class("release-card")
     tile.set_hexpand(True)
     tile.set_vexpand(True)
     tile.set_halign(Gtk.Align.FILL)
@@ -1356,7 +1356,7 @@ def _release_card(
     tile.append(overlay)
 
     picture = Gtk.Picture()
-    picture.add_css_class("album-card-art")
+    picture.add_css_class("release-card-art")
     picture.set_content_fit(Gtk.ContentFit.COVER)
     picture.set_can_shrink(True)
     picture.set_size_request(0, 0)
@@ -1364,7 +1364,7 @@ def _release_card(
     picture.set_vexpand(False)
     overlay.set_child(picture)
 
-    load_pixels = edge if not small else min(edge, _ALBUM_TILE_ART_PIXELS_SMALL)
+    load_pixels = edge if not small else min(edge, _RELEASE_TILE_ART_PIXELS_SMALL)
     if art_loader is not None and load_art:
         art_loader.set_picture(picture, release.art_uri, pixel_size=load_pixels)
 
@@ -1376,25 +1376,19 @@ def _release_card(
     )
 
     labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-    labels.add_css_class("album-card-overlay")
+    labels.add_css_class("release-card-overlay")
     labels.set_valign(Gtk.Align.END)
     labels.set_halign(Gtk.Align.FILL)
     labels.set_hexpand(True)
     labels.set_vexpand(True)
     overlay.add_overlay(labels)
 
-    labels.append(_overlay_label(release.title, extra_classes=("album-card-title",)))
+    labels.append(_overlay_label(release.title, extra_classes=("release-card-title",)))
     artist_line = _overlay_artist_line(release, on_artist_search=on_artist_search)
     artist_line.set_hexpand(True)
     labels.append(artist_line)
     meta = _release_catalog_meta_line(release)
-    labels.append(_overlay_label(meta, extra_classes=("album-card-meta",)))
+    labels.append(_overlay_label(meta, extra_classes=("release-card-meta",)))
 
     return shell
 
-
-# Backward-compatible aliases.
-AlbumGridView = ReleaseGridView
-AlbumDetailView = ReleaseDetailView
-AlbumTileGrid = ReleaseTileGrid
-RecentlyAddedListView = ReleaseGridView

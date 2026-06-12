@@ -215,10 +215,10 @@ def track_from_qobuz(
 ) -> Track:
     track_id = str(track.get("id") or "")
     album_obj = album if album is not None else track.get("album")
-    album_title = None
+    release_title = None
     art_uri = None
     if isinstance(album_obj, dict):
-        album_title = str(album_obj.get("title") or "") or None
+        release_title = str(album_obj.get("title") or "") or None
         art_uri = cover_url(album_obj.get("image"))
     performer = track.get("performer")
     if isinstance(performer, dict) and performer.get("name"):
@@ -235,7 +235,7 @@ def track_from_qobuz(
         id=qobuz_ids.track_id(track_id),
         title=str(track.get("title") or "Unknown Track"),
         artist_name=artist_name,
-        album_title=album_title,
+        release_title=release_title,
         source=Source.QOBUZ,
         duration_sec=duration_sec,
         art_uri=art_uri,

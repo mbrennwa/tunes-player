@@ -256,7 +256,7 @@ class FolderAutoMonitorServiceTests(unittest.TestCase):
             id="local:file:one",
             title="Track",
             artist_name="Artist",
-            album_title="Album",
+            release_title="Album",
             source=Source.LOCAL,
         )
         self._service._scan_queue = object()

@@ -49,7 +49,7 @@ class GetReleaseTracksPlaybackTests(unittest.TestCase):
                 id="tidal:track:1",
                 title="One",
                 artist_name="Artist",
-                album_title="Album",
+                release_title="Album",
                 source=Source.TIDAL,
             ),
         ]

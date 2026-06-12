@@ -68,13 +68,14 @@ _VALID_QUALITY_FILTERS = frozenset(
 )
 
 SORT_KEY_YEAR = "year"
-SORT_KEY_ALBUM = "album"
+SORT_KEY_TITLE = "title"
 SORT_KEY_ARTIST = "artist"
 SORT_KEY_SOURCE = "source"
+_LEGACY_SORT_KEY_TITLE = "album"
 _VALID_SORT_KEYS = frozenset(
     {
         SORT_KEY_YEAR,
-        SORT_KEY_ALBUM,
+        SORT_KEY_TITLE,
         SORT_KEY_ARTIST,
         SORT_KEY_SOURCE,
     }
@@ -395,8 +396,11 @@ def _parse_cached_releases(raw: dict[str, Any]) -> tuple[dict[str, Any], ...]:
 def _parse_sort_state(raw: dict[str, Any]) -> tuple[str | None, bool]:
     sort_key_raw = raw.get("sort_key")
     sort_key = None
-    if isinstance(sort_key_raw, str) and sort_key_raw in _VALID_SORT_KEYS:
-        sort_key = sort_key_raw
+    if isinstance(sort_key_raw, str):
+        if sort_key_raw == _LEGACY_SORT_KEY_TITLE:
+            sort_key = SORT_KEY_TITLE
+        elif sort_key_raw in _VALID_SORT_KEYS:
+            sort_key = sort_key_raw
     sort_descending = raw.get("sort_descending", True)
     if isinstance(sort_descending, bool):
         return sort_key, sort_descending
@@ -639,7 +643,7 @@ def _year_sort_key(release: Release, *, sort_descending: bool) -> tuple:
 
 def _text_sort_key(release: Release, *, sort_key: str) -> tuple:
     title_key = release.title.casefold()
-    if sort_key == SORT_KEY_ALBUM:
+    if sort_key == SORT_KEY_TITLE:
         return (title_key, release.id)
     if sort_key == SORT_KEY_ARTIST:
         return (release.artist_name.casefold(), title_key, release.id)

@@ -97,7 +97,7 @@ tunes_player/
 ├── platform/
 │   └── linux/         # MPRIS, PipeWire/Pulse volume (audio.py)
 └── ui/
-    └── gtk/           # app, views, preferences, now_playing, album_grid, …
+    └── gtk/           # app, views, preferences, now_playing, release_grid, …
 ```
 
 Federated search and home aggregation live in **`PlayerService`** and **`core/home.py`**
@@ -118,7 +118,7 @@ Future: `ui/qt/` for macOS/Windows; same `PlayerService` API.
 - **No GTK types in core models** — use `art_uri: str`, opaque IDs like
   `local:…`, `tidal:…`, `qobuz:…` (Deezer reserved: `deezer:…`).
 - **Release** is the primary browse/playback unit (album, EP, single, partial/synthetic
-  local groups); `Album` is a backward-compatible alias in `core/models.py`.
+  local groups). SQLite and tag metadata still use `album_*` column names intentionally.
 
 GTK runs on the main loop; mpv callbacks post to a queue → GLib idle (same pattern
 will work for Qt signals later).

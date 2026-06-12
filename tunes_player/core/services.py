@@ -39,7 +39,7 @@ from tunes_player.core.library.store import FileMetadata
 from tunes_player.core.library.scanner import ScanFileError
 from tunes_player.core.library.scan_process import terminate_orphan_library_scans
 from tunes_player.core.library.scan_worker import close_scan_queue, create_scan_process
-from tunes_player.core.models import Album, Release, Source, Track
+from tunes_player.core.models import Release, Source, Track
 from tunes_player.core.shell_state import refresh_local_release_art_uris
 from tunes_player.core.playback.engine import EngineEvent, PlaybackEngine
 from tunes_player.core.playback.output_profile import (
@@ -86,10 +86,6 @@ def _artist_name_matches_query(query: str, artist_name: str) -> bool:
 @dataclass(frozen=True, slots=True)
 class SearchResults:
     releases: list[Release]
-
-    @property
-    def albums(self) -> list[Release]:
-        return self.releases
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,9 +291,6 @@ class PlayerService:
 
     def list_releases(self) -> list[Release]:
         return self._store.list_releases()
-
-    def list_albums(self) -> list[Album]:
-        return self.list_releases()
 
     def list_recently_added_items(self) -> list[RecentlyAddedItem]:
         with self._discover_fetch_lock:
@@ -526,9 +519,6 @@ class PlayerService:
                 return None
         return self._store.get_release(catalog_id)
 
-    def get_album(self, album_id: str) -> Album | None:
-        return self.get_release(album_id)
-
     def get_release_tracks(
         self,
         release_id: str,
@@ -566,9 +556,6 @@ class PlayerService:
             except QobuzUnavailableError:
                 return []
         return self._store.get_release_tracks(resolved_id)
-
-    def get_album_tracks(self, album_id: str) -> list[Track]:
-        return self.get_release_tracks(album_id)
 
     def search(self, query: str, *, artists_only: bool = False) -> SearchResults:
         needle = query.strip()
@@ -767,11 +754,11 @@ class PlayerService:
             try:
                 added, repaired = self._maintain_library_art_blocking()
             except Exception:
-                log.exception("Album art maintenance failed")
+                log.exception("Release art maintenance failed")
                 return
             if added or repaired:
                 log.info(
-                    "Album art maintenance indexed %d and repaired %d covers",
+                    "Release art maintenance indexed %d and repaired %d covers",
                     added,
                     repaired,
                 )
@@ -1754,9 +1741,6 @@ class PlayerService:
             playback_preference=self._playback_preference_for_shell(),
             catalog_release_id=catalog_release_id or release_id,
         )
-
-    def play_album(self, album_id: str, *, start_index: int = 0) -> None:
-        self.play_release(album_id, start_index=start_index)
 
     def current_release_id(self) -> str | None:
         """Release id for the current track, resolved once when playback changes."""

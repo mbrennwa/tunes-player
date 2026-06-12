@@ -11,9 +11,9 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gtk  # noqa: E402
 
 from tunes_player.core.shell_state import (
-    SORT_KEY_ALBUM,
     SORT_KEY_ARTIST,
     SORT_KEY_SOURCE,
+    SORT_KEY_TITLE,
     SORT_KEY_YEAR,
 )
 
@@ -21,14 +21,14 @@ SortStateChanged = Callable[[str | None, bool], None]
 
 _CRITERIA: tuple[str, ...] = (
     SORT_KEY_YEAR,
-    SORT_KEY_ALBUM,
+    SORT_KEY_TITLE,
     SORT_KEY_ARTIST,
     SORT_KEY_SOURCE,
 )
 
 _CHIP_LABELS: dict[str, str] = {
     SORT_KEY_YEAR: "Year",
-    SORT_KEY_ALBUM: "Album",
+    SORT_KEY_TITLE: "Title",
     SORT_KEY_ARTIST: "Artist",
     SORT_KEY_SOURCE: "Source",
 }
@@ -143,8 +143,8 @@ class ReleaseSortSwitch(Gtk.Box):
             return None
         if self._sort_key == SORT_KEY_YEAR:
             return "Newest year first" if self._sort_descending else "Oldest year first"
-        if self._sort_key == SORT_KEY_ALBUM:
-            return "Album A–Z" if self._sort_descending else "Album Z–A"
+        if self._sort_key == SORT_KEY_TITLE:
+            return "Title A–Z" if self._sort_descending else "Title Z–A"
         if self._sort_key == SORT_KEY_ARTIST:
             return "Artist A–Z" if self._sort_descending else "Artist Z–A"
         if self._sort_key == SORT_KEY_SOURCE:

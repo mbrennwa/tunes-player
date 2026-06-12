@@ -20,7 +20,7 @@ from tunes_player.core.shell_state import (
     RELEASE_TYPE_FILTER_EP,
     RELEASE_TYPE_FILTER_OTHER,
     RELEASE_TYPE_FILTER_SINGLE,
-    SORT_KEY_ALBUM,
+    SORT_KEY_TITLE,
     SORT_KEY_ARTIST,
     SORT_KEY_SOURCE,
     SORT_KEY_YEAR,
@@ -154,14 +154,18 @@ class TestShellStateParsing(unittest.TestCase):
         self.assertFalse(restored.sort_descending)
 
     def test_sort_descending_only_persisted_when_not_default(self) -> None:
-        state = ShellState(sort_key=SORT_KEY_ALBUM, sort_descending=True)
+        state = ShellState(sort_key=SORT_KEY_TITLE, sort_descending=True)
         payload = state.to_dict()
-        self.assertEqual(payload["sort_key"], SORT_KEY_ALBUM)
+        self.assertEqual(payload["sort_key"], SORT_KEY_TITLE)
         self.assertNotIn("sort_descending", payload)
 
-        state_asc = ShellState(sort_key=SORT_KEY_ALBUM, sort_descending=False)
+        state_asc = ShellState(sort_key=SORT_KEY_TITLE, sort_descending=False)
         payload_asc = state_asc.to_dict()
         self.assertFalse(payload_asc["sort_descending"])
+
+    def test_legacy_album_sort_key_normalizes_to_title(self) -> None:
+        restored = parse_shell_state({"sort_key": "album"})
+        self.assertEqual(restored.sort_key, SORT_KEY_TITLE)
 
 
 class TestApplyShellSort(unittest.TestCase):
@@ -211,7 +215,7 @@ class TestApplyShellSort(unittest.TestCase):
         ]
         ordered = apply_shell_sort(
             releases,
-            sort_key=SORT_KEY_ALBUM,
+            sort_key=SORT_KEY_TITLE,
             sort_descending=True,
         )
         self.assertEqual([r.id for r in ordered], ["a", "b"])
@@ -235,7 +239,7 @@ class TestApplyShellSort(unittest.TestCase):
         ]
         ordered = apply_shell_sort(
             releases,
-            sort_key=SORT_KEY_ALBUM,
+            sort_key=SORT_KEY_TITLE,
             sort_descending=False,
         )
         self.assertEqual([r.id for r in ordered], ["b", "a"])

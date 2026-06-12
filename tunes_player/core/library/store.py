@@ -21,7 +21,7 @@ from tunes_player.core.home import (
 from tunes_player.core.library import ids
 from tunes_player.core.library.db import connect, with_db_retry
 from tunes_player.core.library.release_logic import infer_release_metadata
-from tunes_player.core.models import Album, Release, Source, Track
+from tunes_player.core.models import Release, Source, Track
 
 _RELEASE_GROUP_SELECT = """
     SELECT
@@ -215,10 +215,6 @@ class LibraryStore:
         return self._with_connection(query)
 
     @_locked_db
-    def list_albums(self) -> list[Album]:
-        return self.list_releases()
-
-    @_locked_db
     def get_release(self, release_id: str) -> Release | None:
         def query(connection: sqlite3.Connection) -> Release | None:
             row = connection.execute(
@@ -235,10 +231,6 @@ class LibraryStore:
             return self._row_to_release(row, art_uri=art_uri)
 
         return self._with_connection(query)
-
-    @_locked_db
-    def get_album(self, album_id: str) -> Album | None:
-        return self.get_release(album_id)
 
     @_locked_db
     def get_release_tracks(self, release_id: str) -> list[Track]:
@@ -266,10 +258,6 @@ class LibraryStore:
             return [self._row_to_track(row) for row in rows]
 
         return self._with_connection(query)
-
-    @_locked_db
-    def get_album_tracks(self, album_id: str) -> list[Track]:
-        return self.get_release_tracks(album_id)
 
     @_locked_db
     def get_track(self, track_id: str) -> Track | None:
@@ -309,10 +297,6 @@ class LibraryStore:
             return None if row is None else str(row["album_id"])
 
         return self._with_connection(query)
-
-    @_locked_db
-    def album_id_for_track(self, track_id: str) -> str | None:
-        return self.release_id_for_track(track_id)
 
     @_locked_db
     def get_file_metadata(self, track_id: str) -> FileMetadata | None:
@@ -747,7 +731,7 @@ class LibraryStore:
             id=row["id"],
             title=row["title"] or "Unknown Title",
             artist_name=row["artist"] or row["album_artist"] or "Unknown Artist",
-            album_title=row["album"],
+            release_title=row["album"],
             source=Source.LOCAL,
             duration_sec=duration,
             art_uri=art_uri,

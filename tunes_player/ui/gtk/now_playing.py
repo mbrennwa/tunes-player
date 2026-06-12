@@ -107,7 +107,7 @@ class NowPlayingBar(Gtk.Box):
         self._title.add_css_class("heading")
         meta.append(self._title)
 
-        self._subtitle = Gtk.Label(label="Select an album or track", xalign=0, ellipsize=3)
+        self._subtitle = Gtk.Label(label="Select a release or track", xalign=0, ellipsize=3)
         self._subtitle.add_css_class("dim-label")
         meta.append(self._subtitle)
 
@@ -259,7 +259,7 @@ class NowPlayingBar(Gtk.Box):
         clickable = track is not None and self._art_click_handler is not None
         self._art.set_sensitive(clickable)
         self._art.set_cursor_from_name("pointer" if clickable else "default")
-        self._art.set_tooltip_text("View album" if clickable else None)
+        self._art.set_tooltip_text("View release" if clickable else None)
 
     def _on_play_clicked(self, *_args: object) -> None:
         handler = self._play_handler
@@ -420,7 +420,7 @@ class NowPlayingBar(Gtk.Box):
 
         if track is None:
             self._title.set_label("Not playing")
-            self._subtitle.set_label("Select an album or track")
+            self._subtitle.set_label("Select a release or track")
             self._quality.set_label("")
             self._play_btn.set_icon_name("media-playback-start-symbolic")
             self._play_btn.set_tooltip_text("Play")
@@ -429,7 +429,7 @@ class NowPlayingBar(Gtk.Box):
         else:
             self._title.set_label(track.title)
             artist = track.artist_name
-            album = track.album_title or ""
+            album = track.release_title or ""
             duration = format_duration(track.duration_sec)
             self._subtitle.set_label(
                 join_detail(artist, album or None, duration)

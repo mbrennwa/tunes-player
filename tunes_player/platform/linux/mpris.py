@@ -522,8 +522,8 @@ class MprisService:
             "xesam:title": GLib.Variant("s", track.title),
             "xesam:artist": GLib.Variant("as", [track.artist_name]),
         }
-        if track.album_title:
-            metadata["xesam:album"] = GLib.Variant("s", track.album_title)
+        if track.release_title:
+            metadata["xesam:album"] = GLib.Variant("s", track.release_title)
         if state.duration_sec is not None:
             metadata["xesam:duration"] = GLib.Variant("x", int(state.duration_sec * 1_000_000))
         source = resolve_track(self._service.store, track.id, tidal=self._service.tidal)

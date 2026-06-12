@@ -22,7 +22,7 @@ class ReleasePlaybackToggleTests(unittest.TestCase):
             id="local:file:one",
             title="Track",
             artist_name="Artist",
-            album_title="Album",
+            release_title="Album",
             source=Source.LOCAL,
         )
         self._release_id = "local:release:artist:album"
