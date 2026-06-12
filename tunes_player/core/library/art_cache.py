@@ -6,7 +6,6 @@ import sqlite3
 from pathlib import Path
 
 from tunes_player.core.art import art_cache_path, find_cached_art_path, local_art_uri
-from tunes_player.core.library import ids
 
 
 def extract_embedded_art(path: Path) -> tuple[bytes, str] | None:
@@ -59,14 +58,16 @@ def index_album_art_for_file(
     *,
     data_dir: Path,
     path: Path,
-    album_artist: str,
-    album: str,
-) -> None:
-    art = extract_embedded_art(path)
+    album_id: str,
+) -> bool:
+    """Extract embedded art from *path* into the cache for *album_id*."""
+    try:
+        art = extract_embedded_art(path)
+    except Exception:
+        return False
     if art is None:
-        return
+        return False
     data, mime_type = art
-    album_id = ids.album_id(album_artist, album)
     upsert_album_art(
         connection,
         data_dir=data_dir,
@@ -74,40 +75,155 @@ def index_album_art_for_file(
         art_data=data,
         mime_type=mime_type,
     )
+    return True
 
 
-def backfill_missing_album_art(connection: sqlite3.Connection, *, data_dir: Path) -> int:
-    """Extract embedded art for albums that have tracks but no cached cover yet."""
+def repair_stale_album_art(connection: sqlite3.Connection, *, data_dir: Path) -> int:
+    """Re-extract art when album_art exists but the on-disk cache file is missing."""
     rows = connection.execute(
         """
+        SELECT aa.album_id, MIN(f.path) AS path
+        FROM album_art AS aa
+        JOIN tracks AS t ON t.album_id = aa.album_id
+        JOIN files AS f ON f.id = t.file_id
+        GROUP BY aa.album_id
+        """,
+    ).fetchall()
+    repaired = 0
+    for row in rows:
+        album_id = str(row["album_id"])
+        if find_cached_art_path(data_dir, album_id) is not None:
+            continue
+        if index_album_art_for_file(
+            connection,
+            data_dir=data_dir,
+            path=Path(str(row["path"])),
+            album_id=album_id,
+        ):
+            repaired += 1
+            continue
+        connection.execute("DELETE FROM album_art WHERE album_id = ?", (album_id,))
+    return repaired
+
+
+def backfill_missing_album_art(
+    connection: sqlite3.Connection,
+    *,
+    data_dir: Path,
+    limit: int | None = None,
+) -> int:
+    """Extract embedded art for albums that have tracks but no cached cover yet."""
+    query = """
         SELECT t.album_id, t.album_artist, t.album, MIN(f.path) AS path
         FROM tracks AS t
         JOIN files AS f ON f.id = t.file_id
         LEFT JOIN album_art AS aa ON aa.album_id = t.album_id
         WHERE aa.album_id IS NULL
         GROUP BY t.album_id, t.album_artist, t.album
-        """,
-    ).fetchall()
+        ORDER BY t.album_id
+    """
+    params: tuple[object, ...] = ()
+    if limit is not None:
+        query += " LIMIT ?"
+        params = (max(int(limit), 0),)
+    rows = connection.execute(query, params).fetchall()
     indexed = 0
     for row in rows:
+        album_id = str(row["album_id"])
         before = connection.execute(
             "SELECT 1 FROM album_art WHERE album_id = ?",
-            (row["album_id"],),
+            (album_id,),
         ).fetchone()
-        index_album_art_for_file(
-            connection,
-            data_dir=data_dir,
-            path=Path(str(row["path"])),
-            album_artist=str(row["album_artist"]),
-            album=str(row["album"]),
-        )
+        cached = find_cached_art_path(data_dir, album_id)
+        if cached is not None:
+            if before is None:
+                _restore_album_art_row_from_cache(
+                    connection,
+                    album_id=album_id,
+                    cached_path=cached,
+                )
+        else:
+            index_album_art_for_file(
+                connection,
+                data_dir=data_dir,
+                path=Path(str(row["path"])),
+                album_id=album_id,
+            )
         after = connection.execute(
             "SELECT 1 FROM album_art WHERE album_id = ?",
-            (row["album_id"],),
+            (album_id,),
         ).fetchone()
         if before is None and after is not None:
             indexed += 1
     return indexed
+
+
+def _restore_album_art_row_from_cache(
+    connection: sqlite3.Connection,
+    *,
+    album_id: str,
+    cached_path: Path,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO album_art(album_id, art_uri, mime_type, updated_at)
+        VALUES (?, ?, ?, strftime('%s', 'now'))
+        ON CONFLICT(album_id) DO UPDATE SET
+            art_uri = excluded.art_uri,
+            mime_type = excluded.mime_type,
+            updated_at = excluded.updated_at
+        """,
+        (album_id, local_art_uri(album_id), _mime_type_for_cache_path(cached_path)),
+    )
+
+
+def _mime_type_for_cache_path(path: Path) -> str:
+    ext = path.suffix.lower()
+    if ext == ".png":
+        return "image/png"
+    if ext == ".webp":
+        return "image/webp"
+    if ext == ".gif":
+        return "image/gif"
+    return "image/jpeg"
+
+
+def link_or_index_album_art(
+    connection: sqlite3.Connection,
+    *,
+    data_dir: Path,
+    path: Path,
+    album_id: str,
+) -> bool:
+    """Ensure *album_id* has album_art; return True when a row was added."""
+    before = connection.execute(
+        "SELECT 1 FROM album_art WHERE album_id = ?",
+        (album_id,),
+    ).fetchone()
+    if before is not None:
+        return False
+    cached = find_cached_art_path(data_dir, album_id)
+    if cached is not None:
+        _restore_album_art_row_from_cache(
+            connection,
+            album_id=album_id,
+            cached_path=cached,
+        )
+        return True
+    return index_album_art_for_file(
+        connection,
+        data_dir=data_dir,
+        path=path,
+        album_id=album_id,
+    )
+
+
+def maintain_album_art(connection: sqlite3.Connection, *, data_dir: Path) -> tuple[int, int]:
+    """Repair stale cache entries, backfill missing art, and prune orphans."""
+    repaired = repair_stale_album_art(connection, data_dir=data_dir)
+    added = backfill_missing_album_art(connection, data_dir=data_dir)
+    prune_orphan_album_art(connection, data_dir=data_dir)
+    return added, repaired
 
 
 def prune_orphan_album_art(connection: sqlite3.Connection, *, data_dir: Path) -> None:

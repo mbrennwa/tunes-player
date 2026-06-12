@@ -1,3 +1,9 @@
+tunes-player (1.0.dev1-1) unstable; urgency=medium
+
+  * Ship desktop entry and hicolor launcher icons in the package.
+
+ -- Matthias Brennwald <mbrennwa@gmail.com>  Wed, 03 Jun 2026 20:00:00 +0200
+
 tunes-player (1.0.dev0-1) unstable; urgency=medium
 
   * First public test release.

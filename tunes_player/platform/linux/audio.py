@@ -2,39 +2,222 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import subprocess
-import threading
-import time
 from abc import ABC, abstractmethod
+from dataclasses import replace
 
+from tunes_player.core.audio_labels import classify_sink_potential
 from tunes_player.core.config import AppConfig
-from tunes_player.core.volume import VolumeController, VolumeEndpoint
+from tunes_player.core.volume import (
+    SYSTEM_DEFAULT_SINK_ID,
+    VolumeController,
+    VolumeEndpoint,
+    is_alsa_endpoint_id,
+    pipewire_endpoint_id,
+)
 
 _SINK_LINE = re.compile(r"^\s*(?P<default>\*)?\s*(?P<id>\d+)\.\s+(?P<name>.+?)(?:\s+\[|$)")
 _PACTL_VOLUME = re.compile(r"(\d+)%")
 _WPCTL_VOLUME = re.compile(r"Volume:\s*([\d.]+)", re.IGNORECASE)
+
+log = logging.getLogger(__name__)
 _PACTL_SINK_SHORT = re.compile(r"^(?P<id>\d+)\s+(?P<name>\S+)\s+(?P<desc>.+)$")
+_WPCTL_TREE_CHARS = re.compile(r"[│├└─]")
+_NODE_NAME = re.compile(r'^\s*node\.name\s*=\s*"([^"]+)"')
+_NODE_DESCRIPTION = re.compile(r'^\s*node\.description\s*=\s*"([^"]+)"')
+_ALSA_CARD = re.compile(r'^\s*alsa\.card\s*=\s*"(\d+)"')
+_ALSA_DEVICE = re.compile(r'^\s*alsa\.device\s*=\s*"(\d+)"')
+
+def _system_default_endpoint(*, description: str | None = None) -> VolumeEndpoint:
+    return VolumeEndpoint(
+        id=SYSTEM_DEFAULT_SINK_ID,
+        name="default",
+        description=description or "System default",
+        is_default=True,
+        bit_perfect_potential="none",
+    )
+
+
+def _wpctl_inspect_sink(sink_id: str) -> tuple[str | None, str | None]:
+    """Return (node.name, node.description) for a wpctl sink id."""
+    if shutil.which("wpctl") is None:
+        return None, None
+    try:
+        result = subprocess.run(
+            ["wpctl", "inspect", sink_id],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None, None
+    node_name: str | None = None
+    node_description: str | None = None
+    for line in result.stdout.splitlines():
+        name_match = _NODE_NAME.match(line)
+        if name_match:
+            node_name = name_match.group(1)
+            continue
+        desc_match = _NODE_DESCRIPTION.match(line)
+        if desc_match:
+            node_description = desc_match.group(1)
+    return node_name, node_description
+
+
+def _wpctl_inspect_alsa_pcm(sink_id: str) -> tuple[int, int] | None:
+    """Return (card, device) from wpctl inspect when the sink is ALSA-backed."""
+    if shutil.which("wpctl") is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["wpctl", "inspect", sink_id],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    card: int | None = None
+    device: int | None = None
+    for line in result.stdout.splitlines():
+        card_match = _ALSA_CARD.match(line)
+        if card_match is not None:
+            card = int(card_match.group(1))
+            continue
+        device_match = _ALSA_DEVICE.match(line)
+        if device_match is not None:
+            device = int(device_match.group(1))
+    if card is None or device is None:
+        return None
+    return card, device
+
+
+def resolve_alsa_hw_endpoint_id(endpoint: VolumeEndpoint) -> str | None:
+    """Map a listed endpoint to ``alsa:hw:C:D`` when the stack exposes that PCM."""
+    if is_alsa_endpoint_id(endpoint.id):
+        return endpoint.id
+    if endpoint.control_id is None:
+        return None
+    pcm = _wpctl_inspect_alsa_pcm(endpoint.control_id)
+    if pcm is None:
+        return None
+    card, device = pcm
+    return f"alsa:hw:{card}:{device}"
+
+
+def _parse_wpctl_sink_line(line: str) -> re.Match[str] | None:
+    """Parse a sink line from ``wpctl status`` (tree drawing chars break plain regex)."""
+    if "." not in line:
+        return None
+    cleaned = _WPCTL_TREE_CHARS.sub(" ", line)
+    return _SINK_LINE.search(cleaned)
+
+
+def _parse_wpctl_status_sinks(stdout: str) -> list[VolumeEndpoint]:
+    endpoints: list[VolumeEndpoint] = []
+    in_sinks = False
+    for line in stdout.splitlines():
+        if line.rstrip().endswith("Sinks:"):
+            in_sinks = True
+            continue
+        if not in_sinks:
+            continue
+        if line.rstrip().endswith("Sources:") or line.rstrip().endswith("Source outputs:"):
+            break
+        if _WPCTL_TREE_CHARS.search(line) and line.rstrip().endswith(":"):
+            if endpoints:
+                break
+            continue
+        match = _parse_wpctl_sink_line(line)
+        if match is None:
+            continue
+        status_label = match.group("name").strip()
+        sink_id = match.group("id")
+        node_name, node_description = _wpctl_inspect_sink(sink_id)
+        stable_name = node_name or status_label
+        description = node_description or status_label
+        endpoints.append(
+            VolumeEndpoint(
+                id=pipewire_endpoint_id(stable_name),
+                name=stable_name,
+                description=description,
+                is_default=match.group("default") == "*",
+                bit_perfect_potential=classify_sink_potential(
+                    name=stable_name, description=description
+                ),
+                control_id=sink_id,
+            )
+        )
+    return endpoints
+
+
+def _alsa_volume_endpoints() -> list[VolumeEndpoint]:
+    from tunes_player.platform.linux.audio_probe import list_alsa_playback_endpoints
+
+    endpoints: list[VolumeEndpoint] = []
+    for endpoint_id, mpv_name, description in list_alsa_playback_endpoints():
+        endpoints.append(
+            VolumeEndpoint(
+                id=endpoint_id,
+                name=mpv_name,
+                description=description,
+                is_default=False,
+                bit_perfect_potential="direct",
+            )
+        )
+    return endpoints
+
+
+def _mark_preferred_default(
+    endpoints: list[VolumeEndpoint], *, configured_id: str | None
+) -> list[VolumeEndpoint]:
+    """Prefer saved id, else first ALSA (bit-perfect path), else PipeWire default."""
+    if not endpoints:
+        return endpoints
+    chosen: str | None = None
+    if configured_id and any(item.id == configured_id for item in endpoints):
+        chosen = configured_id
+    elif any(is_alsa_endpoint_id(item.id) for item in endpoints):
+        chosen = next(item.id for item in endpoints if is_alsa_endpoint_id(item.id))
+    else:
+        for item in endpoints:
+            if item.is_default:
+                chosen = item.id
+                break
+    if chosen is None:
+        chosen = endpoints[0].id
+    return [replace(item, is_default=item.id == chosen) for item in endpoints]
 
 
 def create_volume_controller(config: AppConfig) -> VolumeController:
-    for cls in (WpctlVolumeController, PactlVolumeController):
-        controller = cls(config)
-        if controller.available():
-            return controller
+    merged = LinuxOutputController(config)
+    if merged.list_endpoints():
+        return merged
     return NullVolumeController(config)
 
 
 def mpv_playback_options(
     *,
-    bit_perfect: bool,
+    unity_gain: bool,
     audio_device: str | None,
     software_volume: float,
+    output_profile: object | None = None,
 ) -> dict[str, object]:
     """Build mpv constructor options for the selected output profile."""
+    from tunes_player.core.playback.mpv_cli import base_audio_options
+    from tunes_player.core.playback.output_profile import PlaybackOutputProfile
+
     options: dict[str, object] = {}
-    if bit_perfect:
+    profile = output_profile if isinstance(output_profile, PlaybackOutputProfile) else None
+    options.update(
+        base_audio_options(profile, use_device_output=profile is None or not profile.direct_alsa)
+    )
+    if unity_gain:
         options["volume"] = 100
         options["replaygain"] = "no"
     else:
@@ -50,9 +233,6 @@ class _SubprocessVolumeController(ABC):
     def __init__(self, config: AppConfig) -> None:
         self._config = config
         self._cached_endpoints: list[VolumeEndpoint] | None = None
-        self._volume_lock = threading.Lock()
-        self._pending_level: float | None = None
-        self._apply_thread: threading.Thread | None = None
 
     @property
     @abstractmethod
@@ -76,32 +256,10 @@ class _SubprocessVolumeController(ABC):
 
     def set_level(self, level: float) -> None:
         clamped = max(0.0, min(1.0, level))
-        with self._volume_lock:
-            self._pending_level = clamped
-            if self._apply_thread is not None and self._apply_thread.is_alive():
-                return
-            self._apply_thread = threading.Thread(
-                target=self._apply_pending_levels,
-                name=f"{self._command}-volume",
-                daemon=True,
-            )
-            self._apply_thread.start()
-
-    def _apply_pending_levels(self) -> None:
-        while True:
-            with self._volume_lock:
-                level = self._pending_level
-                self._pending_level = None
-            if level is None:
-                return
-            try:
-                self._run([self._command, *self._set_volume_args(level)], check=True)
-            except (OSError, subprocess.CalledProcessError):
-                return
-            time.sleep(0.025)
-            with self._volume_lock:
-                if self._pending_level is None:
-                    return
+        try:
+            self._run([self._command, *self._set_volume_args(clamped)], check=True)
+        except (OSError, subprocess.CalledProcessError):
+            log.debug("Could not set %s output volume", self._command, exc_info=True)
 
     def adjust_level(self, delta: float) -> None:
         self.set_level(self.get_level() + delta)
@@ -113,24 +271,24 @@ class _SubprocessVolumeController(ABC):
 
     def get_active_endpoint_id(self) -> str | None:
         configured = self._config.output_sink_id
+        endpoints = self.list_endpoints()
         if configured:
-            ids = {item.id for item in self.list_endpoints()}
+            ids = {item.id for item in endpoints}
             if configured in ids:
                 return configured
-        for endpoint in self.list_endpoints():
+        for endpoint in endpoints:
             if endpoint.is_default:
                 return endpoint.id
-        endpoints = self.list_endpoints()
         return endpoints[0].id if endpoints else None
 
     def set_active_endpoint(self, endpoint_id: str) -> None:
+        """Persist Tunes output choice only — does not change the system default sink."""
         self._config.output_sink_id = endpoint_id
-        self._run([self._command, *self._set_default_args(endpoint_id)], check=True)
         self._cached_endpoints = None
 
     def mpv_audio_device(self) -> str | None:
         endpoint_id = self.get_active_endpoint_id()
-        if endpoint_id is None:
+        if endpoint_id is None or endpoint_id == SYSTEM_DEFAULT_SINK_ID:
             return None
         for endpoint in self.list_endpoints():
             if endpoint.id == endpoint_id:
@@ -142,9 +300,6 @@ class _SubprocessVolumeController(ABC):
 
     @abstractmethod
     def _set_volume_args(self, level: float) -> list[str]: ...
-
-    @abstractmethod
-    def _set_default_args(self, endpoint_id: str) -> list[str]: ...
 
     @abstractmethod
     def _list_endpoints(self) -> list[VolumeEndpoint]: ...
@@ -170,45 +325,31 @@ class WpctlVolumeController(_SubprocessVolumeController):
     def _probe_args(self) -> list[str]:
         return ["status"]
 
-    def _get_volume_args(self) -> list[str]:
+    def _wpctl_volume_target(self) -> str:
         endpoint_id = self.get_active_endpoint_id()
-        target = endpoint_id or "@DEFAULT_AUDIO_SINK@"
-        return ["get-volume", target]
+        if endpoint_id is None or endpoint_id == SYSTEM_DEFAULT_SINK_ID:
+            return "@DEFAULT_AUDIO_SINK@"
+        for endpoint in self._list_endpoints():
+            if endpoint.id == endpoint_id and endpoint.control_id is not None:
+                return endpoint.control_id
+        return endpoint_id
+
+    def _get_volume_args(self) -> list[str]:
+        return ["get-volume", self._wpctl_volume_target()]
 
     def _set_volume_args(self, level: float) -> list[str]:
-        endpoint_id = self.get_active_endpoint_id()
-        target = endpoint_id or "@DEFAULT_AUDIO_SINK@"
-        return ["set-volume", target, f"{level:.4f}"]
-
-    def _set_default_args(self, endpoint_id: str) -> list[str]:
-        return ["set-default", endpoint_id]
+        return ["set-volume", self._wpctl_volume_target(), f"{level:.4f}"]
 
     def _list_endpoints(self) -> list[VolumeEndpoint]:
         result = self._run(["wpctl", "status"], check=True)
-        endpoints: list[VolumeEndpoint] = []
-        in_sinks = False
-        for line in result.stdout.splitlines():
-            if line.startswith("Sinks:"):
-                in_sinks = True
-                continue
-            if in_sinks:
-                if not line.startswith(" │"):
-                    if endpoints:
-                        break
-                    continue
-                match = _SINK_LINE.search(line)
-                if match is None:
-                    continue
-                name = match.group("name").strip()
-                endpoints.append(
-                    VolumeEndpoint(
-                        id=match.group("id"),
-                        name=name,
-                        description=name,
-                        is_default=match.group("default") == "*",
-                    )
-                )
-        return endpoints
+        endpoints = _parse_wpctl_status_sinks(result.stdout)
+        if endpoints:
+            return endpoints
+        try:
+            named = self._run(["wpctl", "status", "-n"], check=True)
+        except (OSError, subprocess.CalledProcessError):
+            return []
+        return _parse_wpctl_status_sinks(named.stdout)
 
     def _parse_level(self, raw: str) -> float:
         match = _WPCTL_VOLUME.search(raw)
@@ -239,10 +380,6 @@ class PactlVolumeController(_SubprocessVolumeController):
         percent = int(round(level * 100))
         return ["set-sink-volume", sink, f"{percent}%"]
 
-    def _set_default_args(self, endpoint_id: str) -> list[str]:
-        sink_name = self._sink_name_for_id(endpoint_id)
-        return ["set-default-sink", sink_name]
-
     def _list_endpoints(self) -> list[VolumeEndpoint]:
         default_name = self._run(["pactl", "get-default-sink"], check=True).stdout.strip()
         result = self._run(["pactl", "list", "sinks", "short"], check=True)
@@ -252,12 +389,17 @@ class PactlVolumeController(_SubprocessVolumeController):
             if match is None:
                 continue
             name = match.group("name")
+            desc = match.group("desc").strip()
             endpoints.append(
                 VolumeEndpoint(
-                    id=match.group("id"),
+                    id=pipewire_endpoint_id(name),
                     name=name,
-                    description=match.group("desc").strip(),
+                    description=desc,
                     is_default=name == default_name,
+                    bit_perfect_potential=classify_sink_potential(
+                        name=name, description=desc
+                    ),
+                    control_id=match.group("id"),
                 )
             )
         return endpoints
@@ -284,6 +426,197 @@ class PactlVolumeController(_SubprocessVolumeController):
         return self._run(["pactl", "get-default-sink"], check=True).stdout.strip()
 
 
+class LinuxOutputController:
+    """ALSA devices (preferred) plus PipeWire/Pulse sinks when available."""
+
+    def __init__(self, config: AppConfig) -> None:
+        self._config = config
+        self._cached_endpoints: list[VolumeEndpoint] | None = None
+        self._sink_backend: _SubprocessVolumeController | None = None
+        wpctl = WpctlVolumeController(config)
+        if wpctl.available():
+            self._sink_backend = wpctl
+        else:
+            pactl = PactlVolumeController(config)
+            if pactl.available():
+                self._sink_backend = pactl
+        self._software_level = 0.72
+
+    def _active_alsa_endpoint_id(self) -> str | None:
+        active = self.get_active_endpoint_id()
+        if active is None or not is_alsa_endpoint_id(active):
+            return None
+        return active
+
+    def _alsa_has_hardware_volume(self) -> bool:
+        endpoint_id = self._active_alsa_endpoint_id()
+        if endpoint_id is None:
+            return False
+        from tunes_player.platform.linux.alsa_mixer import alsa_mixer_adjustable_for_endpoint
+
+        return alsa_mixer_adjustable_for_endpoint(endpoint_id)
+
+    def _active_endpoint(self) -> VolumeEndpoint | None:
+        active = self.get_active_endpoint_id()
+        if active is None:
+            return None
+        for endpoint in self.list_endpoints():
+            if endpoint.id == active:
+                return endpoint
+        return None
+
+    def _resolved_alsa_hw_endpoint_id(self) -> str | None:
+        endpoint = self._active_endpoint()
+        if endpoint is None:
+            return None
+        return resolve_alsa_hw_endpoint_id(endpoint)
+
+    @property
+    def uses_device_volume(self) -> bool:
+        active = self.get_active_endpoint_id()
+        if active is None or active == SYSTEM_DEFAULT_SINK_ID:
+            return False
+        resolved = self._resolved_alsa_hw_endpoint_id()
+        if resolved is not None:
+            from tunes_player.platform.linux.alsa_mixer import (
+                alsa_mixer_adjustable_for_endpoint,
+            )
+
+            return alsa_mixer_adjustable_for_endpoint(resolved)
+        if is_alsa_endpoint_id(active):
+            return self._alsa_has_hardware_volume()
+        return self._sink_backend is not None
+
+    def available(self) -> bool:
+        return bool(self._alsa_volume_endpoints() or self._list_sink_endpoints())
+
+    def get_level(self) -> float:
+        endpoint_id = self._active_alsa_endpoint_id()
+        if endpoint_id is not None and self._alsa_has_hardware_volume():
+            from tunes_player.platform.linux.alsa_mixer import alsa_get_level_for_endpoint
+
+            return alsa_get_level_for_endpoint(endpoint_id)
+        if self.uses_device_volume and self._sink_backend is not None:
+            return self._sink_backend.get_level()
+        return self._software_level
+
+    def set_level(self, level: float) -> None:
+        clamped = max(0.0, min(1.0, level))
+        endpoint_id = self._active_alsa_endpoint_id()
+        if endpoint_id is not None and self._alsa_has_hardware_volume():
+            from tunes_player.platform.linux.alsa_mixer import alsa_set_level_for_endpoint
+
+            alsa_set_level_for_endpoint(endpoint_id, clamped)
+            return
+        if self.uses_device_volume and self._sink_backend is not None:
+            self._sink_backend.set_level(clamped)
+            return
+        self._software_level = clamped
+
+    def adjust_level(self, delta: float) -> None:
+        if self.uses_device_volume:
+            self.set_level(self.get_level() + delta)
+            return
+        self.set_level(self._software_level + delta)
+
+    def list_endpoints(self) -> list[VolumeEndpoint]:
+        if self._cached_endpoints is None:
+            merged = self._alsa_volume_endpoints() + self._list_sink_endpoints()
+            configured = self._normalize_output_sink_id(merged)
+            self._cached_endpoints = _mark_preferred_default(
+                merged, configured_id=configured
+            )
+        return list(self._cached_endpoints)
+
+    def normalize_output_sink_config(self) -> bool:
+        """Migrate legacy wpctl numeric ids to stable ids; return True if config changed."""
+        self._cached_endpoints = None
+        merged = self._alsa_volume_endpoints() + self._list_sink_endpoints()
+        before = self._config.output_sink_id
+        after = self._normalize_output_sink_id(merged)
+        self._cached_endpoints = None
+        return before != after
+
+    def _normalize_output_sink_id(self, endpoints: list[VolumeEndpoint]) -> str | None:
+        configured = self._config.output_sink_id
+        if not configured or not endpoints:
+            return configured
+        ids = {item.id for item in endpoints}
+        if configured in ids:
+            return configured
+        if configured.isdigit():
+            for item in endpoints:
+                if item.control_id == configured:
+                    self._config.output_sink_id = item.id
+                    return item.id
+        from tunes_player.core.volume import pipewire_name_from_endpoint_id
+
+        saved_name = pipewire_name_from_endpoint_id(configured)
+        if saved_name:
+            for item in endpoints:
+                if item.name == saved_name or item.description == saved_name:
+                    self._config.output_sink_id = item.id
+                    return item.id
+        for item in endpoints:
+            if item.name == configured or item.description == configured:
+                self._config.output_sink_id = item.id
+                return item.id
+        return configured
+
+    def get_active_endpoint_id(self) -> str | None:
+        endpoints = self.list_endpoints()
+        if not endpoints:
+            return None
+        configured = self._config.output_sink_id
+        if configured:
+            ids = {item.id for item in endpoints}
+            if configured in ids:
+                return configured
+        for endpoint in endpoints:
+            if endpoint.is_default:
+                return endpoint.id
+        return endpoints[0].id
+
+    def set_active_endpoint(self, endpoint_id: str) -> None:
+        from tunes_player.platform.linux.alsa_mixer import clear_alsa_mixer_cache
+
+        clear_alsa_mixer_cache()
+        self._config.output_sink_id = endpoint_id
+        self._cached_endpoints = None
+
+    def mpv_audio_device(self) -> str | None:
+        endpoint_id = self.get_active_endpoint_id()
+        if endpoint_id is None or endpoint_id == SYSTEM_DEFAULT_SINK_ID:
+            return None
+        for endpoint in self.list_endpoints():
+            if endpoint.id != endpoint_id:
+                continue
+            if is_alsa_endpoint_id(endpoint_id):
+                return f"alsa/{endpoint.name}"
+            if self._sink_backend is not None:
+                return self._sink_backend._mpv_device_for(endpoint)
+        return None
+
+    def _alsa_volume_endpoints(self) -> list[VolumeEndpoint]:
+        return _alsa_volume_endpoints()
+
+    def _list_sink_endpoints(self) -> list[VolumeEndpoint]:
+        if self._sink_backend is None:
+            return []
+        return self._sink_backend._list_endpoints()
+
+    def exclusive_access_supported(self) -> bool:
+        return is_alsa_endpoint_id(self.get_active_endpoint_id())
+
+    def active_alsa_card(self) -> int | None:
+        endpoint_id = self._active_alsa_endpoint_id()
+        if endpoint_id is None:
+            return None
+        from tunes_player.platform.linux.alsa_mixer import alsa_card_from_endpoint_id
+
+        return alsa_card_from_endpoint_id(endpoint_id)
+
+
 class NullVolumeController:
     """Software volume fallback when no sink controller is available."""
 
@@ -306,10 +639,16 @@ class NullVolumeController:
         self.set_level(self._level + delta)
 
     def list_endpoints(self) -> list[VolumeEndpoint]:
-        return []
+        return [_system_default_endpoint()]
 
     def get_active_endpoint_id(self) -> str | None:
-        return None
+        configured = self._config.output_sink_id
+        endpoints = self.list_endpoints()
+        if configured:
+            ids = {item.id for item in endpoints}
+            if configured in ids:
+                return configured
+        return endpoints[0].id if endpoints else None
 
     def set_active_endpoint(self, endpoint_id: str) -> None:
         self._config.output_sink_id = endpoint_id

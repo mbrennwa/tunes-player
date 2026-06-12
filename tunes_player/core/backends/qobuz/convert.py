@@ -5,13 +5,23 @@ from __future__ import annotations
 from typing import Any
 
 from tunes_player.core.backends.qobuz import ids as qobuz_ids
+from tunes_player.core.library.release_logic import (
+    infer_release_completeness,
+    release_type_from_metadata,
+)
 from tunes_player.core.models import (
     Artist,
     Release,
-    ReleaseCompleteness,
-    ReleaseType,
     Source,
     Track,
+)
+from tunes_player.core.release_catalog import (
+    peak_bit_depth_from_qobuz_album,
+    peak_sample_rate_from_qobuz_album,
+)
+from tunes_player.core.release_quality import (
+    classify_qobuz_catalog,
+    peak_quality_tier_from_tiers,
 )
 
 
@@ -58,11 +68,11 @@ def _year_from_album(album: dict[str, Any]) -> int | None:
     return None
 
 
-def release_from_qobuz(
+def _release_common_fields(
     album: dict[str, Any],
     *,
     owned_track_count: int | None = None,
-) -> Release:
+) -> tuple[str, str, int | None, int, object, object, float | None, str | None, str | None]:
     album_id = str(album.get("id") or album.get("qobuz_id") or "")
     title = str(album.get("title") or "Unknown")
     artist_name = _artist_name_from_album(album)
@@ -75,21 +85,60 @@ def release_from_qobuz(
             track_count = int(tracks.get("total") or len(tracks.get("items") or []))
         else:
             track_count = expected or 0
-    if expected is not None and track_count < expected:
-        completeness = ReleaseCompleteness.PARTIAL
-        release_type = ReleaseType.ALBUM
-    elif track_count == 1:
-        completeness = ReleaseCompleteness.COMPLETE
-        release_type = ReleaseType.SINGLE
-    else:
-        completeness = ReleaseCompleteness.COMPLETE
-        release_type = ReleaseType.ALBUM
+    product_type = album.get("product_type")
+    type_raw = str(product_type) if product_type is not None else None
+    completeness, expected = infer_release_completeness(
+        track_count=track_count,
+        is_synthetic=False,
+        total_tracks_tag=expected,
+        max_track_number=None,
+    )
+    release_type = release_type_from_metadata(type_raw, is_synthetic=False)
     duration = album.get("duration")
     duration_sec = float(duration) if duration is not None else None
     genre = album.get("genre")
-    genre_name = genre.get("name") if isinstance(genre, dict) else None
+    if isinstance(genre, dict):
+        genre_name = genre.get("name")
+    elif isinstance(genre, str):
+        genre_name = genre
+    else:
+        genre_name = None
+    art_uri = cover_url(album.get("image"))
+    return (
+        album_id,
+        title,
+        artist_name,
+        expected,
+        track_count,
+        completeness,
+        release_type,
+        duration_sec,
+        str(genre_name) if genre_name else None,
+        art_uri,
+    )
+
+
+def release_stub_from_qobuz(
+    album: dict[str, Any],
+    *,
+    owned_track_count: int | None = None,
+) -> Release:
+    """Phase-1 browse release without catalog quality classification."""
+    (
+        album_id,
+        title,
+        artist_name,
+        expected,
+        track_count,
+        completeness,
+        release_type,
+        duration_sec,
+        genre_name,
+        art_uri,
+    ) = _release_common_fields(album, owned_track_count=owned_track_count)
+    catalog_id = qobuz_ids.album_id(album_id)
     return Release(
-        id=qobuz_ids.album_id(album_id),
+        id=catalog_id,
         title=title,
         artist_name=artist_name,
         source=Source.QOBUZ,
@@ -98,9 +147,56 @@ def release_from_qobuz(
         expected_track_count=expected,
         completeness=completeness,
         release_type=release_type,
-        genre=str(genre_name) if genre_name else None,
-        art_uri=cover_url(album.get("image")),
+        genre=genre_name,
+        art_uri=art_uri,
         duration_sec=duration_sec,
+        peak_quality_tier="",
+        available_quality_tiers=frozenset(),
+        catalog_quality_ready=False,
+        catalog_release_id=catalog_id,
+    )
+
+
+def release_from_qobuz(
+    album: dict[str, Any],
+    *,
+    owned_track_count: int | None = None,
+) -> Release:
+    """Classified Qobuz release from album/get JSON."""
+    (
+        album_id,
+        title,
+        artist_name,
+        expected,
+        track_count,
+        completeness,
+        release_type,
+        duration_sec,
+        genre_name,
+        art_uri,
+    ) = _release_common_fields(album, owned_track_count=owned_track_count)
+    available_quality_tiers = classify_qobuz_catalog(album)
+    peak_quality_tier = peak_quality_tier_from_tiers(available_quality_tiers)
+    catalog_id = qobuz_ids.album_id(album_id)
+    return Release(
+        id=catalog_id,
+        title=title,
+        artist_name=artist_name,
+        source=Source.QOBUZ,
+        year=_year_from_album(album),
+        track_count=track_count,
+        expected_track_count=expected,
+        completeness=completeness,
+        release_type=release_type,
+        genre=genre_name,
+        art_uri=art_uri,
+        duration_sec=duration_sec,
+        peak_quality_tier=peak_quality_tier,
+        available_quality_tiers=available_quality_tiers,
+        catalog_quality_ready=True,
+        catalog_release_id=catalog_id,
+        peak_sample_rate_hz=peak_sample_rate_from_qobuz_album(album),
+        peak_bit_depth=peak_bit_depth_from_qobuz_album(album),
     )
 
 
@@ -119,10 +215,10 @@ def track_from_qobuz(
 ) -> Track:
     track_id = str(track.get("id") or "")
     album_obj = album if album is not None else track.get("album")
-    album_title = None
+    release_title = None
     art_uri = None
     if isinstance(album_obj, dict):
-        album_title = str(album_obj.get("title") or "") or None
+        release_title = str(album_obj.get("title") or "") or None
         art_uri = cover_url(album_obj.get("image"))
     performer = track.get("performer")
     if isinstance(performer, dict) and performer.get("name"):
@@ -139,7 +235,7 @@ def track_from_qobuz(
         id=qobuz_ids.track_id(track_id),
         title=str(track.get("title") or "Unknown Track"),
         artist_name=artist_name,
-        album_title=album_title,
+        release_title=release_title,
         source=Source.QOBUZ,
         duration_sec=duration_sec,
         art_uri=art_uri,

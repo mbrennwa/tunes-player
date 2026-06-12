@@ -4,21 +4,38 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import dataclass, replace
 
+import tunes_player.gi_bootstrap  # noqa: F401 — before gi.repository
 import gi
 
 gi.require_version("Adw", "1")
+gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.logging_config import configure_logging
 from tunes_player.core.models import Release, Source
+from tunes_player.core.release_quality_tiles import parse_catalog_release_id
+from tunes_player.core.release_quality import streaming_catalog_quality_needs_enrich
 from tunes_player.core.services import PlayerService
 from tunes_player.core.shell_state import (
+    SearchScope,
     ShellBase,
     ShellState,
-    apply_source_filter,
+    apply_catalog_enrich_scope_filters,
+    apply_shell_view_filters,
+    cached_releases_compatible_with_available,
+    cached_releases_have_quality_tiers,
+    ensure_source_enabled,
+    filter_releases_to_available_sources,
+    prune_enabled_sources,
+    refresh_local_peak_quality_tiers,
+    genres_in_selection,
+    prune_enabled_genres,
+    prune_enabled_quality_tiers,
+    quality_tiers_in_selection,
     release_to_cache_payload,
     releases_from_cache_payloads,
 )
@@ -27,7 +44,16 @@ from tunes_player.ui.gtk.art import ArtLoader
 from tunes_player.ui.gtk.errors import attach_error_toasts, show_error_toast
 from tunes_player.ui.gtk.now_playing import NowPlayingBar, attach_media_keys
 from tunes_player.ui.gtk.preferences import PreferencesWindow
-from tunes_player.ui.gtk.shell_controller import available_sources, fetch_base_releases
+from tunes_player.ui.gtk.shell_controller import (
+    available_sources,
+    empty_grid_message,
+    fetch_base_releases,
+    format_release_count_label,
+)
+from tunes_player.ui.gtk.genre_filter_menu import GenreFilterMenu
+from tunes_player.ui.gtk.quality_multi_switch import QualityMultiSwitch
+from tunes_player.ui.gtk.release_sort_switch import ReleaseSortSwitch
+from tunes_player.ui.gtk.release_type_multi_switch import ReleaseTypeMultiSwitch
 from tunes_player.ui.gtk.source_multi_switch import SourceMultiSwitch
 from tunes_player.ui.gtk.util import escape_markup, load_app_css, source_label
 from tunes_player.ui.gtk.views import (
@@ -37,7 +63,7 @@ from tunes_player.ui.gtk.views import (
     ReleaseDetailView,
     ReleaseGridView,
 )
-from tunes_player.ui.gtk.album_grid import ALBUM_GRID_VIEW_MARGIN, album_grid_min_content_width
+from tunes_player.ui.gtk.release_grid import RELEASE_GRID_VIEW_MARGIN, release_grid_min_content_width
 
 _APP_WINDOW_TITLE = "Tunes Player"
 _DEFAULT_SIZE = (960, 640)
@@ -49,13 +75,24 @@ _ONBOARDING_MESSAGE = (
 _PRESET_LABELS = {
     ShellBase.NEW_MUSIC: "New Releases",
     ShellBase.SUGGESTION: "Suggest Music",
+    ShellBase.ALL_LOCAL: "All Local",
 }
 _LOADING_MESSAGES = {
     ShellBase.NEW_MUSIC: "Loading new releases…",
     ShellBase.SUGGESTION: "Finding suggestions...",
+    ShellBase.ALL_LOCAL: "Loading local library…",
 }
+_CATALOG_ENRICH_CONCURRENCY = 2
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _SelectionSnapshot:
+    """Shell state plus unfiltered cache for selection-history Back."""
+
+    state: ShellState
+    releases: tuple[Release, ...]
 
 
 class TunesWindow(Adw.ApplicationWindow):
@@ -70,13 +107,21 @@ class TunesWindow(Adw.ApplicationWindow):
         self._preferences: PreferencesWindow | None = None
         self._queue_sheet: QueueSheet | None = None
         self._source_multi: SourceMultiSwitch | None = None
+        self._genre_filter: GenreFilterMenu | None = None
+        self._release_type_multi: ReleaseTypeMultiSwitch | None = None
+        self._quality_filter_multi: QualityMultiSwitch | None = None
+        self._sort_switch: ReleaseSortSwitch | None = None
         self._cached_selection_key: tuple[str, str] | None = None
         self._cached_releases: list[Release] = []
+        self._selection_stack: list[_SelectionSnapshot] = []
+        self._prepared_for_first_show = False
         self.set_default_size(*_DEFAULT_SIZE)
+        self.set_icon_name("tunes-player")
 
         self._now_playing = NowPlayingBar(service=service, art_loader=self._art_loader)
         self._now_playing.set_queue_handler(self._open_queue_sheet)
         self._now_playing.set_play_handler(self._on_play_clicked)
+        self._now_playing.set_art_click_handler(self._open_current_release)
 
         self._toolbar = Adw.ToolbarView()
         self._toolbar.set_size_request(-1, -1)
@@ -90,20 +135,77 @@ class TunesWindow(Adw.ApplicationWindow):
         attach_error_toasts(self._toast_overlay, service)
         service.subscribe(lambda event: GLib.idle_add(self._on_service_event, event))
         self.connect("close-request", self._on_close_request)
-        GLib.idle_add(self._startup_playback_probe)
-        GLib.idle_add(self._reload_grid)
+
+    def prepare_for_first_show(self) -> None:
+        """Build the initial browse view before the window is first shown."""
+        if self._prepared_for_first_show:
+            return
+        self._prepared_for_first_show = True
+        if self.get_realized() and not self.get_mapped():
+            self._apply_startup_window_size(*_DEFAULT_SIZE)
+        self._reload_grid()
+        self._ensure_startup_window_size()
+        self._sync_visible_grid_layout()
+        self._startup_playback_probe()
+
+    def _apply_startup_window_size(self, width: int, height: int) -> None:
+        """GTK 4 has no resize(); set default size and allocate before first map."""
+        self.set_default_size(width, height)
+        if not self.get_realized() or self.get_mapped():
+            return
+        allocation = Gdk.Rectangle()
+        allocation.width = width
+        allocation.height = height
+        self.size_allocate(allocation, -1)
+
+    def _ensure_startup_window_size(self) -> None:
+        """Set the first mapped size from realized chrome, before present()."""
+        if not self.get_realized():
+            return
+        default_w, default_h = _DEFAULT_SIZE
+        width = default_w
+        height = default_h
+        for widget in (self._shell_controls, self._now_playing, self._header):
+            _min_w, natural_w, _min_b, _nat_b = widget.measure(
+                Gtk.Orientation.HORIZONTAL,
+                height,
+            )
+            width = max(width, natural_w)
+            _min_h, natural_h, _min_b, _nat_b = widget.measure(
+                Gtk.Orientation.VERTICAL,
+                width,
+            )
+            height = max(height, natural_h)
+        self._apply_startup_window_size(width, height)
+
+    def _sync_visible_grid_layout(self) -> None:
+        page = self._main_nav.get_visible_page()
+        if page is None:
+            return
+        child = page.get_child()
+        if isinstance(child, ReleaseGridView):
+            child.sync_tile_layout()
 
     def _load_initial_shell_state(self) -> ShellState:
         state = self._service.config.config.shell_state
         if not available_sources(self._service):
             return ShellState()
         sources = available_sources(self._service)
-        if state.enabled_sources and not state.enabled_sources <= sources:
-            state = ShellState(
-                base=state.base,
-                search_query=state.search_query,
-                enabled_sources=state.enabled_sources & sources,
-            )
+        pruned_sources = prune_enabled_sources(state.enabled_sources, sources)
+        if pruned_sources != state.enabled_sources:
+            state = replace(state, enabled_sources=pruned_sources)
+        if state.base == ShellBase.ALL_LOCAL:
+            if Source.LOCAL not in sources:
+                state = replace(state, base=ShellBase.NONE, cached_releases=())
+            else:
+                state = replace(
+                    state,
+                    enabled_sources=ensure_source_enabled(
+                        state.enabled_sources,
+                        Source.LOCAL,
+                        available=sources,
+                    ),
+                )
         return state
 
     def _build_shell(self) -> None:
@@ -122,15 +224,9 @@ class TunesWindow(Adw.ApplicationWindow):
         self._back_btn.connect("clicked", self._on_nav_back)
         self._header.pack_start(self._back_btn)
 
-        settings_action = Gio.SimpleAction.new("settings", None)
-        settings_action.connect("activate", lambda *_a, **_k: self._open_preferences())
-        self.add_action(settings_action)
-
-        settings_btn = Gtk.MenuButton(icon_name="emblem-system-symbolic")
+        settings_btn = Gtk.Button(icon_name="emblem-system-symbolic")
         settings_btn.set_tooltip_text("Settings")
-        menu = Gio.Menu.new()
-        menu.append("Settings", "win.settings")
-        settings_btn.set_menu_model(menu)
+        settings_btn.connect("clicked", self._open_preferences)
         self._header.pack_end(settings_btn)
 
         shell_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -165,11 +261,64 @@ class TunesWindow(Adw.ApplicationWindow):
         self._suggestion_btn.connect("toggled", self._on_suggestion_toggled)
         search_row.append(self._suggestion_btn)
 
+        self._all_local_btn = Gtk.ToggleButton(label="All Local")
+        self._all_local_btn.add_css_class("shell-preset-btn")
+        self._all_local_btn.connect("toggled", self._on_all_local_toggled)
+        search_row.append(self._all_local_btn)
+
         controls.append(search_row)
+
+        filter_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        filter_row.add_css_class("shell-filter-row")
 
         self._source_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         self._source_row.add_css_class("shell-source-row")
-        controls.append(self._source_row)
+        self._source_row.set_hexpand(False)
+        self._source_row.set_halign(Gtk.Align.START)
+        filter_row.append(self._source_row)
+
+        self._release_type_slot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self._release_type_slot.add_css_class("shell-release-type-slot")
+        self._release_type_slot.set_visible(False)
+        self._release_type_slot.set_hexpand(False)
+        self._release_type_slot.set_halign(Gtk.Align.START)
+        self._release_type_slot.set_margin_start(24)
+        filter_row.append(self._release_type_slot)
+
+        self._genre_filter_slot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self._genre_filter_slot.add_css_class("shell-genre-filter-slot")
+        self._genre_filter_slot.set_visible(False)
+        self._genre_filter_slot.set_hexpand(False)
+        self._genre_filter_slot.set_halign(Gtk.Align.START)
+        self._genre_filter_slot.set_margin_start(24)
+        filter_row.append(self._genre_filter_slot)
+
+        self._quality_filter_slot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self._quality_filter_slot.add_css_class("shell-quality-filter-slot")
+        self._quality_filter_slot.set_visible(False)
+        self._quality_filter_slot.set_hexpand(False)
+        self._quality_filter_slot.set_halign(Gtk.Align.START)
+        self._quality_filter_slot.set_margin_start(24)
+        filter_row.append(self._quality_filter_slot)
+
+        self._sort_slot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self._sort_slot.add_css_class("shell-sort-slot")
+        self._sort_slot.set_visible(False)
+        self._sort_slot.set_hexpand(False)
+        self._sort_slot.set_halign(Gtk.Align.START)
+        self._sort_slot.set_margin_start(24)
+        filter_row.append(self._sort_slot)
+
+        self._release_count_label = Gtk.Label(label="", xalign=1)
+        self._release_count_label.add_css_class("shell-source-heading")
+        self._release_count_label.add_css_class("shell-release-count")
+        self._release_count_label.set_hexpand(True)
+        self._release_count_label.set_halign(Gtk.Align.END)
+        self._release_count_label.set_valign(Gtk.Align.CENTER)
+        self._release_count_label.set_visible(False)
+        filter_row.append(self._release_count_label)
+
+        controls.append(filter_row)
 
         self._shell_controls = controls
         shell_column.append(controls)
@@ -188,32 +337,40 @@ class TunesWindow(Adw.ApplicationWindow):
         self._sync_shell_controls()
 
     def _apply_window_min_width(self) -> None:
-        min_width = album_grid_min_content_width()
+        min_width = release_grid_min_content_width()
         _min_w, min_h = self.get_size_request()
         if min_h < 0:
             min_h = 400
         self.set_size_request(min_width, min_h)
 
-    def _album_grid_inner_width(self) -> int:
+    def _release_grid_inner_width(self) -> int:
         window_width = self.get_width()
         if window_width < 64:
             return 0
-        return max(0, window_width - 2 * ALBUM_GRID_VIEW_MARGIN)
+        return max(0, window_width - 2 * RELEASE_GRID_VIEW_MARGIN)
 
     def _effective_shell_state(self) -> ShellState:
         if not available_sources(self._service):
             return ShellState()
         return self._shell_state
 
-    def _selection_cache_key(self, state: ShellState) -> tuple[str, str]:
-        query = state.search_query.strip() if state.base == ShellBase.SEARCH else ""
-        return (state.base.value, query)
+    def _selection_cache_key(self, state: ShellState) -> tuple[str, str, str]:
+        if state.base == ShellBase.SEARCH:
+            return (
+                state.base.value,
+                state.search_query.strip(),
+                state.search_scope.value,
+            )
+        return (state.base.value, "", SearchScope.ALL.value)
 
     def _selection_identity_changed(self, previous: ShellState, current: ShellState) -> bool:
         if previous.base != current.base:
             return True
-        if current.base == ShellBase.SEARCH and previous.search_query != current.search_query:
-            return True
+        if current.base == ShellBase.SEARCH:
+            if previous.search_query != current.search_query:
+                return True
+            if previous.search_scope != current.search_scope:
+                return True
         return False
 
     def _cache_matches(self, state: ShellState) -> bool:
@@ -222,16 +379,34 @@ class TunesWindow(Adw.ApplicationWindow):
             and self._cached_selection_key == self._selection_cache_key(state)
         )
 
-    def _invalidate_selection_cache(self) -> None:
+    def _invalidate_selection_cache(self, *, clear_persisted: bool = False) -> None:
         self._cached_selection_key = None
         self._cached_releases = []
+        if clear_persisted and self._shell_state.cached_releases:
+            self._shell_state = replace(self._shell_state, cached_releases=())
 
     def _store_selection_cache(self, state: ShellState, releases: list[Release]) -> None:
         self._cached_selection_key = self._selection_cache_key(state)
-        self._cached_releases = list(releases)
+        self._cached_releases = self._service.expand_releases_with_cache(list(releases))
+        self._sync_release_type_multi()
+        self._sync_genre_filter()
+        self._sync_quality_filter()
+        self._sync_sort_switch()
+
+    def _available_sources(self) -> frozenset[Source]:
+        return frozenset(available_sources(self._service))
 
     def _filtered_from_cache(self, state: ShellState) -> list[Release]:
-        return apply_source_filter(self._cached_releases, state.enabled_sources)
+        return apply_shell_view_filters(
+            self._cached_releases,
+            enabled_sources=state.enabled_sources,
+            enabled_genres=state.enabled_genres,
+            enabled_release_types=state.enabled_release_types,
+            enabled_quality_tiers=state.enabled_quality_tiers,
+            available_sources=self._available_sources(),
+            sort_key=state.sort_key,
+            sort_descending=state.sort_descending,
+        )
 
     def _display_cached_selection(self, state: ShellState | None = None) -> None:
         state = state or self._effective_shell_state()
@@ -243,27 +418,37 @@ class TunesWindow(Adw.ApplicationWindow):
             releases=releases,
             empty_message=self._empty_message(state, releases),
             title=self._grid_title(state),
+            sync_populate=True,
         )
 
-    def _set_shell_state(self, state: ShellState, *, reload: bool = True) -> None:
+    def _set_shell_state(
+        self,
+        state: ShellState,
+        *,
+        reload: bool = True,
+        clear_selection_history: bool = True,
+        restoring_history: bool = False,
+    ) -> None:
         identity_changed = self._selection_identity_changed(self._shell_state, state)
-        if identity_changed:
-            state = ShellState(
-                base=state.base,
-                search_query=state.search_query,
-                enabled_sources=state.enabled_sources,
+        if identity_changed and clear_selection_history:
+            self._clear_selection_history()
+        if identity_changed and not restoring_history:
+            state = replace(
+                state,
+                enabled_genres=frozenset(),
+                sort_key=None,
                 cached_releases=(),
             )
         self._shell_state = state
         self._sync_shell_controls()
         self._schedule_persist()
-        if not reload:
-            return
-        if identity_changed:
-            self._invalidate_selection_cache()
-            self._reload_grid()
-        else:
-            self._display_cached_selection(state)
+        if reload:
+            if identity_changed:
+                self._invalidate_selection_cache()
+                self._reload_grid()
+            else:
+                self._display_cached_selection(state)
+        self._sync_header_with_nav()
 
     def _sync_shell_controls(self) -> None:
         state = self._shell_state
@@ -271,6 +456,7 @@ class TunesWindow(Adw.ApplicationWindow):
         try:
             self._new_music_btn.set_active(state.base == ShellBase.NEW_MUSIC)
             self._suggestion_btn.set_active(state.base == ShellBase.SUGGESTION)
+            self._all_local_btn.set_active(state.base == ShellBase.ALL_LOCAL)
         finally:
             self._updating_preset = False
 
@@ -278,20 +464,167 @@ class TunesWindow(Adw.ApplicationWindow):
             current = self._search_entry.get_text()
             if current != state.search_query:
                 self._search_entry.set_text(state.search_query)
-        elif state.base in (ShellBase.NEW_MUSIC, ShellBase.SUGGESTION):
+        elif state.base in (ShellBase.NEW_MUSIC, ShellBase.SUGGESTION, ShellBase.ALL_LOCAL):
             if self._search_entry.get_text():
                 self._search_entry.set_text("")
 
+        self._all_local_btn.set_visible(Source.LOCAL in available_sources(self._service))
         self._sync_source_multi()
+        self._sync_release_type_multi()
+        self._sync_genre_filter()
+        self._sync_quality_filter()
+        self._sync_sort_switch()
+
+    def _sync_sort_switch(self) -> None:
+        show = bool(self._cached_releases)
+        self._sort_slot.set_visible(show)
+        if not show:
+            return
+        state = self._shell_state
+        if self._sort_switch is None:
+            self._sort_switch = ReleaseSortSwitch(
+                sort_key=state.sort_key,
+                sort_descending=state.sort_descending,
+                on_changed=self._on_sort_changed,
+            )
+            self._sort_slot.append(self._sort_switch)
+        else:
+            self._sort_switch.set_sort_state(state.sort_key, state.sort_descending)
+
+    def _on_sort_changed(self, sort_key: str | None, sort_descending: bool) -> None:
+        self._set_shell_sort(sort_key, sort_descending)
+
+    def _set_shell_sort(self, sort_key: str | None, sort_descending: bool) -> None:
+        state = self._shell_state
+        if state.sort_key == sort_key and state.sort_descending == sort_descending:
+            return
+        self._shell_state = replace(
+            state,
+            sort_key=sort_key,
+            sort_descending=sort_descending,
+        )
+        if self._sort_switch is not None:
+            self._sort_switch.set_sort_state(sort_key, sort_descending)
+        self._schedule_persist()
+        self._display_cached_selection()
+
+    def _sync_release_type_multi(self) -> None:
+        show = bool(self._cached_releases)
+        self._release_type_slot.set_visible(show)
+        if not show:
+            return
+        if self._release_type_multi is None:
+            self._release_type_multi = ReleaseTypeMultiSwitch(
+                enabled_release_types=self._shell_state.enabled_release_types,
+                on_changed=self._on_release_type_multi_changed,
+            )
+            self._release_type_slot.append(self._release_type_multi)
+        else:
+            self._release_type_multi.set_enabled_release_types(
+                self._shell_state.enabled_release_types,
+            )
+
+    def _on_release_type_multi_changed(self, enabled_release_types: frozenset[str]) -> None:
+        self._set_enabled_release_types(enabled_release_types)
+
+    def _set_enabled_release_types(self, enabled_release_types: frozenset[str]) -> None:
+        state = self._shell_state
+        if state.enabled_release_types == enabled_release_types:
+            return
+        self._shell_state = replace(
+            state,
+            enabled_release_types=enabled_release_types,
+        )
+        if self._release_type_multi is not None:
+            self._release_type_multi.set_enabled_release_types(enabled_release_types)
+        self._schedule_persist()
+        self._display_cached_selection()
+
+    def _sync_quality_filter(self) -> None:
+        available = quality_tiers_in_selection(self._cached_releases)
+        show = bool(self._cached_releases)
+        state = self._shell_state
+        pruned = prune_enabled_quality_tiers(state.enabled_quality_tiers, available)
+        if pruned != state.enabled_quality_tiers:
+            self._shell_state = replace(state, enabled_quality_tiers=pruned)
+            state = self._shell_state
+
+        self._quality_filter_slot.set_visible(show)
+        if not show:
+            return
+
+        if self._quality_filter_multi is None:
+            self._quality_filter_multi = QualityMultiSwitch(
+                enabled_quality_tiers=state.enabled_quality_tiers,
+                on_changed=self._on_quality_filter_changed,
+            )
+            self._quality_filter_slot.append(self._quality_filter_multi)
+        else:
+            self._quality_filter_multi.set_enabled_quality_tiers(
+                state.enabled_quality_tiers,
+            )
+
+    def _on_quality_filter_changed(self, enabled_quality_tiers: frozenset[str]) -> None:
+        self._set_enabled_quality_tiers(enabled_quality_tiers)
+
+    def _set_enabled_quality_tiers(self, enabled_quality_tiers: frozenset[str]) -> None:
+        state = self._shell_state
+        if state.enabled_quality_tiers == enabled_quality_tiers:
+            return
+        self._shell_state = replace(state, enabled_quality_tiers=enabled_quality_tiers)
+        self._service.config.update_shell_quality_tiers(enabled_quality_tiers)
+        if self._quality_filter_multi is not None:
+            self._quality_filter_multi.set_enabled_quality_tiers(enabled_quality_tiers)
+        self._schedule_persist()
+        self._display_cached_selection()
+
+    def _enabled_quality_tiers_for_playback(self) -> frozenset[str]:
+        return self._shell_state.enabled_quality_tiers
+
+    def _sync_genre_filter(self) -> None:
+        available = genres_in_selection(self._cached_releases)
+        show = bool(self._cached_releases)
+        state = self._shell_state
+        pruned = prune_enabled_genres(state.enabled_genres, available)
+        if pruned != state.enabled_genres:
+            self._shell_state = replace(state, enabled_genres=pruned)
+            state = self._shell_state
+
+        self._genre_filter_slot.set_visible(show)
+        if not show:
+            return
+
+        if self._genre_filter is None:
+            self._genre_filter = GenreFilterMenu(
+                on_changed=self._on_genre_filter_changed,
+            )
+            self._genre_filter.set_hexpand(False)
+            self._genre_filter_slot.append(self._genre_filter)
+        self._genre_filter.set_genres(available, state.enabled_genres)
+
+    def _on_genre_filter_changed(self, enabled_genres: frozenset[str]) -> None:
+        self._set_enabled_genres(enabled_genres)
+
+    def _set_enabled_genres(self, enabled_genres: frozenset[str]) -> None:
+        state = self._shell_state
+        if state.enabled_genres == enabled_genres:
+            return
+        self._shell_state = replace(state, enabled_genres=enabled_genres)
+        if self._genre_filter is not None:
+            self._genre_filter.set_enabled_genres(enabled_genres)
+        self._schedule_persist()
+        self._display_cached_selection()
 
     def _rebuild_source_filters(self) -> None:
         sources = available_sources(self._service)
+        pruned = prune_enabled_sources(self._shell_state.enabled_sources, sources)
+        if pruned != self._shell_state.enabled_sources:
+            self._shell_state = replace(self._shell_state, enabled_sources=pruned)
         if len(sources) <= 1:
             self._source_row.set_visible(False)
             if self._shell_state.enabled_sources:
-                self._shell_state = ShellState(
-                    base=self._shell_state.base,
-                    search_query=self._shell_state.search_query,
+                self._shell_state = replace(
+                    self._shell_state,
                     enabled_sources=frozenset(),
                 )
             self._source_multi = None
@@ -324,11 +657,7 @@ class TunesWindow(Adw.ApplicationWindow):
         state = self._shell_state
         if state.enabled_sources == enabled_sources:
             return
-        self._shell_state = ShellState(
-            base=state.base,
-            search_query=state.search_query,
-            enabled_sources=enabled_sources,
-        )
+        self._shell_state = replace(state, enabled_sources=enabled_sources)
         self._sync_source_multi()
         self._schedule_persist()
         self._display_cached_selection()
@@ -349,26 +678,74 @@ class TunesWindow(Adw.ApplicationWindow):
         elif self._shell_state.base == ShellBase.SUGGESTION:
             button.set_active(True)
 
+    def _on_all_local_toggled(self, button: Gtk.ToggleButton) -> None:
+        if getattr(self, "_updating_preset", False):
+            return
+        if button.get_active():
+            self._activate_preset(ShellBase.ALL_LOCAL)
+        elif self._shell_state.base == ShellBase.ALL_LOCAL:
+            button.set_active(True)
+
+    def _commit_selection_change(
+        self,
+        next_state: ShellState,
+        *,
+        skip_history_push: bool = False,
+    ) -> None:
+        if (
+            not skip_history_push
+            and self._selection_identity_changed(self._shell_state, next_state)
+        ):
+            self._push_selection_history()
+        if not self._nav_at_root():
+            self._main_nav.pop()
+        self._set_shell_state(next_state, clear_selection_history=False)
+
     def _activate_preset(self, base: ShellBase) -> None:
-        self._set_shell_state(
-            ShellState(
-                base=base,
-                search_query="",
-                enabled_sources=self._shell_state.enabled_sources,
-            ),
+        enabled_sources = self._shell_state.enabled_sources
+        if base == ShellBase.ALL_LOCAL:
+            enabled_sources = ensure_source_enabled(
+                enabled_sources,
+                Source.LOCAL,
+                available=available_sources(self._service),
+            )
+        next_state = replace(
+            self._shell_state,
+            base=base,
+            search_query="",
+            search_scope=SearchScope.ALL,
+            enabled_sources=enabled_sources,
+            cached_releases=(),
         )
+        self._commit_selection_change(next_state)
 
     def _on_search_activate(self, entry: Gtk.SearchEntry) -> None:
-        query = entry.get_text().strip()
-        if not query:
+        self._navigate_to_search(entry.get_text())
+
+    def _navigate_to_search(
+        self,
+        query: str,
+        *,
+        search_scope: SearchScope = SearchScope.ALL,
+    ) -> None:
+        """Run a search query, keeping prior results on the selection Back stack."""
+        text = query.strip()
+        if not text:
             return
-        self._set_shell_state(
-            ShellState(
-                base=ShellBase.SEARCH,
-                search_query=query,
-                enabled_sources=self._shell_state.enabled_sources,
-            ),
+        next_state = replace(
+            self._shell_state,
+            base=ShellBase.SEARCH,
+            search_query=text,
+            search_scope=search_scope,
+            cached_releases=(),
         )
+        same_query = (
+            self._shell_state.base == ShellBase.SEARCH
+            and self._shell_state.search_query.strip() == text
+            and self._shell_state.search_scope == search_scope
+        )
+        self._search_entry.set_text(text)
+        self._commit_selection_change(next_state, skip_history_push=same_query)
 
     def _schedule_persist(self) -> None:
         if self._persist_timeout_id:
@@ -385,10 +762,8 @@ class TunesWindow(Adw.ApplicationWindow):
             cached_payloads = tuple(
                 release_to_cache_payload(release) for release in self._cached_releases
             )
-        return ShellState(
-            base=state.base,
-            search_query=state.search_query,
-            enabled_sources=state.enabled_sources,
+        return replace(
+            state,
             cached_releases=cached_payloads,
         )
 
@@ -404,84 +779,156 @@ class TunesWindow(Adw.ApplicationWindow):
         self._service.config.set_shell_state(self._shell_state_for_persist())
         return False
 
-    def _try_restore_persisted_grid(self, state: ShellState) -> bool:
-        if state.base == ShellBase.NONE or not state.cached_releases:
+    def _refresh_cached_release_quality(self, releases: list[Release]) -> list[Release]:
+        if not any(release.source == Source.LOCAL for release in releases):
+            return releases
+        local_releases = self._service.list_releases()
+        local_tier_by_id = {
+            release.id: release.peak_quality_tier for release in local_releases
+        }
+        local_available_by_id = {
+            release.id: release.available_quality_tiers for release in local_releases
+        }
+        return refresh_local_peak_quality_tiers(
+            releases,
+            local_tier_by_id=local_tier_by_id,
+            local_available_tiers_by_id=local_available_by_id,
+        )
+
+    def _persisted_grid_cache_stale(self, state: ShellState) -> bool:
+        if state.base != ShellBase.ALL_LOCAL:
             return False
+        if not self._service.config.config.music_folders:
+            return False
+        cached_count = len(state.cached_releases)
+        if cached_count == 0:
+            return False
+        return cached_count != self._service.store.release_count()
+
+    def _restore_persisted_releases(self, state: ShellState) -> list[Release] | None:
+        """Deserialize persisted grid rows when still valid (safe off the UI thread)."""
+        if state.base == ShellBase.NONE or not state.cached_releases:
+            return None
+        available = self._available_sources()
+        if state.base == ShellBase.ALL_LOCAL and Source.LOCAL not in available:
+            return None
+        if self._persisted_grid_cache_stale(state):
+            return None
+        if not cached_releases_compatible_with_available(state.cached_releases, available):
+            return None
         releases = releases_from_cache_payloads(state.cached_releases)
         if not releases:
-            return False
+            return None
+        releases = filter_releases_to_available_sources(releases, available)
+        if not releases:
+            return None
+        if not cached_releases_have_quality_tiers(state.cached_releases):
+            releases = self._refresh_cached_release_quality(releases)
+        return self._service.expand_releases_with_cache(releases)
+
+    def _load_releases_for_state(self, state: ShellState) -> list[Release]:
+        restored = self._restore_persisted_releases(state)
+        if restored is not None:
+            return restored
+        return fetch_base_releases(
+            self._service,
+            state.base,
+            search_query=state.search_query,
+            search_scope=state.search_scope,
+        )
+
+    def _show_grid_for_state(self, state: ShellState, releases: list[Release]) -> None:
         self._store_selection_cache(state, releases)
-        filtered = self._filtered_from_cache(state)
+        filtered = self._filtered_from_cache(self._shell_state)
         self._show_grid(
             releases=filtered,
-            empty_message=self._empty_message(state, filtered),
-            title=self._grid_title(state),
+            empty_message=self._empty_message(self._shell_state, filtered),
+            title=self._grid_title(self._shell_state),
+            sync_populate=True,
         )
-        return True
+        self._schedule_persist()
+        self._start_catalog_quality_enrich(self._load_token)
+
+    def _try_show_grid_sync(self, state: ShellState) -> bool:
+        restored = self._restore_persisted_releases(state)
+        if restored is not None:
+            self._show_grid_for_state(state, restored)
+            return True
+        if state.base == ShellBase.ALL_LOCAL:
+            releases = fetch_base_releases(
+                self._service,
+                state.base,
+                search_query=state.search_query,
+                search_scope=state.search_scope,
+            )
+            self._show_grid_for_state(state, releases)
+            return True
+        return False
 
     def _reload_grid(self) -> bool:
         state = self._effective_shell_state()
 
-        if self._try_restore_persisted_grid(state):
+        if state.base == ShellBase.NONE:
+            self._store_selection_cache(state, [])
+            self._show_grid(
+                releases=[],
+                empty_message=self._empty_message(state, []),
+                title=self._grid_title(state),
+                sync_populate=True,
+            )
             return False
 
-        if state.base in (ShellBase.NEW_MUSIC, ShellBase.SUGGESTION):
-            self._start_async_load(state.base)
+        if self._try_show_grid_sync(state):
             return False
 
-        releases = fetch_base_releases(
-            self._service,
-            state.base,
-            search_query=state.search_query,
-        )
-        self._store_selection_cache(state, releases)
-        filtered = self._filtered_from_cache(state)
-        self._show_grid(
-            releases=filtered,
-            empty_message=self._empty_message(state, filtered),
-            title=self._grid_title(state),
-        )
-        self._schedule_persist()
+        self._start_async_load(state)
         return False
 
-    def _start_async_load(self, base: ShellBase) -> None:
+    def _async_load_matches(self, request: ShellState) -> bool:
+        current = self._shell_state
+        if current.base != request.base:
+            return False
+        if request.base == ShellBase.SEARCH:
+            return (
+                current.search_query == request.search_query
+                and current.search_scope == request.search_scope
+            )
+        return True
+
+    def _start_async_load(self, state: ShellState) -> None:
         self._load_token += 1
         token = self._load_token
-        self._show_grid_loading(base)
+        self._show_grid_loading(state)
 
         def work() -> None:
             try:
-                releases = fetch_base_releases(self._service, base)
-                GLib.idle_add(self._finish_async_load, token, base, releases, None)
+                releases = self._load_releases_for_state(state)
+                GLib.idle_add(self._finish_async_load, token, state, releases, None)
             except Exception as exc:
-                log.exception("Shell load failed for %s", base.value)
-                GLib.idle_add(self._finish_async_load, token, base, None, exc)
+                log.exception("Shell load failed for %s", state.base.value)
+                GLib.idle_add(self._finish_async_load, token, state, None, exc)
 
         threading.Thread(target=work, daemon=True).start()
 
     def _finish_async_load(
         self,
         token: int,
-        base: ShellBase,
+        request: ShellState,
         releases: list | None,
         error: BaseException | None,
     ) -> bool:
         if token != self._load_token:
             return False
-        if self._shell_state.base != base:
+        if not self._async_load_matches(request):
             return False
 
-        label = _PRESET_LABELS[base]
+        title = self._grid_title(request)
         if error is not None:
-            show_error_toast(
-                self._toast_overlay,
-                f"Could not load {label}. Check your connection and sign-in.",
-            )
-            view = PlaceholderView(
-                title=label,
-                message=f"Could not load {label}. Try again in a moment.",
-            )
-            self._replace_root_page(title=label, child=view)
+            toast, message = self._async_load_error_copy(request, title=title)
+            show_error_toast(self._toast_overlay, toast)
+            view = PlaceholderView(title=title, message=message)
+            self._replace_root_page(title=title, child=view)
+            self._hide_release_count_label()
             return False
 
         loaded = releases or []
@@ -490,18 +937,204 @@ class TunesWindow(Adw.ApplicationWindow):
         self._show_grid(
             releases=filtered,
             empty_message=self._empty_message(self._shell_state, filtered),
-            title=label,
+            title=title,
+        )
+        self._schedule_persist()
+        self._start_catalog_quality_enrich(token)
+        return False
+
+    def _releases_for_catalog_enrich(self) -> list[Release]:
+        state = self._shell_state
+        return apply_catalog_enrich_scope_filters(
+            self._cached_releases,
+            enabled_sources=state.enabled_sources,
+            enabled_genres=state.enabled_genres,
+            enabled_release_types=state.enabled_release_types,
+            available_sources=self._available_sources(),
+        )
+
+    def _start_catalog_quality_enrich(self, token: int) -> None:
+        if self._shell_state.base == ShellBase.ALL_LOCAL:
+            return
+        pending_ids: list[str] = []
+        seen_catalog_ids: set[str] = set()
+        for release in self._releases_for_catalog_enrich():
+            if not streaming_catalog_quality_needs_enrich(release):
+                continue
+            catalog_id = (
+                release.catalog_release_id
+                or parse_catalog_release_id(release.id)
+                or release.id
+            )
+            if catalog_id in seen_catalog_ids:
+                continue
+            seen_catalog_ids.add(catalog_id)
+            pending_ids.append(catalog_id)
+        if not pending_ids:
+            return
+
+        visible_ids_before = tuple(
+            release.id for release in self._filtered_from_cache(self._shell_state)
+        )
+
+        def work() -> None:
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=_CATALOG_ENRICH_CONCURRENCY,
+                thread_name_prefix="tunes-catalog-enrich",
+            ) as pool:
+                futures = {
+                    pool.submit(self._service.enrich_catalog_quality, release_id): release_id
+                    for release_id in pending_ids
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    if token != self._load_token:
+                        return
+                    release_id = futures[future]
+                    try:
+                        enriched = future.result()
+                    except Exception:
+                        log.debug(
+                            "Catalog quality enrich failed for %s",
+                            release_id,
+                            exc_info=True,
+                        )
+                        continue
+                    if enriched is None:
+                        continue
+                    GLib.idle_add(self._patch_enriched_release, token, enriched)
+            GLib.idle_add(self._finalize_catalog_enrich, token, visible_ids_before)
+
+        threading.Thread(
+            target=work,
+            daemon=True,
+            name="tunes-catalog-enrich",
+        ).start()
+
+    def _patch_enriched_release(self, token: int, enriched: Release) -> bool:
+        if token != self._load_token:
+            return False
+        catalog_id = enriched.catalog_release_id or enriched.id
+        catalog_releases: dict[str, Release] = {}
+        patched = False
+        for release in self._cached_releases:
+            release_catalog_id = (
+                release.catalog_release_id
+                or parse_catalog_release_id(release.id)
+                or release.id
+            )
+            if release_catalog_id == catalog_id:
+                catalog_releases[catalog_id] = enriched
+                patched = True
+            elif release_catalog_id not in catalog_releases:
+                catalog_releases[release_catalog_id] = release
+        if not patched:
+            catalog_releases[catalog_id] = enriched
+        self._cached_releases = self._service.expand_releases_with_cache(
+            list(catalog_releases.values()),
+        )
+        return False
+
+    def _finalize_catalog_enrich(
+        self,
+        token: int,
+        visible_ids_before: tuple[str, ...],
+    ) -> bool:
+        if token != self._load_token:
+            return False
+        catalog_releases: dict[str, Release] = {}
+        for release in self._cached_releases:
+            catalog_id = (
+                release.catalog_release_id
+                or parse_catalog_release_id(release.id)
+                or release.id
+            )
+            if catalog_id not in catalog_releases:
+                catalog_releases[catalog_id] = release
+        self._cached_releases = self._service.expand_releases_with_cache(
+            list(catalog_releases.values()),
+        )
+        self._sync_quality_filter()
+        visible_ids_after = tuple(
+            release.id for release in self._filtered_from_cache(self._shell_state)
+        )
+        if visible_ids_after != visible_ids_before:
+            return self._refresh_grid_after_quality_expand()
+        return False
+
+    def _refresh_grid_after_quality_expand(self) -> bool:
+        filtered = self._filtered_from_cache(self._shell_state)
+        title = self._grid_title(self._shell_state)
+        self._show_grid(
+            releases=filtered,
+            empty_message=self._empty_message(self._shell_state, filtered),
+            title=title,
         )
         self._schedule_persist()
         return False
 
-    def _show_grid_loading(self, base: ShellBase) -> None:
-        title = _PRESET_LABELS[base]
-        message = _LOADING_MESSAGES.get(base, f"Loading {title}…")
+    def _async_load_error_copy(
+        self,
+        request: ShellState,
+        *,
+        title: str,
+    ) -> tuple[str, str]:
+        if request.base == ShellBase.SEARCH:
+            return (
+                "Search failed. Check your connection and sign-in.",
+                "Could not complete search. Try again in a moment.",
+            )
+        if request.base == ShellBase.ALL_LOCAL:
+            return (
+                "Could not load your local library.",
+                "Could not load All Local. Try again in a moment.",
+            )
+        return (
+            f"Could not load {title}. Check your connection and sign-in.",
+            f"Could not load {title}. Try again in a moment.",
+        )
+
+    def _loading_message(self, state: ShellState) -> str:
+        if state.base == ShellBase.SEARCH and state.search_query.strip():
+            return f'Searching for “{state.search_query}”…'
+        title = _PRESET_LABELS.get(state.base, "Tunes")
+        return _LOADING_MESSAGES.get(state.base, f"Loading {title}…")
+
+    def _show_grid_loading(self, state: ShellState) -> None:
+        title = self._grid_title(state)
         self._replace_root_page(
             title=title,
-            child=LoadingDiscoverView(message=message),
+            child=LoadingDiscoverView(message=self._loading_message(state)),
         )
+        self._sync_release_count_loading()
+
+    def _sync_release_count_label(
+        self,
+        *,
+        filtered_count: int,
+        catalog_count: int | None = None,
+    ) -> None:
+        if self._shell_state.base == ShellBase.NONE:
+            self._release_count_label.set_visible(False)
+            return
+        self._release_count_label.set_visible(True)
+        self._release_count_label.set_label(
+            format_release_count_label(
+                filtered_count=filtered_count,
+                catalog_count=catalog_count,
+            )
+        )
+
+    def _sync_release_count_loading(self) -> None:
+        if self._shell_state.base == ShellBase.NONE:
+            self._release_count_label.set_visible(False)
+            return
+        self._release_count_label.set_visible(True)
+        self._release_count_label.set_label("Loading…")
+
+    def _hide_release_count_label(self) -> None:
+        self._release_count_label.set_visible(False)
 
     def _show_grid(
         self,
@@ -509,18 +1142,37 @@ class TunesWindow(Adw.ApplicationWindow):
         releases: list,
         empty_message: str | None,
         title: str,
+        sync_populate: bool = False,
     ) -> None:
         view = ReleaseGridView(
             releases=releases,
             on_release_activated=self._open_release,
-            on_release_play=lambda release_id: self._service.play_release(
-                release_id, start_index=0
+            on_release_play=lambda release_id: self._service.play_or_toggle_release(
+                release_id,
+                start_index=0,
             ),
+            on_artist_search=self._search_for_artist,
             empty_message=empty_message,
             art_loader=self._art_loader,
-            window_inner_width_fn=self._album_grid_inner_width,
+            window_inner_width_fn=self._release_grid_inner_width,
+            service=self._service,
+            sync_populate=sync_populate,
         )
         self._replace_root_page(title=title, child=view)
+        catalog_count = (
+            len(self._cached_releases)
+            if self._cache_matches(self._shell_state)
+            else None
+        )
+        self._sync_release_count_label(
+            filtered_count=len(releases),
+            catalog_count=catalog_count,
+        )
+
+    def _catalog_releases_for_message(self, state: ShellState) -> list[Release]:
+        if self._cache_matches(state) and self._cached_releases:
+            return self._cached_releases
+        return []
 
     def _empty_message(self, state: ShellState, releases: list) -> str | None:
         if releases:
@@ -529,28 +1181,14 @@ class TunesWindow(Adw.ApplicationWindow):
             return _ONBOARDING_MESSAGE
         if state.base == ShellBase.NONE:
             return _ONBOARDING_MESSAGE
-        if state.base == ShellBase.SEARCH:
-            if not state.search_query.strip():
-                return _ONBOARDING_MESSAGE
-            return f'No results for “{state.search_query}”.'
-        if state.base == ShellBase.NEW_MUSIC:
-            days = self._service.config.config.new_music_within_days
-            return (
-                f"Nothing new in the last {days} days.\n"
-                "Add music folders or sign in to TIDAL or Qobuz in Settings → Sources."
-            )
-        if state.base == ShellBase.SUGGESTION:
-            return (
-                "Play music to build suggestions from your library, or sign in to "
-                "TIDAL or Qobuz in Settings → Sources."
-            )
-        if state.enabled_sources:
-            names = ", ".join(
-                source_label(source)
-                for source in sorted(state.enabled_sources, key=lambda s: s.value)
-            )
-            return f"No releases from {names} in this selection."
-        return None
+        if state.base == ShellBase.SEARCH and not state.search_query.strip():
+            return _ONBOARDING_MESSAGE
+        catalog = self._catalog_releases_for_message(state)
+        return empty_grid_message(
+            self._service,
+            state,
+            catalog_count=len(catalog),
+        )
 
     def _grid_title(self, state: ShellState) -> str:
         if state.base == ShellBase.SEARCH and state.search_query.strip():
@@ -591,6 +1229,16 @@ class TunesWindow(Adw.ApplicationWindow):
                 return
         self._service.toggle_play_pause()
 
+    def _open_current_release(self) -> None:
+        state = self._service.get_playback_state()
+        track = state.current_track
+        if track is None:
+            return
+        release_id = self._service.release_id_for_track(track)
+        if release_id is None:
+            return
+        self._open_release(release_id)
+
     def _open_release(self, release_id: str) -> None:
         release = self._service.get_release(release_id)
         if release is None:
@@ -610,17 +1258,37 @@ class TunesWindow(Adw.ApplicationWindow):
         self._main_nav.push(page)
         self._sync_header_with_nav()
 
+    def _clear_selection_history(self) -> None:
+        self._selection_stack.clear()
+
+    def _capture_selection_snapshot(self) -> _SelectionSnapshot:
+        state = self._shell_state
+        if self._cache_matches(state) and self._cached_releases:
+            payloads = tuple(
+                release_to_cache_payload(release) for release in self._cached_releases
+            )
+            state = replace(state, cached_releases=payloads)
+        return _SelectionSnapshot(state=state, releases=tuple(self._cached_releases))
+
+    def _push_selection_history(self) -> None:
+        self._selection_stack.append(self._capture_selection_snapshot())
+
+    def _restore_selection_snapshot(self, snapshot: _SelectionSnapshot) -> None:
+        releases = list(snapshot.releases)
+        if not releases and snapshot.state.cached_releases:
+            releases = releases_from_cache_payloads(snapshot.state.cached_releases)
+        self._shell_state = snapshot.state
+        self._sync_shell_controls()
+        if releases:
+            self._store_selection_cache(snapshot.state, releases)
+        else:
+            self._invalidate_selection_cache()
+        self._display_cached_selection()
+        self._schedule_persist()
+        self._sync_header_with_nav()
+
     def _search_for_artist(self, artist_name: str) -> None:
-        if not self._nav_at_root():
-            self._main_nav.pop()
-        self._search_entry.set_text(artist_name)
-        self._set_shell_state(
-            ShellState(
-                base=ShellBase.SEARCH,
-                search_query=artist_name,
-                enabled_sources=self._shell_state.enabled_sources,
-            ),
-        )
+        self._navigate_to_search(artist_name, search_scope=SearchScope.ARTIST)
 
     def _open_preferences(self, *_args: object) -> None:
         if self._preferences is None:
@@ -639,15 +1307,58 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _on_service_event(self, event: str) -> bool:
         if event == "library_updated":
-            GLib.idle_add(self._on_sources_or_library_changed)
+            GLib.idle_add(self._on_library_updated)
         elif event == "sources_changed":
             GLib.idle_add(self._on_sources_or_library_changed)
+        elif event == "art_updated":
+            GLib.idle_add(self._on_art_updated)
+        return False
+
+    def _on_art_updated(self) -> bool:
+        if self._cached_releases:
+            self._cached_releases = self._service.refresh_local_release_art_uris(
+                self._cached_releases
+            )
+        page = self._main_nav.get_visible_page()
+        if page is not None:
+            child = page.get_child()
+            if isinstance(child, ReleaseGridView):
+                child.refresh_artwork(self._cached_releases)
         return False
 
     def _on_sources_or_library_changed(self) -> bool:
         self._rebuild_source_filters()
-        self._invalidate_selection_cache()
+        self._sync_shell_controls()
+        self._invalidate_selection_cache(clear_persisted=True)
         self._reload_grid()
+        return False
+
+    def _on_library_updated(self) -> bool:
+        if not self._nav_at_root():
+            return False
+
+        state = self._effective_shell_state()
+        if state.base == ShellBase.ALL_LOCAL:
+            releases = fetch_base_releases(
+                self._service,
+                state.base,
+                search_query=state.search_query,
+                search_scope=state.search_scope,
+            )
+            self._store_selection_cache(state, releases)
+            if self._cache_matches(state):
+                self._display_cached_selection(state)
+                self._schedule_persist()
+            return False
+
+        if self._cached_releases and any(
+            release.source == Source.LOCAL for release in self._cached_releases
+        ):
+            refreshed = self._refresh_cached_release_quality(list(self._cached_releases))
+            self._store_selection_cache(state, refreshed)
+            if self._cache_matches(state):
+                self._display_cached_selection(state)
+                self._schedule_persist()
         return False
 
     def _open_queue_sheet(self, *_args: object) -> None:
@@ -668,15 +1379,21 @@ class TunesWindow(Adw.ApplicationWindow):
             return True
         return page.get_tag() == _GRID_ROOT_TAG
 
+    def _can_go_back(self) -> bool:
+        return not self._nav_at_root() or bool(self._selection_stack)
+
     def _sync_header_with_nav(self) -> None:
         at_root = self._nav_at_root()
         self._shell_controls.set_visible(at_root)
-        self._back_btn.set_visible(not at_root)
+        self._back_btn.set_visible(self._can_go_back())
 
     def _on_nav_back(self, *_args: object) -> None:
-        if self._nav_at_root():
+        if not self._nav_at_root():
+            self._main_nav.pop()
+            self._sync_header_with_nav()
             return
-        self._main_nav.pop()
+        if self._selection_stack:
+            self._restore_selection_snapshot(self._selection_stack.pop())
 
     def _on_nav_visible_page_changed(self, *_args: object) -> None:
         self._sync_header_with_nav()
@@ -686,11 +1403,19 @@ def run() -> int:
     from tunes_player.core.config import ConfigManager
 
     load_app_css()
+    Gtk.Window.set_default_icon_name("tunes-player")
     config = ConfigManager()
     config.load()
     configure_logging(config.data_dir)
     volume_controller = create_volume_controller(config.config)
-    service = PlayerService(config=config, volume_controller=volume_controller)
+    service = PlayerService(
+        config=config,
+        volume_controller=volume_controller,
+        main_thread_hook=lambda fn: GLib.idle_add(
+            fn,
+            priority=GLib.PRIORITY_DEFAULT_IDLE,
+        ),
+    )
     mpris_service = None
 
     class TunesApplication(Adw.Application):
@@ -698,10 +1423,14 @@ def run() -> int:
             window = self.get_active_window()
             if window is None:
                 window = TunesWindow(application=self, service=service)
+                if not window.get_realized():
+                    window.realize()
+                window.prepare_for_first_show()
             window.present()
 
         def do_shutdown(self) -> None:  # noqa: N802 — GTK vfunc
-            nonlocal mpris_service
+            nonlocal mpris_service, folder_monitor
+            folder_monitor.stop()
             if mpris_service is not None:
                 mpris_service.stop()
                 mpris_service = None
@@ -717,6 +1446,11 @@ def run() -> int:
 
     from tunes_player.platform.linux.mpris import create_mpris_service
 
+    from tunes_player.ui.gtk.folder_monitor import FolderMonitorManager
+
+    folder_monitor = FolderMonitorManager(service)
+    folder_monitor.start()
+
     mpris_service = create_mpris_service(
         service,
         on_raise=_raise_app,
@@ -728,5 +1462,19 @@ def run() -> int:
         service.poll_playback()
         return True
 
+    def _poll_scan() -> bool:
+        service.poll_scan()
+        return True
+
     GLib.timeout_add(100, _poll_playback)
+    GLib.timeout_add(500, _poll_scan)
+
+    import signal
+
+    def _quit_on_signal(*_args: object) -> bool:
+        app.quit()
+        return False
+
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, _quit_on_signal)
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, _quit_on_signal)
     return app.run(None)

@@ -7,6 +7,7 @@ import unittest
 from tunes_player.core.backends.tidal.client import (
     _category_is_new_release_rail,
     _category_is_recommendation_rail,
+    _collect_tidal_page_objects,
 )
 
 
@@ -45,6 +46,47 @@ class TestCategoryIsRecommendationRail(unittest.TestCase):
             mix_type=_FakeMixType("NEW_RELEASE_MIX"),
         )
         self.assertFalse(_category_is_recommendation_rail(category))
+
+
+class _FakePage:
+    def __init__(self, categories: list[object]) -> None:
+        self.categories = categories
+
+
+class _FakeItem:
+    pass
+
+
+class TestTidalRailFilter(unittest.TestCase):
+    def test_new_releases_filter_skips_recommendation_categories(self) -> None:
+        new_category = _FakeCategory(title="New releases")
+        new_category.items = [_FakeItem()]
+        rec_category = _FakeCategory(title="For You")
+        rec_category.items = [_FakeItem()]
+        page = _FakePage([new_category, rec_category])
+        collected = _collect_tidal_page_objects(
+            session=object(),
+            page=page,
+            visited=set(),
+            rail_filter="new_releases",
+        )
+        self.assertEqual(len(collected), 1)
+        self.assertTrue(collected[0].from_new_release_rail)
+
+    def test_recommendations_filter_skips_new_release_categories(self) -> None:
+        new_category = _FakeCategory(title="New releases")
+        new_category.items = [_FakeItem()]
+        rec_category = _FakeCategory(title="For You")
+        rec_category.items = [_FakeItem()]
+        page = _FakePage([new_category, rec_category])
+        collected = _collect_tidal_page_objects(
+            session=object(),
+            page=page,
+            visited=set(),
+            rail_filter="recommendations",
+        )
+        self.assertEqual(len(collected), 1)
+        self.assertTrue(collected[0].from_recommendation_rail)
 
 
 if __name__ == "__main__":

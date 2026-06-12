@@ -2,21 +2,35 @@
 
 from __future__ import annotations
 
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
+
+if TYPE_CHECKING:
+    from tunes_player.core.playback.output_profile import PlaybackOutputProfile
 
 EngineEvent = Literal[
     "position_changed",
     "duration_changed",
     "playing_changed",
+    "track_started",
+    "track_eof",
     "track_finished",
     "playback_error",
+    "playback_path_changed",
 ]
 
 
 class PlaybackEngine(Protocol):
     """Load URIs and emit lifecycle events from a background thread."""
 
-    def load(self, uri: str, *, start_sec: float = 0) -> None: ...
+    def load(
+        self,
+        uri: str,
+        *,
+        start_sec: float = 0,
+        output_profile: PlaybackOutputProfile | None = None,
+    ) -> None: ...
+
+    def set_output_profile(self, profile: PlaybackOutputProfile | None) -> None: ...
 
     def play(self) -> None: ...
 
@@ -24,7 +38,7 @@ class PlaybackEngine(Protocol):
 
     def stop(self) -> None: ...
 
-    def seek(self, position_sec: float) -> None: ...
+    def seek(self, position_sec: float, *, resume: bool | None = None) -> None: ...
 
     def set_volume(self, level: float) -> None: ...
 
@@ -32,7 +46,11 @@ class PlaybackEngine(Protocol):
 
     def get_position(self) -> float: ...
 
+    def query_time_pos(self) -> float: ...
+
     def get_duration(self) -> float | None: ...
+
+    def max_seek_position_sec(self) -> float | None: ...
 
     def is_playing(self) -> bool: ...
 

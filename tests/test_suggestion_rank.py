@@ -16,11 +16,9 @@ class TestSuggestionAddedNs(unittest.TestCase):
         self.assertGreater(local, tidal)
         self.assertGreater(local, qobuz)
 
-    def test_streaming_order_deezer_qobuz_tidal(self) -> None:
-        deezer = suggestion_added_ns(Source.DEEZER, index=0)
+    def test_streaming_order_qobuz_tidal(self) -> None:
         qobuz = suggestion_added_ns(Source.QOBUZ, index=0)
         tidal = suggestion_added_ns(Source.TIDAL, index=0)
-        self.assertGreater(deezer, qobuz)
         self.assertGreater(qobuz, tidal)
 
     def test_local_recency_within_group(self) -> None:

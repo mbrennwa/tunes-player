@@ -28,15 +28,15 @@ SUGGESTIONS_LOCAL_CONTINUE_LIMIT = 40
 SUGGESTIONS_LOCAL_REDISCOVER_LIMIT = 80
 SUGGESTIONS_REDISCOVER_IDLE_MONTHS = 18
 SUGGESTIONS_SIMILAR_LIMIT = 24
+SUGGESTIONS_SIMILAR_TIMEOUT_SEC = 8.0
 SUGGESTIONS_RECENT_GENRE_DAYS = 30
 
-# Merged suggestions sort: local first, then streaming by source name (Deezer, Qobuz, Tidal).
+# Merged suggestions sort: local first, then streaming by source name (Qobuz, Tidal).
 _SUGGESTION_SUB_SCALE = 10**15
 _SUGGESTION_LOCAL_BASE = 3 * 10**18
 _SUGGESTION_SOURCE_STEP = 10**16
-# Higher rank sorts earlier among streaming (alphabetical: deezer > qobuz > tidal).
+# Higher rank sorts earlier among streaming (alphabetical: qobuz > tidal).
 _STREAMING_SOURCE_RANK: dict[Source, int] = {
-    Source.DEEZER: 2,
     Source.QOBUZ: 1,
     Source.TIDAL: 0,
 }
@@ -50,7 +50,7 @@ def suggestion_added_ns(
 ) -> int:
     """Build a sort key (higher = earlier in the grid).
 
-    Local releases first; then streaming providers in name order (Deezer, Qobuz, TIDAL).
+    Local releases first; then streaming providers in name order (Qobuz, TIDAL).
     Within each group, newer plays or lower index rank higher.
     """
     if played_at_ns is not None:

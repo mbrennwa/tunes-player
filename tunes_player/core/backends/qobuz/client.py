@@ -39,6 +39,63 @@ class QobuzUnavailableError(RuntimeError):
     """Raised when Qobuz is not configured, login failed, or stream unavailable."""
 
 
+_QOBUZ_NO_RESULT_API_MESSAGE = "No result matching given argument"
+_TRACK_UNAVAILABLE_MESSAGE = "This track isn't available for streaming on Qobuz."
+
+
+def _user_facing_api_error(message: str, *, endpoint: str) -> str:
+    if message == _QOBUZ_NO_RESULT_API_MESSAGE and endpoint.startswith("track/"):
+        return _TRACK_UNAVAILABLE_MESSAGE
+    return message
+
+
+_ACOUSTIC_TIER_RANK = {
+    "compressed": 0,
+    "cd": 1,
+    "hi_res": 2,
+}
+
+
+def _qobuz_stream_acoustic_tier(stream: dict[str, Any]) -> str:
+    from tunes_player.core.release_quality import (
+        QUALITY_FILTER_COMPRESSED,
+        _normalize_sample_rate_hz,
+        acoustic_tier_from_stream,
+    )
+
+    if not stream.get("url"):
+        return QUALITY_FILTER_COMPRESSED
+    rate_hz = _normalize_sample_rate_hz(stream.get("sampling_rate"))
+    return acoustic_tier_from_stream(
+        bit_depth=stream.get("bit_depth"),
+        sample_rate_hz=rate_hz,
+        lossless=True,
+    )
+
+
+def _qobuz_minimum_acoustic_tier(preference: object) -> str:
+    from tunes_player.core.release_quality import (
+        QUALITY_FILTER_CD,
+        QUALITY_FILTER_COMPRESSED,
+        QUALITY_FILTER_HI_RES,
+        PlaybackPreference,
+    )
+
+    if not isinstance(preference, PlaybackPreference):
+        return QUALITY_FILTER_COMPRESSED
+    if preference.max_tier == QUALITY_FILTER_HI_RES:
+        return QUALITY_FILTER_HI_RES
+    if preference.max_tier == QUALITY_FILTER_CD:
+        return QUALITY_FILTER_CD
+    if preference.max_tier == QUALITY_FILTER_COMPRESSED:
+        return QUALITY_FILTER_COMPRESSED
+    return QUALITY_FILTER_COMPRESSED
+
+
+def _acoustic_tier_meets_minimum(tier: str, minimum: str) -> bool:
+    return _ACOUSTIC_TIER_RANK.get(tier, 0) >= _ACOUSTIC_TIER_RANK.get(minimum, 0)
+
+
 def sign_get_file_url(
     *,
     track_id: str,
@@ -143,7 +200,7 @@ class QobuzClient:
         for item in albums.get("items") or []:
             if not isinstance(item, dict):
                 continue
-            release = convert.release_from_qobuz(item)
+            release = convert.release_stub_from_qobuz(item)
             if release.id not in seen:
                 seen.add(release.id)
                 releases.append(release)
@@ -155,7 +212,7 @@ class QobuzClient:
             album = item.get("album")
             if not isinstance(album, dict):
                 continue
-            release = convert.release_from_qobuz(album)
+            release = convert.release_stub_from_qobuz(album)
             if release.id not in seen:
                 seen.add(release.id)
                 releases.append(release)
@@ -192,19 +249,23 @@ class QobuzClient:
                     batch = albums.get("items") or []
                     if not batch:
                         break
+                    batch_has_recent = False
                     for raw in batch:
                         if not isinstance(raw, dict):
                             continue
                         added_ns = _album_added_ns(raw)
                         if added_ns < cutoff_ns:
                             continue
-                        release = convert.release_from_qobuz(raw)
+                        batch_has_recent = True
+                        release = convert.release_stub_from_qobuz(raw)
                         if release.id in seen:
                             continue
                         seen.add(release.id)
                         items.append(RecentlyAddedItem(added_ns=added_ns, release=release))
                         if len(items) >= limit:
                             break
+                    if not batch_has_recent:
+                        break
                     if len(batch) < page_size:
                         break
                     offset += page_size
@@ -250,7 +311,7 @@ class QobuzClient:
                     for raw in batch:
                         if not isinstance(raw, dict):
                             continue
-                        release = convert.release_from_qobuz(raw)
+                        release = convert.release_stub_from_qobuz(raw)
                         if release.id in seen:
                             continue
                         seen.add(release.id)
@@ -283,6 +344,17 @@ class QobuzClient:
         except Exception:
             log.debug("Could not resolve Qobuz release for track %s", track_id, exc_info=True)
         return None
+
+    def get_release_summary(self, release_id: str) -> Release | None:
+        """Release metadata for grids without loading every track page."""
+        album_id = qobuz_ids.parse_prefixed_id(release_id, "album")
+        if album_id is None:
+            return None
+        self._require_login()
+        album = self._fetch_album_summary(album_id)
+        if album is None:
+            return None
+        return convert.release_from_qobuz(album)
 
     def get_release(self, release_id: str) -> Release | None:
         album_id = qobuz_ids.parse_prefixed_id(release_id, "album")
@@ -333,7 +405,18 @@ class QobuzClient:
             return queue, index
         return [track], 0
 
-    def resolve_playable(self, track_id: str) -> PlayableSource | None:
+    def resolve_playable(
+        self,
+        track_id: str,
+        *,
+        playback_preference: object | None = None,
+    ) -> PlayableSource | None:
+        from tunes_player.core.release_quality import (
+            PlaybackPreference,
+            playback_preference_from_shell,
+            qobuz_format_id_for_preference,
+        )
+
         numeric = qobuz_ids.parse_prefixed_id(track_id, "track")
         if numeric is None:
             return None
@@ -342,7 +425,30 @@ class QobuzClient:
         if not isinstance(data, dict):
             return None
         metadata = convert.track_from_qobuz(data)
-        stream = self._get_file_url(numeric)
+        preference = (
+            playback_preference
+            if isinstance(playback_preference, PlaybackPreference)
+            else playback_preference_from_shell(frozenset())
+        )
+
+        format_id = qobuz_format_id_for_preference(
+            config_format_id=self._format_id,
+            preference=preference,
+        )
+        stream = self._get_file_url(
+            numeric,
+            playback_preference=preference,
+        )
+        from tunes_player.core.playback_quality import (
+            qobuz_format_label_from_stream,
+            qobuz_stream_file_metadata,
+        )
+
+        format_label = qobuz_format_label_from_stream(
+            stream,
+            fallback_format_id=format_id,
+        )
+        stream_metadata = qobuz_stream_file_metadata(stream)
         url = stream.get("url")
         if not url:
             restrictions = stream.get("restrictions")
@@ -353,7 +459,12 @@ class QobuzClient:
                     "Check your subscription and account region."
                 )
             raise QobuzUnavailableError("Qobuz did not return a stream URL for this track.")
-        return PlayableSource(uri=str(url), metadata=metadata)
+        return PlayableSource(
+            uri=str(url),
+            metadata=metadata,
+            format_label=format_label,
+            stream_metadata=stream_metadata,
+        )
 
     def _require_login(self) -> None:
         if not self.is_logged_in():
@@ -385,22 +496,81 @@ class QobuzClient:
                     "This Qobuz account cannot stream (free or inactive subscription)."
                 )
 
-    def _get_file_url(self, track_id: str) -> dict[str, Any]:
+    def _get_file_url(
+        self,
+        track_id: str,
+        *,
+        playback_preference: object | None = None,
+    ) -> dict[str, Any]:
+        from tunes_player.core.release_quality import (
+            QUALITY_FILTER_HI_RES,
+            PlaybackPreference,
+            playback_preference_from_shell,
+            qobuz_format_candidates_for_preference,
+        )
+
+        preference = (
+            playback_preference
+            if isinstance(playback_preference, PlaybackPreference)
+            else playback_preference_from_shell(frozenset())
+        )
+        candidates = qobuz_format_candidates_for_preference(
+            config_format_id=self._format_id,
+            preference=preference,
+        )
+        if not candidates:
+            candidates = [27]
+
+        minimum_tier = _qobuz_minimum_acoustic_tier(preference)
+        last_stream: dict[str, Any] | None = None
+        for index, format_id in enumerate(candidates):
+            stream = self._request_file_url(track_id, format_id=format_id)
+            last_stream = stream
+            if not stream.get("url"):
+                continue
+            acoustic_tier = _qobuz_stream_acoustic_tier(stream)
+            is_last = index + 1 >= len(candidates)
+            if _acoustic_tier_meets_minimum(acoustic_tier, minimum_tier) or is_last:
+                if (
+                    minimum_tier == QUALITY_FILTER_HI_RES
+                    and acoustic_tier != QUALITY_FILTER_HI_RES
+                    and is_last
+                ):
+                    log.warning(
+                        "Qobuz track %s: hi-res target but stream resolved to %s "
+                        "(format_id=%s)",
+                        track_id,
+                        acoustic_tier,
+                        format_id,
+                    )
+                return stream
+        if last_stream is not None:
+            return last_stream
+        return self._request_file_url(track_id, format_id=candidates[-1])
+
+    def _request_file_url(self, track_id: str, *, format_id: int) -> dict[str, Any]:
         request_ts = time.time()
         request_sig = sign_get_file_url(
             track_id=track_id,
-            format_id=self._format_id,
+            format_id=format_id,
             request_ts=request_ts,
             app_secret=self._app_secret or "",
         )
         params = {
             "track_id": track_id,
-            "format_id": str(self._format_id),
+            "format_id": str(format_id),
             "intent": "stream",
             "request_ts": str(request_ts),
             "request_sig": request_sig,
         }
         return self._api_get("track/getFileUrl", params)
+
+    def _fetch_album_summary(self, album_id: str) -> dict[str, Any] | None:
+        data = self._api_get(
+            "album/get",
+            {"album_id": album_id, "limit": 1, "offset": 0},
+        )
+        return data if isinstance(data, dict) else None
 
     def _fetch_album(self, album_id: str) -> dict[str, Any] | None:
         data = self._api_get(
@@ -463,7 +633,10 @@ class QobuzClient:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 body = resp.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
-            message = self._error_message_from_http(exc)
+            raw_message = self._error_message_from_http(exc)
+            message = _user_facing_api_error(raw_message, endpoint=endpoint)
+            if message != raw_message:
+                log.debug("Qobuz API error on %s: %s", endpoint, raw_message)
             if exc.code in (401, 400) and endpoint == "user/login":
                 raise QobuzUnavailableError(message) from exc
             raise QobuzUnavailableError(message) from exc
@@ -475,8 +648,12 @@ class QobuzClient:
             raise QobuzUnavailableError("Invalid response from Qobuz.") from exc
         if not isinstance(data, dict):
             raise QobuzUnavailableError("Unexpected Qobuz response.")
-        if data.get("status") == "error" or "message" in data and data.get("code"):
-            raise QobuzUnavailableError(str(data.get("message") or "Qobuz API error."))
+        if data.get("status") == "error":
+            raw_message = str(data.get("message") or "Qobuz API error.")
+            message = _user_facing_api_error(raw_message, endpoint=endpoint)
+            if message != raw_message:
+                log.debug("Qobuz API error on %s: %s", endpoint, raw_message)
+            raise QobuzUnavailableError(message)
         return data
 
     @staticmethod

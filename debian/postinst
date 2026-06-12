@@ -10,17 +10,22 @@ python3 -m venv --system-site-packages "$VENV"
 "$VENV/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 || true
 "$VENV/bin/python" -m pip install --upgrade pip >/dev/null 2>&1 || true
 
-# Install PyPI stack from wheelhouse (includes tidalapi dependencies).
+# Install PyPI stack from wheelhouse (tidalapi deps + python-mpv).
 "$VENV/bin/python" -m pip install \
   --no-index \
   --find-links "$WHEELS" \
-  tidalapi \
-  python-mpv
+  -r /usr/lib/tunes-player/pypi-requirements.txt
 
 "$VENV/bin/python" -m pip install \
   --no-index \
   --find-links "$WHEELS" \
   --no-deps \
   tunes-player
+
+rm -f /usr/share/applications/tunes-player.desktop
+
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -q -f -t /usr/share/icons/hicolor || true
+fi
 
 exit 0

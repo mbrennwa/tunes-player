@@ -4,7 +4,7 @@
    height="128"
    viewBox="0 0 128 128"
    version="1.1"
-   id="svg5"
+   id="svg2"
    sodipodi:docname="tunes-player.svg"
    inkscape:version="1.4.3 (0d15f75042, 2025-12-25)"
    xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
@@ -12,7 +12,7 @@
    xmlns="http://www.w3.org/2000/svg"
    xmlns:svg="http://www.w3.org/2000/svg">
   <sodipodi:namedview
-     id="namedview5"
+     id="namedview2"
      pagecolor="#ffffff"
      bordercolor="#000000"
      borderopacity="0.25"
@@ -20,27 +20,15 @@
      inkscape:pageopacity="0.0"
      inkscape:pagecheckerboard="0"
      inkscape:deskcolor="#d1d1d1"
-     showguides="true"
-     inkscape:zoom="4.671875"
+     inkscape:zoom="6.25"
      inkscape:cx="64"
      inkscape:cy="64"
-     inkscape:window-width="1470"
-     inkscape:window-height="851"
+     inkscape:window-width="1920"
+     inkscape:window-height="1011"
      inkscape:window-x="0"
      inkscape:window-y="0"
      inkscape:window-maximized="1"
-     inkscape:current-layer="svg5">
-    <sodipodi:guide
-       position="54.983278,77.795987"
-       orientation="1,0"
-       id="guide5"
-       inkscape:locked="false" />
-    <sodipodi:guide
-       position="33.264214,37.665552"
-       orientation="1,0"
-       id="guide6"
-       inkscape:locked="false" />
-  </sodipodi:namedview>
+     inkscape:current-layer="svg2" />
   <defs
      id="defs2">
     <linearGradient
@@ -53,7 +41,8 @@
       <stop
          offset="0"
          stop-color="#62a0ea"
-         id="stop1" />
+         id="stop1"
+         style="stop-color:#ea62ea;stop-opacity:1;" />
       <stop
          offset="1"
          stop-color="#1c71d8"
@@ -68,12 +57,13 @@
      rx="26"
      fill="url(#bg)"
      id="rect2" />
-  <g
-     fill="#ffffff"
-     id="g5" />
   <path
-     style="fill:#ffffff;stroke:#ffffff;stroke-width:10;stroke-linecap:round;stroke-linejoin:round;stroke-opacity:1"
-     d="m 32.749163,90.113712 1.284282,-35.959866 m 16.983277,0.638796 -16.267558,0.214047 M 52.374582,89.755853 36.107024,89.9699 M 75.424749,108.02341 52.52174,89.615385 M 75.501672,30.969898 51.528429,54.943144"
-     id="path5"
-     sodipodi:nodetypes="cccccccccc" />
+     fill="none"
+     stroke="#ffffff"
+     stroke-width="10.3651"
+     stroke-linecap="round"
+     stroke-linejoin="round"
+     d="M 87.441166,103.779 58.772112,79.3 H 35.325 V 48.7 H 58.772112 L 87.441166,24.221"
+     id="path2"
+     style="stroke-width:12;stroke-dasharray:none" />
 </svg>

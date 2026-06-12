@@ -7,12 +7,19 @@ import unittest
 from tunes_player.core.backends.qobuz import ids as qobuz_ids
 from tunes_player.core.backends.qobuz.client import (
     _SUGGESTION_FEATURE_TYPES,
+    _TRACK_UNAVAILABLE_MESSAGE,
     _album_added_ns,
+    _user_facing_api_error,
     sign_get_file_url,
 )
 from tunes_player.core.backends.qobuz.client import QobuzClient
 from tunes_player.core.backends.qobuz.convert import cover_url, release_from_qobuz
-from tunes_player.core.models import Source
+from tunes_player.core.release_quality import (
+    QUALITY_FILTER_CD,
+    QUALITY_FILTER_HI_RES,
+    playback_preference_from_shell,
+)
+from tunes_player.core.models import Release, Source
 
 
 class TestQobuzIds(unittest.TestCase):
@@ -117,6 +124,39 @@ class TestQobuzListSuggestionItems(unittest.TestCase):
             self.assertEqual(items[0].release.id, "qobuz:album:99")
 
 
+class TestQobuzGetReleaseSummary(unittest.TestCase):
+    def test_uses_single_album_get_without_track_pagination(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "qobuz.json"
+            client = QobuzClient(session, app_id="1", app_secret="secret")
+            client._user_auth_token = "token"  # noqa: SLF001
+            calls: list[tuple[str, dict | None]] = []
+
+            def fake_api_get(endpoint: str, params: dict | None = None, **kwargs: object):
+                calls.append((endpoint, params))
+                return {
+                    "id": "42",
+                    "title": "Summary Album",
+                    "artist": {"name": "Artist"},
+                    "tracks_count": 12,
+                    "tracks": {"total": 12, "items": [{"id": 1}]},
+                }
+
+            with patch.object(client, "_api_get", side_effect=fake_api_get):
+                release = client.get_release_summary("qobuz:album:42")
+
+            self.assertIsNotNone(release)
+            assert release is not None
+            self.assertEqual(release.title, "Summary Album")
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], "album/get")
+            self.assertEqual(calls[0][1], {"album_id": "42", "limit": 1, "offset": 0})
+
+
 class TestReleaseFromQobuz(unittest.TestCase):
     def test_minimal_album(self) -> None:
         album = {
@@ -135,6 +175,183 @@ class TestReleaseFromQobuz(unittest.TestCase):
         self.assertEqual(release.source, Source.QOBUZ)
         self.assertEqual(release.year, 2024)
         self.assertIsNotNone(release.art_uri)
+        self.assertEqual(release.release_type.value, "album")
+
+    def test_reads_catalog_id_bit_depth_and_sample_rate(self) -> None:
+        album = {
+            "id": "12345",
+            "title": "Test Album",
+            "artist": {"name": "Artist One"},
+            "tracks_count": 10,
+            "upc": "0060254735180",
+            "maximum_sampling_rate": 192,
+            "maximum_bit_depth": 24,
+            "hires": True,
+        }
+        release = release_from_qobuz(album)
+        self.assertEqual(release.catalog_release_id, "qobuz:album:12345")
+        self.assertEqual(release.peak_bit_depth, 24)
+        self.assertEqual(release.peak_sample_rate_hz, 192_000)
+
+    def test_stub_sets_catalog_release_id(self) -> None:
+        from tunes_player.core.backends.qobuz.convert import release_stub_from_qobuz
+
+        album = {
+            "id": "search1",
+            "title": "Search Album",
+            "artist": {"name": "Artist One"},
+            "tracks_count": 10,
+            "upc": 60254735180,
+        }
+        release = release_stub_from_qobuz(album)
+        self.assertEqual(release.catalog_release_id, "qobuz:album:search1")
+        self.assertFalse(release.catalog_quality_ready)
+
+    def test_product_type_ep(self) -> None:
+        album = {
+            "id": "ep1",
+            "title": "Short Run",
+            "artist": {"name": "Band"},
+            "tracks_count": 4,
+            "product_type": "ep",
+        }
+        release = release_from_qobuz(album)
+        self.assertEqual(release.release_type.value, "ep")
+
+    def test_product_type_single(self) -> None:
+        album = {
+            "id": "s1",
+            "title": "Hit",
+            "artist": {"name": "Band"},
+            "tracks_count": 1,
+            "product_type": "single",
+        }
+        release = release_from_qobuz(album)
+        self.assertEqual(release.release_type.value, "single")
+
+    def test_peak_quality_cd(self) -> None:
+        album = {
+            "id": "cd1",
+            "title": "CD Album",
+            "artist": {"name": "Band"},
+            "tracks_count": 8,
+            "maximum_bit_depth": 16,
+            "maximum_sampling_rate": 44100,
+            "hires": False,
+        }
+        release = release_from_qobuz(album)
+        self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_CD)
+
+    def test_peak_quality_hi_res(self) -> None:
+        album = {
+            "id": "hr1",
+            "title": "Hi-Res Album",
+            "artist": {"name": "Band"},
+            "tracks_count": 8,
+            "maximum_bit_depth": 24,
+            "maximum_sampling_rate": 96000,
+            "hires": True,
+        }
+        release = release_from_qobuz(album)
+        self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_HI_RES)
+
+    def test_peak_quality_24_44_is_cd(self) -> None:
+        album = {
+            "id": "cd24",
+            "title": "24-bit CD-rate Album",
+            "artist": {"name": "Band"},
+            "tracks_count": 8,
+            "maximum_bit_depth": 24,
+            "maximum_sampling_rate": 44.1,
+            "hires": True,
+        }
+        release = release_from_qobuz(album)
+        self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_CD)
+
+    def test_peak_quality_hi_res_khz_sample_rate(self) -> None:
+        album = {
+            "id": "hr2",
+            "title": "192 Album",
+            "artist": {"name": "Band"},
+            "tracks_count": 8,
+            "maximum_bit_depth": 24,
+            "maximum_sampling_rate": 192,
+            "hires": False,
+        }
+        release = release_from_qobuz(album)
+        self.assertEqual(release.peak_quality_tier, QUALITY_FILTER_HI_RES)
+
+
+class TestQobuzGetFileUrlNegotiation(unittest.TestCase):
+    def test_get_file_url_negotiates_hi_res_format(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        preference = playback_preference_from_shell(frozenset())
+        calls: list[int] = []
+
+        def fake_request(track_id: str, *, format_id: int) -> dict:
+            calls.append(format_id)
+            if format_id == 27:
+                return {
+                    "url": "https://stream.example/44",
+                    "bit_depth": 16,
+                    "sampling_rate": 44.1,
+                }
+            return {
+                "url": "https://stream.example/96",
+                "bit_depth": 24,
+                "sampling_rate": 96,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "qobuz.json"
+            client = QobuzClient(session, app_id="1", app_secret="secret")
+            client._user_auth_token = "token"  # noqa: SLF001
+            with patch.object(client, "_request_file_url", side_effect=fake_request):
+                stream = client._get_file_url(  # noqa: SLF001
+                    "12345",
+                    playback_preference=preference,
+                )
+
+        self.assertEqual(calls, [27, 7])
+        self.assertEqual(stream["sampling_rate"], 96)
+        self.assertEqual(stream["bit_depth"], 24)
+
+
+class TestUserFacingApiError(unittest.TestCase):
+    def test_track_endpoint_maps_no_result_message(self) -> None:
+        self.assertEqual(
+            _user_facing_api_error(
+                "No result matching given argument",
+                endpoint="track/getFileUrl",
+            ),
+            _TRACK_UNAVAILABLE_MESSAGE,
+        )
+
+    def test_track_get_endpoint_maps_no_result_message(self) -> None:
+        self.assertEqual(
+            _user_facing_api_error(
+                "No result matching given argument",
+                endpoint="track/get",
+            ),
+            _TRACK_UNAVAILABLE_MESSAGE,
+        )
+
+    def test_album_endpoint_keeps_raw_message(self) -> None:
+        raw = "No result matching given argument"
+        self.assertEqual(
+            _user_facing_api_error(raw, endpoint="album/get"),
+            raw,
+        )
+
+    def test_other_messages_unchanged(self) -> None:
+        message = "Qobuz request failed (HTTP 500)."
+        self.assertEqual(
+            _user_facing_api_error(message, endpoint="track/get"),
+            message,
+        )
 
 
 if __name__ == "__main__":

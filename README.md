@@ -1,114 +1,47 @@
 # Tunes
 
-**Tunes** is a free, open-source music player for Linux (GNOME/GTK). It is a shell to
-access, discover, and play music from local files and streaming catalogs (**TIDAL**,
-**Qobuz**; others planned).
+**Tunes** is a music app to search, discover, and play music from your own files and streaming subscriptions (Qobuz, TIDAL). It is free and open source, built for Linux with a native GNOME look.
 
-Package and command name: **tunes-player**.
+- **One place for your music** — local library and streaming services in the same app
+- **Browse and discover** — search, new releases, and suggestions without switching apps
+- **Audiophile-friendly local playback** — bit-perfect listening when you want it
+- **Simple and native** — a straightforward desktop app, not a heavy media suite
 
-## Status
+![](data/screenshots/tunes-player.png)
 
-Early development (1.0.dev0). Current functionality:
+## Discover and browse
 
-- **Local library** — scan music folders into SQLite; browse, search, and play **FLAC, WAV, AIFF, ALAC, MP3, AAC, Ogg Vorbis**
-- **Streaming** — **TIDAL** (OAuth sign-in, search, playback, New Releases, Suggest Music) and **Qobuz** (user-supplied App ID/Secret, account login, search, playback, New Releases, Suggest Music)
-- **Music shell** — `Release` grid driven by search, **New Releases**, or **Suggest Music** selections (optional per-source filter); release detail and play queue
-- **Discovery** — **New Releases** (recent local imports + service new-release rails) and **Suggest Music** (continue listening, editorial picks, similar tracks, local rediscover)
-- **Federated search** — search field merges local index with signed-in streaming catalogs
-- **Playback** — mpv/libmpv queue, skip, seek; bit-perfect profile when device volume is available; PipeWire/Pulse sink volume via `wpctl`/`pactl`
-- **Desktop integration** — MPRIS, GDK media keys, playback error toasts, file logging
-- **Settings** — music folders, TIDAL/Qobuz accounts, output device, bit-perfect toggle, New Releases cutoff
+- One search across your library and signed-in streaming catalogs
+- **New Releases** and **Suggest Music** for discovery
+- Browse by release — grid view and detail pages with artwork
+- Filter and sort the current view
 
-Still planned or incomplete: macOS and Windows, Deezer, cross-source deduplication,
-playlists, minimized compact controller, UPnP/AES67 output, desktop .deb menu integration.
-See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for roadmap and open items.
+## Playback and audio quality
 
-## Architecture
+- Play, pause, skip, and manage a queue from the Now Playing bar
+- **Bit-perfect playback** — Tunes passes the original music data from the source to the playback device
+- Hardware volume on the **sound device** where possible, software volume control inside the app as a fallback
+- The app **shows honestly** whether playback is bit-perfect or not
 
-```
-tunes_player/
-├── core/           # Models, library, backends, playback logic — no GTK, no mpv
-│   ├── services.py # PlayerService facade for all UIs
-│   ├── home.py     # New Releases / Suggestion types and merge limits
-│   ├── backends/   # local, tidal/, qobuz/ → PlayableSource
-│   ├── library/    # SQLite index, scanner, release grouping
-│   └── playback/   # PlaybackEngine protocol
-├── engines/        # MpvEngine (libmpv)
-├── platform/       # Linux: MPRIS, PipeWire/Pulse volume
-└── ui/gtk/         # Libadwaita UI
-```
+## Install
 
-The **core** is UI- and engine-agnostic so other frontends (e.g. Qt on macOS) can share
-the same `PlayerService` API.
-
-**Architecture, roadmap, and TODO (handoff for contributors/agents):**
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) —
-possible rename candidates: [docs/NAMING.md](docs/NAMING.md)
-
-## Requirements (Linux)
-
-Runtime (typical Debian/Ubuntu packages):
-
-- Python 3.11+
-- PyGObject and typelibs: `python3-gi`, `python3-gi-cairo`, `gir1.2-gtk-4.0`, `gir1.2-adw-1`
-- [mpv](https://mpv.io/) with libmpv (required for playback; missing libmpv shows an in-app message)
-
-Python dependencies (installed with `pip install -e .`): `platformdirs`, `mutagen`,
-`python-mpv`, `tidalapi`.
-
-PyGObject is provided by the system on GNOME; a normal venv cannot see it unless you use
-`--system-site-packages` (recommended below) or install PyGObject into the venv yourself.
-
-## Install from .deb (experimental)
-
-On Debian 12+, Ubuntu 24.04+, or similar DEB-based distros, download the latest `.deb`
-from [GitHub Releases](https://github.com/mbrennwa/tunes-player/releases).
-
-Then install with:
+On Debian 12+, Ubuntu 24.04+, or similar DEB-based distros, download the latest
+`tunes-player_*.deb` from [GitHub Releases](https://github.com/mbrennwa/tunes-player/releases), then:
 
 ```bash
 sudo apt install ./path/to/tunes-player_*.deb
-tunes-player
 ```
 
-`apt` installs declared package dependencies automatically (GTK, mpv, Python GI, and
-related libraries).
+`apt` installs dependencies automatically. After install, **Tunes** appears in the application menu.
 
-Desktop menu entry is not included yet; run `tunes-player` from a terminal.
+Add music folders in **Settings → Sources**, and sign in to TIDAL or Qobuz to enable streaming. For **Qobuz**: enter an App ID and App Secret in Settings, then sign in with your account. Qobuz did not provide these to the Tunes project, but `ID=942852567` and `secret=761730d3f95e4af09ac63b9a37ccc96a` as used by other open-source tools works fine.
 
-Maintainers: new release builds are published when a `v*` tag is pushed (see
-[docs/RELEASE.md](docs/RELEASE.md) and [.github/workflows/release-deb.yml](.github/workflows/release-deb.yml)).
-To build a package locally, see [tools/howto-build-deb.txt](tools/howto-build-deb.txt).
-
-## Install from source
-
-System dependencies (Debian/Ubuntu):
-
-```bash
-sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 mpv libmpv2
-```
-
-If playback fails, check the log at `~/.local/share/tunes-player/tunes-player.log` or
-Settings → Diagnostics. Set `TUNES_LOG_LEVEL=DEBUG` for verbose logging.
-
-Clone and install into a venv that can use system `gi`:
-
-```bash
-git clone https://github.com/mbrennwa/tunes-player.git
-cd tunes-player
-python3 -m venv .venv --system-site-packages
-source .venv/bin/activate
-pip install -e .
-tunes-player
-```
+To build or run from source, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Streaming disclaimer
 
-Tunes is **not affiliated with Tidal, Qobuz, or any other streaming provider**.
-Streaming requires your own paid subscriptions where applicable. Integrations may use official developer APIs (e.g. Tidal, Deezer) or user-supplied credentials (Qobuz App ID and App Secret — Tunes does not ship or distribute Qobuz keys). For Qobuz, open
-**Settings → Sources**, enter and save your App ID and App Secret, then sign in with your Qobuz account email and password. Features can break when providers change authentication
-or terms. Use at your own responsibility and in compliance with each service's terms of use.
+Tunes is **not affiliated with Qobuz, TIDAL, or any other streaming provider**.
+Streaming requires your own paid subscriptions where applicable. Features can break when providers change authentication or terms. Use at your own responsibility and in compliance with each service's terms of use.
 
 ## License
 

@@ -79,14 +79,18 @@ class ArtLoader:
         self._generation[widget_id] = generation
 
         if not art_uri:
-            self._apply_fallback_picture(picture, fallback_icon, widget_id, generation)
+            self._apply_fallback_picture(
+                picture, fallback_icon, widget_id, generation, pixel_size
+            )
             return
 
         kind, payload = parse_art_uri(art_uri)
         if kind == "local":
             path = find_cached_art_path(self._data_dir, payload)
             if path is None:
-                self._apply_fallback_picture(picture, fallback_icon, widget_id, generation)
+                self._apply_fallback_picture(
+                    picture, fallback_icon, widget_id, generation, pixel_size
+                )
                 return
             threading.Thread(
                 target=self._load_file_picture,
@@ -101,7 +105,7 @@ class ArtLoader:
                 daemon=True,
             ).start()
             return
-        self._apply_fallback_picture(picture, fallback_icon, widget_id, generation)
+        self._apply_fallback_picture(picture, fallback_icon, widget_id, generation, pixel_size)
 
     def _is_current(self, widget_id: int, generation: int) -> bool:
         return self._generation.get(widget_id) == generation
@@ -124,7 +128,7 @@ class ArtLoader:
         GLib.idle_add(apply)
 
     @staticmethod
-    def _fallback_paintable(icon_name: str) -> Gdk.Paintable | None:
+    def _fallback_paintable(icon_name: str, *, size: int) -> Gdk.Paintable | None:
         display = Gdk.Display.get_default()
         if display is None:
             return None
@@ -132,7 +136,7 @@ class ArtLoader:
         return theme.lookup_icon(
             icon_name,
             None,
-            256,
+            size,
             1,
             Gtk.TextDirection.LTR,
             Gtk.IconLookupFlags.PRELOAD,
@@ -144,11 +148,12 @@ class ArtLoader:
         fallback_icon: str,
         widget_id: int,
         generation: int,
+        pixel_size: int,
     ) -> None:
         def apply() -> None:
             if not self._is_current(widget_id, generation):
                 return
-            paintable = self._fallback_paintable(fallback_icon)
+            paintable = self._fallback_paintable(fallback_icon, size=pixel_size)
             picture.set_paintable(paintable)
 
         GLib.idle_add(apply)
@@ -187,7 +192,9 @@ class ArtLoader:
     ) -> None:
         pixbuf = self._pixbuf_from_file(path, pixel_size)
         if pixbuf is None:
-            self._apply_fallback_picture(picture, fallback_icon, widget_id, generation)
+            self._apply_fallback_picture(
+                picture, fallback_icon, widget_id, generation, pixel_size
+            )
             return
         GLib.idle_add(
             self._apply_pixbuf_picture,
@@ -196,6 +203,7 @@ class ArtLoader:
             widget_id,
             generation,
             fallback_icon,
+            pixel_size,
         )
 
     def _load_http_image(
@@ -232,7 +240,9 @@ class ArtLoader:
     ) -> None:
         pixbuf = self._pixbuf_from_http(url, pixel_size)
         if pixbuf is None:
-            self._apply_fallback_picture(picture, fallback_icon, widget_id, generation)
+            self._apply_fallback_picture(
+                picture, fallback_icon, widget_id, generation, pixel_size
+            )
             return
         GLib.idle_add(
             self._apply_pixbuf_picture,
@@ -241,6 +251,7 @@ class ArtLoader:
             widget_id,
             generation,
             fallback_icon,
+            pixel_size,
         )
 
     @staticmethod
@@ -303,13 +314,16 @@ class ArtLoader:
         widget_id: int,
         generation: int,
         fallback_icon: str,
+        pixel_size: int,
     ) -> bool:
         if not self._is_current(widget_id, generation):
             return False
         try:
             texture = Gdk.Texture.new_for_pixbuf(pixbuf)
         except (AttributeError, TypeError, GLib.Error):
-            self._apply_fallback_picture(picture, fallback_icon, widget_id, generation)
+            self._apply_fallback_picture(
+                picture, fallback_icon, widget_id, generation, pixel_size
+            )
             return False
         picture.set_paintable(texture)
         return False

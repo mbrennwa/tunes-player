@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 
 import gi
@@ -12,11 +13,13 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
-from tunes_player.core.services import PlayerService
+from tunes_player.core.services import PlaybackState, PlayerService
 from tunes_player.ui.gtk.art import ArtLoader
 from tunes_player.ui.gtk.util import format_duration, join_detail, source_label
 
 _TIME_LABEL_CHARS = 7  # wide enough for "0:00:00"
+# Keep UI seeks inside mpv-safe range (see engines/mpv._SEEK_END_MARGIN_SEC).
+_SEEK_END_MARGIN_SEC = 1.0
 _ART_PIXEL_SIZE = 48
 _VOLUME_SLIDER_WIDTH = 180
 _CONTROLS_WIDTH = 388  # prev · play · next · volume · queue + spacing
@@ -72,9 +75,26 @@ class NowPlayingBar(Gtk.Box):
         row.set_margin_bottom(8)
         self.append(row)
 
-        self._art = Gtk.Image.new_from_icon_name("audio-x-generic-symbolic")
-        self._art.set_pixel_size(_ART_PIXEL_SIZE)
-        self._art.add_css_class("card")
+        self._art = Gtk.Box()
+        self._art.add_css_class("now-playing-art")
+        self._art.set_size_request(_ART_PIXEL_SIZE, _ART_PIXEL_SIZE)
+        self._art.set_overflow(Gtk.Overflow.HIDDEN)
+        self._art.set_hexpand(False)
+        self._art.set_vexpand(False)
+        self._art.set_halign(Gtk.Align.CENTER)
+        self._art.set_valign(Gtk.Align.CENTER)
+
+        self._art_picture = Gtk.Picture()
+        self._art_picture.set_content_fit(Gtk.ContentFit.COVER)
+        self._art_picture.set_can_shrink(True)
+        self._art_picture.set_size_request(_ART_PIXEL_SIZE, _ART_PIXEL_SIZE)
+        self._art_picture.set_hexpand(False)
+        self._art_picture.set_vexpand(False)
+        self._art_picture.set_halign(Gtk.Align.FILL)
+        self._art_picture.set_valign(Gtk.Align.FILL)
+        self._art.append(self._art_picture)
+
+        self._attach_art_click(self._art)
         row.append(self._art)
 
         meta = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -87,7 +107,7 @@ class NowPlayingBar(Gtk.Box):
         self._title.add_css_class("heading")
         meta.append(self._title)
 
-        self._subtitle = Gtk.Label(label="Select an album or track", xalign=0, ellipsize=3)
+        self._subtitle = Gtk.Label(label="Select a release or track", xalign=0, ellipsize=3)
         self._subtitle.add_css_class("dim-label")
         meta.append(self._subtitle)
 
@@ -103,6 +123,9 @@ class NowPlayingBar(Gtk.Box):
         controls.set_size_request(_CONTROLS_WIDTH, -1)
         controls.set_valign(Gtk.Align.CENTER)
         row.append(controls)
+
+        self._controls_leading = Gtk.Box()
+        controls.append(self._controls_leading)
 
         prev_btn = Gtk.Button()
         prev_btn.add_css_class("circular")
@@ -127,16 +150,16 @@ class NowPlayingBar(Gtk.Box):
         next_btn.connect("clicked", lambda *_: service.skip_next())
         controls.append(next_btn)
 
-        volume_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        volume_box.set_size_request(_VOLUME_BOX_WIDTH, -1)
-        volume_box.set_valign(Gtk.Align.CENTER)
-        controls.append(volume_box)
+        self._volume_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self._volume_box.set_size_request(_VOLUME_BOX_WIDTH, -1)
+        self._volume_box.set_valign(Gtk.Align.CENTER)
+        controls.append(self._volume_box)
 
         self._mute_btn = Gtk.Button()
         self._mute_btn.set_icon_name("audio-volume-high-symbolic")
         self._mute_btn.set_tooltip_text("Mute")
         self._mute_btn.connect("clicked", self._on_mute_clicked)
-        volume_box.append(self._mute_btn)
+        self._volume_box.append(self._mute_btn)
 
         self._volume = Gtk.Scale.new_with_range(
             Gtk.Orientation.HORIZONTAL,
@@ -147,13 +170,8 @@ class NowPlayingBar(Gtk.Box):
         self._volume.set_hexpand(False)
         self._volume.set_size_request(_VOLUME_SLIDER_WIDTH, -1)
         self._volume.set_draw_value(False)
-        self._volume.connect("value-changed", self._on_volume_changed)
-        self._attach_drag_gesture(
-            self._volume,
-            self._begin_volume_drag,
-            self._end_volume_drag,
-        )
-        volume_box.append(self._volume)
+        self._volume.connect("change-value", self._on_volume_change_value)
+        self._volume_box.append(self._volume)
 
         queue_btn = Gtk.Button()
         queue_btn.set_icon_name("view-list-symbolic")
@@ -201,17 +219,17 @@ class NowPlayingBar(Gtk.Box):
         self._progress_row.append(self._remaining)
 
         self._queue_handler: Callable[[], None] | None = None
+        self._art_click_handler: Callable[[], None] | None = None
         self._volume_dragging = False
-        self._pending_volume: float | None = None
-        self._volume_apply_id: int | None = None
+        self._volume_drag_clear_id: int | None = None
+        self._updating_volume = False
         self._seeking = False
-        self._seek_duration: float | None = None
         self._pending_seek: float | None = None
         self._seek_apply_id: int | None = None
         self._progress_track_id: str | None = None
-        self._progress_playback_epoch = -1
-        self._progress_duration_sec: float | None = None
         self._shown_sec = 0.0
+        self._shown_anchor_sec = 0.0
+        self._shown_anchor_at: float | None = None
         service.subscribe(self._on_service_event)
         self._sync_from_service()
         GLib.timeout_add(33, self._tick_progress)
@@ -219,8 +237,29 @@ class NowPlayingBar(Gtk.Box):
     def set_queue_handler(self, handler: Callable[[], None]) -> None:
         self._queue_handler = handler
 
+    def set_art_click_handler(self, handler: Callable[[], None] | None) -> None:
+        self._art_click_handler = handler
+
     def set_play_handler(self, handler: Callable[[], None]) -> None:
         self._play_handler = handler
+
+    def _attach_art_click(self, widget: Gtk.Widget) -> None:
+        gesture = Gtk.GestureClick()
+        gesture.connect("released", self._on_art_released)
+        widget.add_controller(gesture)
+        widget.set_focusable(True)
+        widget.set_cursor_from_name("default")
+
+    def _on_art_released(self, _gesture: Gtk.GestureClick, _n_press: int, _x: float, _y: float) -> None:
+        handler = self._art_click_handler
+        if handler is not None:
+            handler()
+
+    def _sync_art_clickable(self, track: object | None) -> None:
+        clickable = track is not None and self._art_click_handler is not None
+        self._art.set_sensitive(clickable)
+        self._art.set_cursor_from_name("pointer" if clickable else "default")
+        self._art.set_tooltip_text("View release" if clickable else None)
 
     def _on_play_clicked(self, *_args: object) -> None:
         handler = self._play_handler
@@ -240,31 +279,19 @@ class NowPlayingBar(Gtk.Box):
         gesture.connect("drag-end", lambda *_: on_end())
         widget.add_controller(gesture)
 
-    def _begin_volume_drag(self) -> None:
-        self._volume_dragging = True
-
-    def _end_volume_drag(self) -> None:
-        self._volume_dragging = False
-        if self._volume_apply_id is not None:
-            GLib.source_remove(self._volume_apply_id)
-            self._volume_apply_id = None
-        if self._pending_volume is not None:
-            self._service.set_volume(self._pending_volume, notify=True)
-            self._pending_volume = None
-
-    def _schedule_volume_apply(self) -> None:
-        if self._volume_apply_id is None:
-            self._volume_apply_id = GLib.timeout_add(50, self._apply_pending_volume)
-
-    def _apply_pending_volume(self) -> bool:
-        self._volume_apply_id = None
-        if self._pending_volume is not None:
-            self._service.set_volume(self._pending_volume, notify=False)
-        return False
-
     def _begin_seek_drag(self) -> None:
         self._seeking = True
-        self._seek_duration = self._progress_duration_sec
+
+    def _playback_duration(self, state: PlaybackState) -> float | None:
+        duration = state.duration_sec
+        if duration is None or duration <= 0:
+            return None
+        return float(duration)
+
+    def _clamp_seek_position(self, position_sec: float, duration_sec: float) -> float:
+        position_sec = max(0.0, min(position_sec, duration_sec))
+        safe_end = max(0.0, duration_sec - _SEEK_END_MARGIN_SEC)
+        return min(position_sec, safe_end)
 
     def _end_seek_drag(self) -> None:
         if self._seek_apply_id is not None:
@@ -274,7 +301,6 @@ class NowPlayingBar(Gtk.Box):
             self._apply_seek(self._pending_seek)
             self._pending_seek = None
         self._seeking = False
-        self._seek_duration = None
 
     def _on_progress_change_value(
         self,
@@ -284,8 +310,8 @@ class NowPlayingBar(Gtk.Box):
     ) -> bool:
         if self._updating_progress or self._seeking:
             return True
-        duration = self._progress_duration_sec
-        if duration is None or duration <= 0:
+        duration = self._playback_duration(self._service.get_playback_state())
+        if duration is None:
             return True
         self._apply_seek(value * duration)
         return True
@@ -293,21 +319,29 @@ class NowPlayingBar(Gtk.Box):
     def _on_progress_value_changed(self, scale: Gtk.Scale) -> None:
         if self._updating_progress or not self._seeking:
             return
-        duration = self._seek_duration or self._progress_duration_sec
-        if duration is None or duration <= 0:
+        duration = self._playback_duration(self._service.get_playback_state())
+        if duration is None:
             return
-        position_sec = max(0.0, min(scale.get_value(), 1.0)) * duration
+        position_sec = self._clamp_seek_position(
+            max(0.0, min(scale.get_value(), 1.0)) * duration,
+            duration,
+        )
+        fraction = position_sec / duration
+        if abs(scale.get_value() - fraction) > 0.001:
+            self._set_progress_fraction(fraction)
         self._update_seek_labels(position_sec, duration)
         self._pending_seek = position_sec
         self._schedule_seek_apply()
 
     def _apply_seek(self, position_sec: float) -> None:
-        duration = self._seek_duration or self._progress_duration_sec
-        if duration is None or duration <= 0:
+        duration = self._playback_duration(self._service.get_playback_state())
+        if duration is None:
             return
-        position_sec = max(0.0, min(position_sec, duration))
-        self._shown_sec = position_sec
+        position_sec = self._clamp_seek_position(position_sec, duration)
         self._service.seek(position_sec)
+        self._shown_sec = position_sec
+        self._shown_anchor_sec = position_sec
+        self._shown_anchor_at = time.monotonic()
         self._set_progress_fraction(position_sec / duration, allow_decrease=True)
         self._update_seek_labels(position_sec, duration)
 
@@ -349,13 +383,27 @@ class NowPlayingBar(Gtk.Box):
         self._mute_btn.set_icon_name(icon)
         self._mute_btn.set_tooltip_text("Unmute" if state.muted else "Mute")
 
-    def _on_volume_changed(self, scale: Gtk.Scale) -> None:
-        value = scale.get_value()
-        if self._volume_dragging:
-            self._pending_volume = value
-            self._schedule_volume_apply()
-            return
-        self._service.set_volume(value)
+    def _on_volume_change_value(
+        self,
+        _scale: Gtk.Scale,
+        _scroll_type: Gtk.ScrollType,
+        value: float,
+    ) -> bool:
+        if self._updating_volume or not self._service.volume_adjustable():
+            return False
+        self._volume_dragging = True
+        if self._volume_drag_clear_id is not None:
+            GLib.source_remove(self._volume_drag_clear_id)
+        self._volume_drag_clear_id = GLib.timeout_add(150, self._clear_volume_drag)
+        self._service.set_volume(value, notify=False)
+        return False
+
+    def _clear_volume_drag(self) -> bool:
+        self._volume_drag_clear_id = None
+        self._volume_dragging = False
+        if self._service.volume_adjustable():
+            self._service.set_volume(self._volume.get_value(), notify=True)
+        return False
 
     def _on_service_event(self, event: str) -> None:
         GLib.idle_add(self._sync_from_service, event)
@@ -364,37 +412,31 @@ class NowPlayingBar(Gtk.Box):
         if event == "position_changed":
             return False
 
+        if event == "art_updated":
+            self._art_track_id = None
+
         state = self._service.get_playback_state()
         track = state.current_track
 
         if track is None:
             self._title.set_label("Not playing")
-            self._subtitle.set_label("Select an album or track")
+            self._subtitle.set_label("Select a release or track")
             self._quality.set_label("")
             self._play_btn.set_icon_name("media-playback-start-symbolic")
             self._play_btn.set_tooltip_text("Play")
             self._sync_art(None)
+            self._sync_art_clickable(None)
         else:
             self._title.set_label(track.title)
             artist = track.artist_name
-            album = track.album_title or ""
+            album = track.release_title or ""
             duration = format_duration(track.duration_sec)
             self._subtitle.set_label(
-                join_detail(
-                    source_label(track.source),
-                    artist,
-                    album or None,
-                    duration,
-                )
+                join_detail(artist, album or None, duration)
             )
-            badges = [state.quality_hint]
-            if state.bit_perfect:
-                badges.append("bit-perfect")
-            if state.device_volume:
-                badges.append("device volume")
-            elif not state.bit_perfect:
-                badges.append("software volume")
-            self._quality.set_label(" · ".join(badges))
+            self._quality.set_label(
+                join_detail(source_label(track.source), state.quality_hint)
+            )
             icon = (
                 "media-playback-pause-symbolic"
                 if state.is_playing
@@ -403,16 +445,22 @@ class NowPlayingBar(Gtk.Box):
             self._play_btn.set_icon_name(icon)
             self._play_btn.set_tooltip_text("Pause" if state.is_playing else "Play")
             self._sync_art(track)
+            self._sync_art_clickable(track)
 
-        if not self._volume_dragging and event in (
+        volume_visible = state.volume_mode != "fixed"
+        self._volume_box.set_visible(volume_visible)
+        self._controls_leading.set_hexpand(not volume_visible)
+        if volume_visible and not self._volume_dragging and event in (
             None,
             "volume_changed",
             "playback_changed",
         ):
-            self._volume.handler_block_by_func(self._on_volume_changed)
+            self._updating_volume = True
+            self._volume.handler_block_by_func(self._on_volume_change_value)
             self._volume.set_value(state.volume)
-            self._volume.handler_unblock_by_func(self._on_volume_changed)
-        self._sync_mute_button(state)
+            self._volume.handler_unblock_by_func(self._on_volume_change_value)
+            self._updating_volume = False
+            self._sync_mute_button(state)
 
         return False
 
@@ -421,58 +469,96 @@ class NowPlayingBar(Gtk.Box):
             return
         if track is None:
             self._art_track_id = None
-            self._art_loader.set_image(self._art, None, pixel_size=_ART_PIXEL_SIZE)
+            self._art_loader.set_picture(self._art_picture, None, pixel_size=_ART_PIXEL_SIZE)
             return
         track_id = track.id if hasattr(track, "id") else None
         art_uri = track.art_uri if hasattr(track, "art_uri") else None
         if track_id == self._art_track_id:
             return
         self._art_track_id = track_id
-        self._art_loader.set_image(self._art, art_uri, pixel_size=_ART_PIXEL_SIZE)
+        self._art_loader.set_picture(self._art_picture, art_uri, pixel_size=_ART_PIXEL_SIZE)
+
+    def _reset_progress_display(self) -> None:
+        self._progress_track_id = None
+        self._shown_sec = 0.0
+        self._shown_anchor_sec = 0.0
+        self._shown_anchor_at = None
+        self._set_progress_fraction(0.0, allow_decrease=True)
+        self._progress.set_sensitive(False)
+        self._update_seek_labels(0.0, 1.0)
+
+    def _sync_shown_position(
+        self,
+        *,
+        track_id: str | None,
+        reported_sec: float,
+        duration_sec: float,
+        is_playing: bool,
+    ) -> float:
+        if track_id != self._progress_track_id:
+            self._progress_track_id = track_id
+            self._shown_sec = 0.0
+            self._shown_anchor_sec = 0.0
+            self._shown_anchor_at = None
+            self._set_progress_fraction(0.0, allow_decrease=True)
+            # Service position can still reflect the previous track on this tick.
+            return 0.0
+
+        reported_sec = max(0.0, min(reported_sec, duration_sec))
+        now = time.monotonic()
+        if is_playing:
+            if (
+                self._shown_anchor_at is None
+                or reported_sec < self._shown_anchor_sec - 0.5
+            ):
+                self._shown_anchor_sec = reported_sec
+                self._shown_anchor_at = now
+            elif reported_sec > self._shown_anchor_sec + 0.05:
+                self._shown_anchor_sec = reported_sec
+                self._shown_anchor_at = now
+            shown = min(
+                duration_sec,
+                self._shown_anchor_sec + (now - self._shown_anchor_at),
+            )
+            if reported_sec > shown:
+                shown = reported_sec
+                self._shown_anchor_sec = reported_sec
+                self._shown_anchor_at = now
+            self._shown_sec = max(self._shown_sec, shown)
+        else:
+            self._shown_sec = reported_sec
+            self._shown_anchor_at = None
+        return self._shown_sec
 
     def _tick_progress(self) -> bool:
         if self._seeking:
             return True
+        self._service.refresh_playback_position_for_ui()
         state = self._service.get_playback_state()
         track = state.current_track
         if track is None:
             if self._progress_track_id is not None:
-                self._progress_track_id = None
-                self._progress_playback_epoch = -1
-                self._shown_sec = 0.0
-                self._set_progress_fraction(0.0, allow_decrease=True)
-                self._progress.set_sensitive(False)
-                self._update_seek_labels(0.0, 1.0)
+                self._reset_progress_display()
             return True
 
-        duration = state.duration_sec
-        if duration is None or duration <= 0:
-            duration = track.duration_sec if hasattr(track, "duration_sec") else None
-        if duration is None or duration <= 0:
+        duration = self._playback_duration(state)
+        if duration is None:
             if self._progress.get_sensitive():
                 self._progress.set_sensitive(False)
             return True
 
-        duration = float(duration)
-        self._progress_duration_sec = duration
         if not self._progress.get_sensitive():
             self._progress.set_sensitive(True)
 
         track_id = track.id if hasattr(track, "id") else None
-        if (
-            state.playback_epoch != self._progress_playback_epoch
-            or track_id != self._progress_track_id
-        ):
-            self._progress_playback_epoch = state.playback_epoch
-            self._progress_track_id = track_id
-            self._shown_sec = 0.0
-            self._set_progress_fraction(0.0, allow_decrease=True)
-
-        if state.is_playing:
-            self._shown_sec = max(self._shown_sec, state.position_sec)
-
-        self._set_progress_fraction(self._shown_sec / duration)
-        self._update_seek_labels(self._shown_sec, duration)
+        position_sec = self._sync_shown_position(
+            track_id=track_id,
+            reported_sec=state.position_sec,
+            duration_sec=duration,
+            is_playing=state.is_playing,
+        )
+        self._set_progress_fraction(position_sec / duration)
+        self._update_seek_labels(position_sec, duration)
         return True
 
 
@@ -499,9 +585,11 @@ def _handle_media_key(keyval: int, service: PlayerService) -> bool:
         service.pause()
         return True
     if keyval == _KEY_VOLUME_UP:
-        service.adjust_volume(0.05)
+        if service.volume_adjustable():
+            service.adjust_volume(0.05)
         return True
     if keyval == _KEY_VOLUME_DOWN:
-        service.adjust_volume(-0.05)
+        if service.volume_adjustable():
+            service.adjust_volume(-0.05)
         return True
     return False

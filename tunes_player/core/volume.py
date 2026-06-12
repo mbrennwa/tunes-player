@@ -3,10 +3,46 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Callable, Literal, Protocol
 
 VolumeListener = Callable[[float], None]
 Unsubscribe = Callable[[], None]
+
+BitPerfectPotential = Literal["direct", "capable", "none"]
+VolumeMode = Literal["hardware", "software", "fixed"]
+
+
+def derive_volume_mode(
+    *,
+    device_volume: bool,
+    mpv_soft_volume: bool,
+) -> VolumeMode:
+    if device_volume:
+        return "hardware"
+    if mpv_soft_volume:
+        return "software"
+    return "fixed"
+
+SYSTEM_DEFAULT_SINK_ID = "__system_default__"
+
+
+def is_alsa_endpoint_id(endpoint_id: str | None) -> bool:
+    return bool(endpoint_id and endpoint_id.startswith("alsa:"))
+
+
+def pipewire_endpoint_id(sink_name: str) -> str:
+    """Stable config id for a PipeWire/Pulse sink (wpctl numeric ids change)."""
+    return f"pw:{sink_name}"
+
+
+def is_pipewire_endpoint_id(endpoint_id: str | None) -> bool:
+    return bool(endpoint_id and endpoint_id.startswith("pw:"))
+
+
+def pipewire_name_from_endpoint_id(endpoint_id: str) -> str | None:
+    if not is_pipewire_endpoint_id(endpoint_id):
+        return None
+    return endpoint_id[3:]
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,6 +51,9 @@ class VolumeEndpoint:
     name: str
     description: str
     is_default: bool = False
+    bit_perfect_potential: BitPerfectPotential = "none"
+    # wpctl/pactl target (numeric id); config uses stable ``id`` instead.
+    control_id: str | None = None
 
 
 class VolumeController(Protocol):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import webbrowser
+from collections.abc import Callable
 from importlib import resources
 
 import gi
@@ -15,11 +16,11 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from tunes_player.core.models import Source, Track
+from tunes_player.core.models import Release, Source, Track
 
 
 def load_app_css() -> None:
-    """Load application Gtk CSS (album grid tiles, etc.)."""
+    """Load application Gtk CSS (release grid tiles, etc.)."""
     css_path = resources.files("tunes_player.ui.gtk").joinpath("style.css")
     provider = Gtk.CssProvider()
     provider.load_from_path(str(css_path))
@@ -45,14 +46,13 @@ def source_label(source: Source) -> str:
     labels = {
         Source.LOCAL: "Local",
         Source.TIDAL: "TIDAL",
-        Source.DEEZER: "Deezer",
         Source.QOBUZ: "Qobuz",
     }
     return labels.get(source, source.value.capitalize())
 
 
 def format_track_number(track: Track, *, fallback: int | None = None) -> str | None:
-    """Display track index for album lists (e.g. 3 or 2-5 for multi-disc)."""
+    """Display track index for release track lists (e.g. 3 or 2-5 for multi-disc)."""
     number = track.track_number if track.track_number is not None else fallback
     if number is None:
         return None
@@ -69,12 +69,25 @@ def join_detail(*parts: str | None) -> str:
 def format_duration(seconds: float | None) -> str:
     if seconds is None:
         return "—"
-    total = int(seconds)
+    total = round(seconds)
     minutes, secs = divmod(total, 60)
     hours, minutes = divmod(minutes, 60)
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
+
+
+def effective_release_duration_sec(
+    release: Release,
+    tracks: list[Track] | None = None,
+) -> float | None:
+    """Release duration from metadata, or summed from loaded tracks."""
+    if release.duration_sec is not None:
+        return release.duration_sec
+    if not tracks:
+        return None
+    total = sum(float(track.duration_sec or 0) for track in tracks)
+    return total if total > 0 else None
 
 
 def normalize_http_uri(uri: str) -> str:
@@ -107,3 +120,21 @@ def open_external_uri(uri: str) -> tuple[bool, str | None]:
         return True, None
 
     return False, last_error or "Could not open link"
+
+
+def read_clipboard_text(on_ready: Callable[[str | None], None]) -> None:
+    """Read plain text from the clipboard (async); calls on_ready on the main loop."""
+    display = Gdk.Display.get_default()
+    if display is None:
+        on_ready(None)
+        return
+    clipboard = display.get_clipboard()
+
+    def finish(_clip: Gdk.Clipboard, result: Gio.AsyncResult, _user_data: object) -> None:
+        try:
+            text = clipboard.read_text_finish(result)
+        except GLib.Error:
+            text = None
+        on_ready(text.strip() if text else None)
+
+    clipboard.read_text_async(None, finish, None)

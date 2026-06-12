@@ -8,18 +8,41 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from tunes_player.core.config import AppConfig
 from tunes_player.core.library import ids
 from tunes_player.core.library.art_cache import (
-    backfill_missing_album_art,
-    index_album_art_for_file,
+    maintain_album_art,
     prune_orphan_album_art,
 )
-from tunes_player.core.library.db import connect
-from tunes_player.core.library.formats import codec_for_path, has_tier1_extension, is_tier1_path
+from tunes_player.core.library.db import (
+    LOCK_RETRY_ATTEMPTS,
+    LOCK_RETRY_BASE_DELAY_SEC,
+    connect,
+    is_locked_error,
+    with_db_retry,
+)
+from tunes_player.core.library.formats import (
+    codec_for_extension,
+    has_tier1_extension,
+    has_tier1_extension_name,
+    mp4_codec_from_info,
+    should_skip_scan_dir,
+)
 
 ProgressCallback = Callable[[int, int, str], None]
+ScanBatchCallback = Callable[[int, int], None]
+_CandidateOutcome = Literal["indexed", "skipped", "error"]
+
+
+_MAX_RECORDED_FILE_ERRORS = 20
+
+
+@dataclass(frozen=True, slots=True)
+class ScanFileError:
+    path: str
+    reason: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +52,32 @@ class ScanResult:
     skipped: int
     errors: int
     art_indexed: int = 0
+    file_errors: tuple[ScanFileError, ...] = ()
+    total_candidates: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ExistingFileIndex:
+    """Prefetched file rows keyed by path with O(1) normcase fallback."""
+
+    by_path: dict[str, sqlite3.Row]
+    by_normcase: dict[str, str]
+    by_normpath: dict[str, str]
+
+    def get(self, path_str: str) -> tuple[str, sqlite3.Row] | None:
+        row = self.by_path.get(path_str)
+        if row is not None:
+            return path_str, row
+        for lookup_key in (os.path.normpath(path_str), os.path.normcase(path_str)):
+            canonical = self.by_normpath.get(lookup_key)
+            if canonical is None:
+                canonical = self.by_normcase.get(lookup_key)
+            if canonical is None:
+                continue
+            row = self.by_path.get(canonical)
+            if row is not None:
+                return canonical, row
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,34 +101,122 @@ class _ParsedTrack:
     year: int | None
     genre: str | None
     total_tracks: int | None
+    release_type_tag: str | None
 
 
 class LibraryScanner:
     _BATCH_SIZE = 50
-    _PROGRESS_INTERVAL_SEC = 0.5
-    _YIELD_EVERY = 8
+    _PROGRESS_INTERVAL_SEC = 1.0
+    _DISCOVERY_PROGRESS_INTERVAL_SEC = 2.0
+    _DISCOVERY_PROGRESS_EVERY = 10_000
+    _YIELD_EVERY = 32
+    _IN_SCAN_BACKFILL_INTERVAL_SEC = 3.0
+    _IN_SCAN_BACKFILL_BATCH_SIZE = 25
+    _IN_SCAN_ART_COMMIT_INTERVAL_SEC = 2.0
 
     def __init__(self, *, db_path: Path, config: AppConfig) -> None:
         self._db_path = db_path
         self._data_dir = db_path.parent
         self._config = config
+        self._resolved_folders: list[str] | None = None
 
-    def scan(self, *, progress: ProgressCallback | None = None) -> ScanResult:
+    def scan(
+        self,
+        *,
+        scan_folders: list[str] | None = None,
+        progress: ProgressCallback | None = None,
+        checkpoint_path: str | None = None,
+        expected_total: int | None = None,
+        batch_notify: ScanBatchCallback | None = None,
+    ) -> ScanResult:
+        del checkpoint_path  # Resume is handled by fast-skipping indexed files.
+        return with_db_retry(
+            lambda: self._scan_once(
+                scan_folders=scan_folders,
+                progress=progress,
+                expected_total=expected_total,
+                batch_notify=batch_notify,
+            )
+        )
+
+    def scan_changes(
+        self,
+        *,
+        folder: str,
+        add_paths: list[str] | None = None,
+        remove_paths: list[str] | None = None,
+        progress: ProgressCallback | None = None,
+        batch_notify: ScanBatchCallback | None = None,
+    ) -> ScanResult:
+        """Index or drop specific paths without walking the whole library folder."""
+        return with_db_retry(
+            lambda: self._scan_changes_once(
+                folder=folder,
+                add_paths=add_paths,
+                remove_paths=remove_paths,
+                progress=progress,
+                batch_notify=batch_notify,
+            )
+        )
+
+    def _scan_once(
+        self,
+        *,
+        scan_folders: list[str] | None = None,
+        progress: ProgressCallback | None = None,
+        expected_total: int | None = None,
+        batch_notify: ScanBatchCallback | None = None,
+    ) -> ScanResult:
         if progress is not None:
             progress(0, 0, "Discovering files…")
 
-        candidates = self._collect_candidates(progress=progress)
-        seen_paths: set[str] = set()
+        if scan_folders is None:
+            roots = [
+                str(Path(folder).resolve())
+                for folder in self._config.music_folders
+            ]
+        else:
+            roots = [str(Path(folder).resolve()) for folder in scan_folders]
+
+        discovered_paths: set[str] = set()
         indexed = 0
         skipped = 0
         errors = 0
-        total = len(candidates)
+        file_errors: list[ScanFileError] = []
         last_progress_at = 0.0
+        last_backfill_at = time.monotonic()
+        last_art_commit_at = time.monotonic()
+        last_batch_notify = (0, 0)
+        removed = 0
+        art_indexed = 0
+        total = 0
 
         connection = connect(self._db_path)
         try:
+            if progress is not None:
+                progress(0, 0, "Loading library index…")
             connection.execute("BEGIN")
-            for index, path in enumerate(candidates, start=1):
+            existing_files = self._load_existing_files_metadata(
+                connection,
+                roots,
+                progress=progress,
+            )
+            estimated_total = max(
+                len(existing_files.by_path),
+                expected_total or 0,
+            )
+            if progress is not None:
+                progress(0, 0, "Discovering files…")
+
+            for index, path in enumerate(
+                self._iter_audio_candidates(
+                    roots=roots,
+                    progress=progress,
+                    report_discovery=False,
+                ),
+                start=1,
+            ):
+                total = index
                 if index % self._YIELD_EVERY == 0:
                     time.sleep(0)
 
@@ -87,75 +224,104 @@ class LibraryScanner:
                     now = time.monotonic()
                     if (
                         index == 1
-                        or index == total
                         or now - last_progress_at >= self._PROGRESS_INTERVAL_SEC
                     ):
-                        progress(index, total, str(path))
+                        progress(
+                            index,
+                            max(estimated_total, index),
+                            str(path),
+                        )
                         last_progress_at = now
 
-                if not is_tier1_path(path):
-                    skipped += 1
-                    continue
-
-                try:
-                    stat = path.stat()
-                except OSError:
-                    errors += 1
-                    continue
-
-                path_str = str(path.resolve())
-                seen_paths.add(path_str)
-
-                existing = connection.execute(
-                    "SELECT id, mtime_ns, size_bytes, indexed_at_ns FROM files WHERE path = ?",
-                    (path_str,),
-                ).fetchone()
-                if (
-                    existing is not None
-                    and int(existing["mtime_ns"]) == stat.st_mtime_ns
-                    and int(existing["size_bytes"]) == stat.st_size
-                ):
-                    if self._should_bump_indexed_at(
-                        path_str=path_str,
-                        indexed_at_ns=int(existing["indexed_at_ns"]),
-                        mtime_ns=int(existing["mtime_ns"]),
-                        file_mtime_ns=stat.st_mtime_ns,
+                outcome, path_str, wrote, art_added = self._process_candidate(
+                    connection,
+                    path,
+                    file_errors=file_errors,
+                    existing_files=existing_files,
+                )
+                if art_added:
+                    art_indexed += 1
+                    now = time.monotonic()
+                    at_batch = wrote and index % self._BATCH_SIZE == 0
+                    if (
+                        not at_batch
+                        and now - last_art_commit_at
+                        >= self._IN_SCAN_ART_COMMIT_INTERVAL_SEC
                     ):
-                        connection.execute(
-                            "UPDATE files SET indexed_at_ns = ? WHERE id = ?",
-                            (time.time_ns(), int(existing["id"])),
+                        last_batch_notify = self._commit_scan_batch(
+                            connection,
+                            batch_notify=batch_notify,
+                            indexed=indexed,
+                            art_indexed=art_indexed,
+                            last_notified=last_batch_notify,
                         )
+                        last_art_commit_at = now
+                if path_str is not None:
+                    discovered_paths.add(path_str)
+                if outcome == "skipped":
                     skipped += 1
-                    continue
-
-                try:
-                    parsed = _parse_file(path, stat.st_mtime_ns, stat.st_size)
-                except Exception:
+                elif outcome == "error":
                     errors += 1
-                    continue
+                else:
+                    indexed += 1
 
-                if existing is not None:
-                    connection.execute("DELETE FROM files WHERE id = ?", (existing["id"],))
+                if wrote and index % self._BATCH_SIZE == 0:
+                    last_batch_notify = self._commit_scan_batch(
+                        connection,
+                        batch_notify=batch_notify,
+                        indexed=indexed,
+                        art_indexed=art_indexed,
+                        last_notified=last_batch_notify,
+                    )
+                    last_art_commit_at = time.monotonic()
 
-                file_id = self._insert_file(connection, parsed, indexed_at_ns=time.time_ns())
-                self._insert_track(connection, parsed, file_id)
-                index_album_art_for_file(
+                now = time.monotonic()
+                if now - last_backfill_at >= self._IN_SCAN_BACKFILL_INTERVAL_SEC:
+                    added = self._backfill_missing_art_during_scan(connection)
+                    last_backfill_at = now
+                    if added > 0:
+                        art_indexed += added
+                        last_batch_notify = self._commit_scan_batch(
+                            connection,
+                            batch_notify=batch_notify,
+                            indexed=indexed,
+                            art_indexed=art_indexed,
+                            last_notified=last_batch_notify,
+                        )
+                        last_art_commit_at = now
+
+            if progress is not None and total > 0:
+                progress(total, max(estimated_total, total), "")
+
+            connection.commit()
+            connection.execute("BEGIN")
+            removed = self._remove_missing_files(connection, discovered_paths, roots)
+            configured_roots = [
+                str(Path(folder).resolve())
+                for folder in self._config.music_folders
+            ]
+            removed += self._purge_files_outside_roots(connection, configured_roots)
+            if indexed > 0 or removed > 0:
+                art_added, art_repaired = maintain_album_art(
                     connection,
                     data_dir=self._data_dir,
-                    path=Path(parsed.path),
-                    album_artist=parsed.album_artist,
-                    album=parsed.album,
                 )
-                indexed += 1
+            else:
+                from tunes_player.core.library.art_cache import backfill_missing_album_art
 
-                if indexed % self._BATCH_SIZE == 0:
-                    connection.commit()
-                    connection.execute("BEGIN")
-
-            removed = self._remove_missing_files(connection, seen_paths)
-            art_indexed = backfill_missing_album_art(connection, data_dir=self._data_dir)
-            prune_orphan_album_art(connection, data_dir=self._data_dir)
-            connection.commit()
+                art_added = backfill_missing_album_art(
+                    connection,
+                    data_dir=self._data_dir,
+                )
+                art_repaired = 0
+            art_indexed += art_added + art_repaired
+            last_batch_notify = self._commit_scan_batch(
+                connection,
+                batch_notify=batch_notify,
+                indexed=indexed,
+                art_indexed=art_indexed,
+                last_notified=last_batch_notify,
+            )
         except Exception:
             connection.rollback()
             raise
@@ -168,7 +334,415 @@ class LibraryScanner:
             skipped=skipped,
             errors=errors,
             art_indexed=art_indexed,
+            file_errors=tuple(file_errors),
+            total_candidates=total,
         )
+
+    def _scan_changes_once(
+        self,
+        *,
+        folder: str,
+        add_paths: list[str] | None = None,
+        remove_paths: list[str] | None = None,
+        progress: ProgressCallback | None = None,
+        batch_notify: ScanBatchCallback | None = None,
+    ) -> ScanResult:
+        root = str(Path(folder).resolve())
+        to_add = self._expand_change_paths(add_paths or [])
+        to_remove = [str(Path(path).resolve()) for path in (remove_paths or [])]
+        indexed = 0
+        skipped = 0
+        errors = 0
+        file_errors: list[ScanFileError] = []
+        removed = 0
+        art_indexed = 0
+        steps: list[tuple[str, Path | str]] = [
+            ("remove", path_str) for path_str in to_remove
+        ] + [("add", path) for path in to_add]
+        total = len(steps)
+        last_progress_at = 0.0
+        last_art_commit_at = time.monotonic()
+        last_batch_notify = (0, 0)
+
+        connection = connect(self._db_path)
+        try:
+            connection.execute("BEGIN")
+            for index, (kind, target) in enumerate(steps, start=1):
+                if index % self._YIELD_EVERY == 0:
+                    time.sleep(0)
+
+                if progress is not None:
+                    now = time.monotonic()
+                    label = str(target)
+                    if (
+                        index == 1
+                        or index == total
+                        or now - last_progress_at >= self._PROGRESS_INTERVAL_SEC
+                    ):
+                        progress(index, total, label)
+                        last_progress_at = now
+
+                if kind == "remove":
+                    removed += self._remove_paths(connection, [str(target)])
+                    continue
+
+                if not isinstance(target, Path):
+                    target = Path(str(target))
+                if not has_tier1_extension(target):
+                    skipped += 1
+                    continue
+
+                outcome, _path_str, wrote, art_added = self._process_candidate(
+                    connection,
+                    target,
+                    file_errors=file_errors,
+                )
+                if art_added:
+                    art_indexed += 1
+                    now = time.monotonic()
+                    at_batch = wrote and index % self._BATCH_SIZE == 0
+                    if (
+                        not at_batch
+                        and now - last_art_commit_at
+                        >= self._IN_SCAN_ART_COMMIT_INTERVAL_SEC
+                    ):
+                        last_batch_notify = self._commit_scan_batch(
+                            connection,
+                            batch_notify=batch_notify,
+                            indexed=indexed,
+                            art_indexed=art_indexed,
+                            last_notified=last_batch_notify,
+                        )
+                        last_art_commit_at = now
+                if outcome == "skipped":
+                    skipped += 1
+                elif outcome == "error":
+                    errors += 1
+                else:
+                    indexed += 1
+                if wrote and index % self._BATCH_SIZE == 0:
+                    last_batch_notify = self._commit_scan_batch(
+                        connection,
+                        batch_notify=batch_notify,
+                        indexed=indexed,
+                        art_indexed=art_indexed,
+                        last_notified=last_batch_notify,
+                    )
+                    last_art_commit_at = time.monotonic()
+
+            if indexed > 0 or removed > 0:
+                art_added, art_repaired = maintain_album_art(
+                    connection,
+                    data_dir=self._data_dir,
+                )
+            else:
+                from tunes_player.core.library.art_cache import backfill_missing_album_art
+
+                art_added = backfill_missing_album_art(
+                    connection,
+                    data_dir=self._data_dir,
+                )
+                art_repaired = 0
+            art_indexed += art_added + art_repaired
+            self._commit_scan_batch(
+                connection,
+                batch_notify=batch_notify,
+                indexed=indexed,
+                art_indexed=art_indexed,
+                last_notified=last_batch_notify,
+            )
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+        return ScanResult(
+            indexed=indexed,
+            removed=removed,
+            skipped=skipped,
+            errors=errors,
+            art_indexed=art_indexed,
+            file_errors=tuple(file_errors),
+            total_candidates=total,
+        )
+
+    @staticmethod
+    def _commit_scan_batch(
+        connection: sqlite3.Connection,
+        *,
+        batch_notify: ScanBatchCallback | None,
+        indexed: int,
+        art_indexed: int,
+        last_notified: tuple[int, int],
+    ) -> tuple[int, int]:
+        connection.commit()
+        connection.execute("BEGIN")
+        return LibraryScanner._notify_scan_batch(
+            batch_notify,
+            indexed=indexed,
+            art_indexed=art_indexed,
+            last_notified=last_notified,
+        )
+
+    @staticmethod
+    def _notify_scan_batch(
+        batch_notify: ScanBatchCallback | None,
+        *,
+        indexed: int,
+        art_indexed: int,
+        last_notified: tuple[int, int],
+    ) -> tuple[int, int]:
+        if batch_notify is None:
+            return last_notified
+        if indexed <= last_notified[0] and art_indexed <= last_notified[1]:
+            return last_notified
+        batch_notify(indexed, art_indexed)
+        return (indexed, art_indexed)
+
+    def _backfill_missing_art_during_scan(self, connection: sqlite3.Connection) -> int:
+        from tunes_player.core.library.art_cache import backfill_missing_album_art
+
+        return backfill_missing_album_art(
+            connection,
+            data_dir=self._data_dir,
+            limit=self._IN_SCAN_BACKFILL_BATCH_SIZE,
+        )
+
+    @staticmethod
+    def _record_file_error(
+        file_errors: list[ScanFileError],
+        path_str: str,
+        reason: str,
+    ) -> None:
+        if len(file_errors) >= _MAX_RECORDED_FILE_ERRORS:
+            return
+        text = reason.strip() or "unknown error"
+        file_errors.append(ScanFileError(path_str, text))
+
+    def _canonical_path_str(self, path: Path) -> str:
+        try:
+            return str(path.resolve())
+        except OSError:
+            return str(path.absolute())
+
+    def _lookup_existing_file(
+        self,
+        path: Path,
+        existing_index: ExistingFileIndex | None,
+        connection: sqlite3.Connection,
+        *,
+        hint_path: str | None = None,
+    ) -> tuple[str, sqlite3.Row | None]:
+        candidates: list[str] = []
+
+        def add(candidate: str) -> None:
+            normalized = os.path.normpath(candidate)
+            for variant in (candidate, normalized):
+                if variant not in candidates:
+                    candidates.append(variant)
+
+        if hint_path is not None:
+            add(hint_path)
+        add(str(path))
+        add(str(path.absolute()))
+
+        for candidate in candidates:
+            hit = self._lookup_path_in_index(candidate, existing_index, connection)
+            if hit is not None:
+                return hit
+
+        if existing_index is not None:
+            try:
+                real = os.path.realpath(str(path))
+            except OSError:
+                real = None
+            if real is not None:
+                for candidate in (real, os.path.normpath(real)):
+                    hit = self._lookup_path_in_index(candidate, existing_index, connection)
+                    if hit is not None:
+                        return hit
+
+        return (candidates[0] if candidates else self._canonical_path_str(path)), None
+
+    @staticmethod
+    def _lookup_path_in_index(
+        path_str: str,
+        existing_index: ExistingFileIndex | None,
+        connection: sqlite3.Connection,
+    ) -> tuple[str, sqlite3.Row] | None:
+        if existing_index is not None:
+            return existing_index.get(path_str)
+        row = connection.execute(
+            """
+            SELECT id, path, mtime_ns, size_bytes, indexed_at_ns
+            FROM files WHERE path = ?
+            """,
+            (path_str,),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row["path"]), row
+
+    @staticmethod
+    def _file_metadata_unchanged(existing: sqlite3.Row, stat: os.stat_result) -> bool:
+        if int(existing["size_bytes"]) != stat.st_size:
+            return False
+        existing_ns = int(existing["mtime_ns"])
+        file_ns = stat.st_mtime_ns
+        if existing_ns == file_ns:
+            return True
+        # NFS and other remote filesystems often expose only second precision.
+        return existing_ns // 1_000_000_000 == file_ns // 1_000_000_000
+
+    def _process_candidate(
+        self,
+        connection: sqlite3.Connection,
+        path: Path,
+        *,
+        file_errors: list[ScanFileError],
+        existing_files: ExistingFileIndex | None = None,
+    ) -> tuple[_CandidateOutcome, str | None, bool, bool]:
+        if not has_tier1_extension(path):
+            return "skipped", None, False, False
+
+        path_str, existing = self._lookup_existing_file(path, existing_files, connection)
+        if existing is not None and not self._should_bump_indexed_at(
+            path_str=path_str,
+            indexed_at_ns=int(existing["indexed_at_ns"]),
+            mtime_ns=int(existing["mtime_ns"]),
+            file_mtime_ns=int(existing["mtime_ns"]),
+        ):
+            return "skipped", path_str, False, False
+
+        try:
+            stat = path.stat()
+        except OSError as exc:
+            self._record_file_error(
+                file_errors,
+                path_str,
+                f"could not read file ({exc})",
+            )
+            return "error", path_str, False, False
+
+        if (
+            existing is not None
+            and self._file_metadata_unchanged(existing, stat)
+        ):
+            wrote = False
+            if self._should_bump_indexed_at(
+                path_str=path_str,
+                indexed_at_ns=int(existing["indexed_at_ns"]),
+                mtime_ns=int(existing["mtime_ns"]),
+                file_mtime_ns=stat.st_mtime_ns,
+            ):
+                connection.execute(
+                    "UPDATE files SET indexed_at_ns = ? WHERE id = ?",
+                    (time.time_ns(), int(existing["id"])),
+                )
+                wrote = True
+            return "skipped", path_str, wrote, False
+
+        try:
+            parsed = _parse_file(path, stat.st_mtime_ns, stat.st_size)
+        except _UnsupportedTier1Path:
+            return "skipped", None, False, False
+        except Exception as exc:
+            reason = str(exc).strip() or type(exc).__name__
+            self._record_file_error(file_errors, path_str, reason)
+            return "error", path_str, False, False
+
+        path_str = parsed.path
+        reindex = existing is not None
+        last_error: sqlite3.OperationalError | None = None
+        for attempt in range(LOCK_RETRY_ATTEMPTS):
+            connection.execute("SAVEPOINT index_file")
+            try:
+                track_pk = ids.track_id(path_str)
+                if reindex:
+                    connection.execute("DELETE FROM tracks WHERE id = ?", (track_pk,))
+                    connection.execute("DELETE FROM files WHERE path = ?", (path_str,))
+                file_id = self._insert_file(connection, parsed, indexed_at_ns=time.time_ns())
+                self._insert_track(connection, parsed, file_id)
+                connection.execute("RELEASE SAVEPOINT index_file")
+                from tunes_player.core.library.art_cache import link_or_index_album_art
+
+                art_added = link_or_index_album_art(
+                    connection,
+                    data_dir=self._data_dir,
+                    path=path,
+                    album_id=parsed.release_id,
+                )
+                return "indexed", path_str, True, art_added
+            except sqlite3.OperationalError as exc:
+                try:
+                    connection.execute("ROLLBACK TO SAVEPOINT index_file")
+                    connection.execute("RELEASE SAVEPOINT index_file")
+                except sqlite3.OperationalError:
+                    pass
+                if is_locked_error(exc) and attempt < LOCK_RETRY_ATTEMPTS - 1:
+                    last_error = exc
+                    time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
+                    continue
+                reason = str(exc).strip() or type(exc).__name__
+                self._record_file_error(file_errors, path_str, reason)
+                return "error", path_str, False, False
+            except Exception as exc:
+                try:
+                    connection.execute("ROLLBACK TO SAVEPOINT index_file")
+                    connection.execute("RELEASE SAVEPOINT index_file")
+                except sqlite3.OperationalError:
+                    pass
+                reason = str(exc).strip() or type(exc).__name__
+                self._record_file_error(file_errors, path_str, reason)
+                return "error", path_str, False, False
+
+        if last_error is not None:
+            self._record_file_error(file_errors, path_str, str(last_error))
+        return "error", path_str, False, False
+
+    def purge_folder(self, folder: str) -> int:
+        """Remove all indexed files under *folder* from the library database."""
+        root = str(Path(folder).resolve())
+
+        def attempt() -> int:
+            connection = connect(self._db_path)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                removed = self._purge_files_under_roots(connection, [root])
+                prune_orphan_album_art(connection, data_dir=self._data_dir)
+                connection.commit()
+                return removed
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+
+        return with_db_retry(attempt)
+
+    def purge_unconfigured_folders(self) -> int:
+        """Remove indexed files whose path is outside configured music folders."""
+        roots = [
+            str(Path(folder).resolve())
+            for folder in self._config.music_folders
+        ]
+
+        def attempt() -> int:
+            connection = connect(self._db_path)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                removed = self._purge_files_outside_roots(connection, roots)
+                prune_orphan_album_art(connection, data_dir=self._data_dir)
+                connection.commit()
+                return removed
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+
+        return with_db_retry(attempt)
 
     def _should_bump_indexed_at(
         self,
@@ -189,31 +763,141 @@ class LibraryScanner:
         return indexed_at_ns == 0 and file_mtime_ns >= cutoff_ns
 
     def _folder_for_path(self, path_str: str) -> str | None:
-        for folder in self._config.music_folders:
-            folder_resolved = str(Path(folder).resolve())
-            if path_str == folder_resolved or path_str.startswith(folder_resolved + os.sep):
-                return folder_resolved
+        for folder in self._resolved_music_folders():
+            if path_str == folder or path_str.startswith(folder + os.sep):
+                return folder
         return None
 
-    def _collect_candidates(self, *, progress: ProgressCallback | None = None) -> list[Path]:
-        paths: list[Path] = []
-        seen = 0
-        for folder in self._config.music_folders:
+    def _resolved_music_folders(self) -> list[str]:
+        if self._resolved_folders is None:
+            self._resolved_folders = [
+                str(Path(folder).resolve())
+                for folder in self._config.music_folders
+            ]
+        return self._resolved_folders
+
+    def _iter_audio_candidates(
+        self,
+        *,
+        roots: list[str],
+        progress: ProgressCallback | None = None,
+        report_discovery: bool = True,
+    ):
+        """Yield Tier 1 audio paths using scandir, skipping junk directories."""
+        last_progress_at = 0.0
+        count = 0
+        for folder in roots:
             root = Path(folder)
             if not root.is_dir():
                 continue
-            for dirpath, _dirnames, filenames in os.walk(root, followlinks=True):
-                for name in filenames:
-                    path = Path(dirpath) / name
-                    if has_tier1_extension(path):
-                        paths.append(path)
-                    seen += 1
-                    if seen % 5000 == 0:
-                        time.sleep(0)
-                        if progress is not None:
-                            progress(0, 0, f"Discovering files… ({len(paths)} found)")
-        paths.sort()
-        return paths
+            stack = [root]
+            while stack:
+                current = stack.pop()
+                try:
+                    with os.scandir(current) as entries:
+                        subdirs: list[Path] = []
+                        for entry in entries:
+                            try:
+                                if entry.is_dir(follow_symlinks=False):
+                                    if not should_skip_scan_dir(entry.name):
+                                        subdirs.append(Path(entry.path))
+                                    continue
+                                if not entry.is_file(follow_symlinks=False):
+                                    continue
+                            except OSError:
+                                continue
+                            if not has_tier1_extension_name(entry.name):
+                                continue
+                            count += 1
+                            if report_discovery and progress is not None:
+                                now = time.monotonic()
+                                if (
+                                    count == 1
+                                    or count % self._DISCOVERY_PROGRESS_EVERY == 0
+                                    or now - last_progress_at
+                                    >= self._DISCOVERY_PROGRESS_INTERVAL_SEC
+                                ):
+                                    progress(
+                                        0,
+                                        0,
+                                        f"Discovering files… ({count:,} found)",
+                                    )
+                                    last_progress_at = now
+                            yield Path(entry.path)
+                        stack.extend(reversed(subdirs))
+                except OSError:
+                    continue
+        if report_discovery and progress is not None and count > 0:
+            progress(0, 0, f"Discovering files… ({count:,} found)")
+
+    def _collect_candidates(
+        self,
+        *,
+        roots: list[str],
+        progress: ProgressCallback | None = None,
+    ) -> list[Path]:
+        return list(self._iter_audio_candidates(roots=roots, progress=progress))
+
+    @staticmethod
+    def _load_existing_files_metadata(
+        connection: sqlite3.Connection,
+        roots: list[str],
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> ExistingFileIndex:
+        by_path: dict[str, sqlite3.Row] = {}
+        by_normcase: dict[str, str] = {}
+        by_normpath: dict[str, str] = {}
+        loaded = 0
+        last_progress_at = 0.0
+        for root in roots:
+            rows = connection.execute(
+                """
+                SELECT id, path, mtime_ns, size_bytes, indexed_at_ns
+                FROM files
+                WHERE path = ? OR path LIKE ?
+                """,
+                (root, root + os.sep + "%"),
+            ).fetchall()
+            for row in rows:
+                path_str = str(row["path"])
+                LibraryScanner._register_existing_file_path(
+                    by_path=by_path,
+                    by_normcase=by_normcase,
+                    by_normpath=by_normpath,
+                    path_str=path_str,
+                    row=row,
+                )
+                loaded += 1
+                if progress is not None and loaded % 5000 == 0:
+                    now = time.monotonic()
+                    if now - last_progress_at >= 0.5:
+                        progress(
+                            0,
+                            0,
+                            f"Loading library index… ({loaded:,} files)",
+                        )
+                        last_progress_at = now
+        if progress is not None and loaded > 0:
+            progress(0, 0, f"Loading library index… ({loaded:,} files)")
+        return ExistingFileIndex(
+            by_path=by_path,
+            by_normcase=by_normcase,
+            by_normpath=by_normpath,
+        )
+
+    @staticmethod
+    def _register_existing_file_path(
+        *,
+        by_path: dict[str, sqlite3.Row],
+        by_normcase: dict[str, str],
+        by_normpath: dict[str, str],
+        path_str: str,
+        row: sqlite3.Row,
+    ) -> None:
+        by_path[path_str] = row
+        by_normcase.setdefault(os.path.normcase(path_str), path_str)
+        by_normpath.setdefault(os.path.normpath(path_str), path_str)
 
     @staticmethod
     def _insert_file(
@@ -249,8 +933,9 @@ class LibraryScanner:
             """
             INSERT INTO tracks(
                 id, file_id, album_id, title, artist, album_artist, album,
-                disc_number, track_number, year, is_synthetic, total_tracks, genre
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                disc_number, track_number, year, is_synthetic, total_tracks, genre,
+                release_type_tag
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ids.track_id(parsed.path),
@@ -266,24 +951,144 @@ class LibraryScanner:
                 1 if parsed.is_synthetic else 0,
                 parsed.total_tracks,
                 parsed.genre,
+                parsed.release_type_tag,
             ),
         )
 
+    def _expand_change_paths(self, paths: list[str]) -> list[Path]:
+        candidates: list[Path] = []
+        seen: set[str] = set()
+        for raw in paths:
+            path = Path(raw)
+            if path.is_file():
+                if has_tier1_extension(path):
+                    path_str = str(path.resolve())
+                    if path_str not in seen:
+                        seen.add(path_str)
+                        candidates.append(path.resolve())
+                continue
+            if not path.is_dir():
+                continue
+            for candidate in self._iter_audio_candidates(roots=[str(path.resolve())]):
+                path_str = str(candidate.resolve())
+                if path_str in seen:
+                    continue
+                seen.add(path_str)
+                candidates.append(candidate.resolve())
+        return candidates
+
     @staticmethod
-    def _remove_missing_files(connection: sqlite3.Connection, seen_paths: set[str]) -> int:
-        rows = connection.execute("SELECT id, path FROM files").fetchall()
+    def _remove_paths(connection: sqlite3.Connection, paths: list[str]) -> int:
         removed = 0
-        for row in rows:
-            if row["path"] not in seen_paths:
+        for raw in paths:
+            path_str = str(Path(raw).resolve())
+            prefix = path_str + os.sep
+            rows = connection.execute(
+                """
+                SELECT id FROM files
+                WHERE path = ? OR path LIKE ?
+                """,
+                (path_str, prefix + "%"),
+            ).fetchall()
+            for row in rows:
+                connection.execute("DELETE FROM files WHERE id = ?", (int(row["id"]),))
+                removed += 1
+        return removed
+
+    @staticmethod
+    def _path_under_roots(path_str: str, scan_roots: list[str]) -> bool:
+        for root in scan_roots:
+            if path_str == root or path_str.startswith(root + os.sep):
+                return True
+        return False
+
+    @staticmethod
+    def _remove_missing_files(
+        connection: sqlite3.Connection,
+        seen_paths: set[str],
+        scan_roots: list[str],
+    ) -> int:
+        return LibraryScanner._purge_files_under_roots(
+            connection,
+            scan_roots,
+            exclude_paths=seen_paths,
+        )
+
+    @staticmethod
+    def _purge_files_under_roots(
+        connection: sqlite3.Connection,
+        roots: list[str],
+        *,
+        exclude_paths: set[str] | None = None,
+    ) -> int:
+        if exclude_paths is None:
+            removed = 0
+            for root in roots:
+                cursor = connection.execute(
+                    "DELETE FROM files WHERE path = ? OR path LIKE ?",
+                    (root, root + os.sep + "%"),
+                )
+                removed += int(cursor.rowcount)
+            return removed
+
+        removed = 0
+        for root in roots:
+            rows = connection.execute(
+                """
+                SELECT id, path FROM files
+                WHERE path = ? OR path LIKE ?
+                """,
+                (root, root + os.sep + "%"),
+            ).fetchall()
+            for row in rows:
+                path_str = row["path"]
+                if path_str in exclude_paths:
+                    continue
                 connection.execute("DELETE FROM files WHERE id = ?", (row["id"],))
                 removed += 1
         return removed
 
+    @staticmethod
+    def purge_files_outside_roots(
+        connection: sqlite3.Connection,
+        roots: list[str],
+    ) -> int:
+        if not roots:
+            cursor = connection.execute("DELETE FROM files")
+            return int(cursor.rowcount)
+        clauses: list[str] = []
+        params: list[str] = []
+        for root in roots:
+            clauses.append("(path = ? OR path LIKE ?)")
+            params.extend((root, root + os.sep + "%"))
+        where_under = " OR ".join(clauses)
+        cursor = connection.execute(
+            f"DELETE FROM files WHERE NOT ({where_under})",
+            params,
+        )
+        return int(cursor.rowcount)
+
+    @staticmethod
+    def _purge_files_outside_roots(
+        connection: sqlite3.Connection,
+        roots: list[str],
+    ) -> int:
+        return LibraryScanner.purge_files_outside_roots(connection, roots)
+
+
+class _UnsupportedTier1Path(Exception):
+    """Raised when a candidate path is not a supported Tier 1 audio file."""
+
 
 def _parse_file(path: Path, mtime_ns: int, size_bytes: int) -> _ParsedTrack:
     path_str = str(path.resolve())
-    codec = codec_for_path(path)
+    suffix = path.suffix.casefold()
     tags = _read_tags(path)
+    codec = tags.pop("_codec", None)
+    if codec is None:
+        codec = codec_for_extension(suffix)
+    if suffix == ".m4a" and codec not in {"alac", "aac"}:
+        raise _UnsupportedTier1Path()
     title = tags.get("title") or path.stem
     artist = tags.get("artist") or tags.get("albumartist") or "Unknown Artist"
     album_artist = tags.get("albumartist") or artist
@@ -322,7 +1127,22 @@ def _parse_file(path: Path, mtime_ns: int, size_bytes: int) -> _ParsedTrack:
         year=tags.get("year"),
         genre=tags.get("genre"),
         total_tracks=total_tracks,
+        release_type_tag=_release_type_tag_from_tags(tags),
     )
+
+
+def _release_type_tag_from_tags(tags: dict) -> str | None:
+    for key in (
+        "releasetype",
+        "release_type",
+        "albumtype",
+        "musicbrainz_albumtype",
+        "musicbrainz album type",
+    ):
+        value = tags.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
 
 
 def _album_tag_missing(album: str | None) -> bool:
@@ -368,6 +1188,19 @@ def _read_mutagen_id3(path: Path) -> dict:
 
     audio = MP3(path, ID3=EasyID3)
     tags = _tags_from_easyid3(audio.tags or {})
+    if audio.tags is not None:
+        for frame in audio.tags.values():
+            frame_id = getattr(frame, "FrameID", "")
+            if frame_id != "TXXX":
+                continue
+            desc = str(getattr(frame, "desc", "") or "")
+            desc_key = desc.strip().casefold()
+            if desc_key not in {"musicbrainz album type", "albumtype", "release type"}:
+                continue
+            text = getattr(frame, "text", None)
+            if text:
+                tags["musicbrainz_albumtype"] = str(text[0])
+                break
     tags.update(_audio_info(audio.info))
     return tags
 
@@ -385,6 +1218,7 @@ def _read_mutagen_mp4(path: Path) -> dict:
     audio = MP4(path)
     tags: dict = {"_audio": {}}
     tags.update(_audio_info(audio.info))
+    tags["_codec"] = mp4_codec_from_info(audio.info)
     mapping = {
         "\xa9nam": "title",
         "\xa9ART": "artist",
@@ -441,6 +1275,10 @@ def _tags_from_vorbis(audio) -> dict:
         ("tracktotal", "totaltracks"),
         ("date", "year"),
         ("genre", "genre"),
+        ("releasetype", "releasetype"),
+        ("release-type", "releasetype"),
+        ("musicbrainz_albumtype", "musicbrainz_albumtype"),
+        ("musicbrainz album type", "musicbrainz_albumtype"),
     ):
         value = getter(key)
         if not value:
@@ -466,6 +1304,9 @@ def _tags_from_easyid3(tags) -> dict:
         ("tracktotal", "totaltracks"),
         ("date", "year"),
         ("genre", "genre"),
+        ("releasetype", "releasetype"),
+        ("release-type", "releasetype"),
+        ("musicbrainz_albumtype", "musicbrainz_albumtype"),
     ):
         if key not in tags:
             continue

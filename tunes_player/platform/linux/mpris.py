@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 
+import tunes_player.gi_bootstrap  # noqa: F401 — before gi.repository
 import gi
 
 gi.require_version("Gio", "2.0")
@@ -21,7 +22,7 @@ OBJECT_PATH = "/org/mpris/MediaPlayer2"
 ROOT_INTERFACE = "org.mpris.MediaPlayer2"
 PLAYER_INTERFACE = "org.mpris.MediaPlayer2.Player"
 PROPERTIES_INTERFACE = "org.freedesktop.DBus.Properties"
-DESKTOP_ENTRY = "tunes-player"
+DESKTOP_ENTRY = "tunes.player"
 IDENTITY = "Tunes"
 SUPPORTED_MIME_TYPES = [
     "audio/flac",
@@ -99,7 +100,6 @@ _INTROSPECTION = """
 </node>
 """
 
-_POSITION_EMIT_INTERVAL_SEC = 1.0
 _VOID_REPLY = GLib.Variant("()", ())
 
 
@@ -127,9 +127,9 @@ class MprisService:
         self._unsubscribe: Callable[[], None] | None = None
         self._loop_status = "None"
         self._shuffle = False
-        self._last_position_emit = 0.0
         self._pending_property_names: set[str] = set()
         self._pending_property_emit = False
+        self._position_timer_id = 0
         self._node_info = Gio.DBusNodeInfo.new_for_xml(_INTROSPECTION)
 
     def start(self) -> None:
@@ -144,8 +144,16 @@ class MprisService:
             self._on_name_lost,
         )
         self._unsubscribe = self._service.subscribe(self._on_service_event)
+        if self._position_timer_id == 0:
+            self._position_timer_id = GLib.timeout_add_seconds(
+                1,
+                self._emit_position_if_playing,
+            )
 
     def stop(self) -> None:
+        if self._position_timer_id != 0:
+            GLib.source_remove(self._position_timer_id)
+            self._position_timer_id = 0
         if self._unsubscribe is not None:
             self._unsubscribe()
             self._unsubscribe = None
@@ -201,15 +209,13 @@ class MprisService:
             )
         elif event == "volume_changed":
             self._schedule_player_properties("Volume")
-        elif event == "position_changed":
-            now = GLib.get_monotonic_time() / 1_000_000
-            state = self._service.get_playback_state()
-            if not state.is_playing:
-                return False
-            if now - self._last_position_emit >= _POSITION_EMIT_INTERVAL_SEC:
-                self._last_position_emit = now
-                self._schedule_player_properties("Position")
         return False
+
+    def _emit_position_if_playing(self) -> bool:
+        state = self._service.get_playback_state()
+        if state.is_playing:
+            self._schedule_player_properties("Position")
+        return True
 
     def _handle_method_call(
         self,
@@ -299,7 +305,8 @@ class MprisService:
             self._emit_seeked(int(offset_us))
         elif method_name == "SetVolume":
             (volume,) = parameters.unpack()
-            self._service.set_volume(max(0.0, min(1.0, volume)))
+            if self._service.volume_adjustable():
+                self._service.set_volume(max(0.0, min(1.0, volume)))
         else:
             invocation.return_dbus_error(
                 "org.freedesktop.DBus.Error.UnknownMethod",
@@ -371,7 +378,10 @@ class MprisService:
                 "Rate": GLib.Variant("d", 1.0),
                 "Shuffle": GLib.Variant("b", self._shuffle),
                 "Metadata": GLib.Variant("a{sv}", self._metadata(state)),
-                "Volume": GLib.Variant("d", state.volume),
+                "Volume": GLib.Variant(
+                    "d",
+                    state.volume if self._service.volume_adjustable() else 1.0,
+                ),
                 "Position": GLib.Variant("x", self._position_us(state)),
                 "MinimumRate": GLib.Variant("d", 1.0),
                 "MaximumRate": GLib.Variant("d", 1.0),
@@ -400,7 +410,8 @@ class MprisService:
                 f"Property {interface_name}.{property_name} is not writable",
             )
         if property_name == "Volume":
-            self._service.set_volume(max(0.0, min(1.0, value.unpack())))
+            if self._service.volume_adjustable():
+                self._service.set_volume(max(0.0, min(1.0, value.unpack())))
         elif property_name == "LoopStatus":
             loop_status = value.unpack()
             if loop_status not in {"None", "Track", "Playlist"}:
@@ -511,8 +522,8 @@ class MprisService:
             "xesam:title": GLib.Variant("s", track.title),
             "xesam:artist": GLib.Variant("as", [track.artist_name]),
         }
-        if track.album_title:
-            metadata["xesam:album"] = GLib.Variant("s", track.album_title)
+        if track.release_title:
+            metadata["xesam:album"] = GLib.Variant("s", track.release_title)
         if state.duration_sec is not None:
             metadata["xesam:duration"] = GLib.Variant("x", int(state.duration_sec * 1_000_000))
         source = resolve_track(self._service.store, track.id, tidal=self._service.tidal)

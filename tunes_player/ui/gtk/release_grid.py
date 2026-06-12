@@ -1,25 +1,27 @@
-"""Album browse grid layout (pure math, no GTK)."""
+"""Release browse grid layout (pure math, no GTK)."""
 
 from __future__ import annotations
 
-ALBUM_TILE_MIN_EDGE = 140
-ALBUM_TILE_MAX_EDGE = 200
-ALBUM_GRID_SPACING = 12
-ALBUM_GRID_VIEW_MARGIN = 18
+import math
+
+RELEASE_TILE_MIN_EDGE = 140
+RELEASE_TILE_MAX_EDGE = 200
+RELEASE_GRID_SPACING = 12
+RELEASE_GRID_VIEW_MARGIN = 18
 SEARCH_VIEW_HORIZONTAL_MARGIN = 12
 
 
-def album_grid_min_content_width() -> int:
+def release_grid_min_content_width() -> int:
     """Minimum main-pane width for one column at min tile size (includes grid margins)."""
-    return 2 * ALBUM_GRID_VIEW_MARGIN + ALBUM_TILE_MIN_EDGE
+    return 2 * RELEASE_GRID_VIEW_MARGIN + RELEASE_TILE_MIN_EDGE
 
 
 def search_grid_min_content_width() -> int:
-    """Minimum width for search album tiles (search box margins + min tile)."""
-    return 2 * SEARCH_VIEW_HORIZONTAL_MARGIN + ALBUM_TILE_MIN_EDGE
+    """Minimum width for search release tiles (search box margins + min tile)."""
+    return 2 * SEARCH_VIEW_HORIZONTAL_MARGIN + RELEASE_TILE_MIN_EDGE
 
 
-def album_grid_inner_width(
+def release_grid_inner_width(
     window_width: int,
     *,
     sidebar_width: int,
@@ -29,7 +31,7 @@ def album_grid_inner_width(
     return max(0, window_width - sidebar_width - horizontal_padding)
 
 
-def album_grid_content_inner_width(
+def release_grid_content_inner_width(
     outer_width: int,
     *,
     margin_start: int = 0,
@@ -45,7 +47,7 @@ def album_grid_content_inner_width(
     return max(0, outer_width - margin_start - margin_end)
 
 
-def album_grid_resolve_inner_width(
+def release_grid_resolve_inner_width(
     *,
     viewport_inner: int,
     window_inner: int,
@@ -81,11 +83,11 @@ def album_grid_resolve_inner_width(
     return inner, vp, win
 
 
-def album_grid_layout(inner_width: int) -> tuple[int, int]:
+def release_grid_layout(inner_width: int) -> tuple[int, int]:
     """Return (columns, tile_edge) for a start-aligned grid that fills inner_width."""
-    spacing = ALBUM_GRID_SPACING
-    min_edge = ALBUM_TILE_MIN_EDGE
-    max_edge = ALBUM_TILE_MAX_EDGE
+    spacing = RELEASE_GRID_SPACING
+    min_edge = RELEASE_TILE_MIN_EDGE
+    max_edge = RELEASE_TILE_MAX_EDGE
 
     if inner_width < min_edge:
         return 1, min_edge
@@ -100,3 +102,41 @@ def album_grid_layout(inner_width: int) -> tuple[int, int]:
 
     edge = max(min_edge, min(edge, max_edge))
     return columns, edge
+
+
+def release_grid_visible_card_indices(
+    *,
+    card_count: int,
+    columns: int,
+    tile_edge: int,
+    scroll_y: float,
+    viewport_height: float,
+    margin_top: int = RELEASE_GRID_VIEW_MARGIN,
+    prefetch_rows: int = 1,
+) -> tuple[int, int]:
+    """Return half-open card index range ``[start, end)`` that should load artwork.
+
+    Rows are square tiles of *tile_edge* with ``RELEASE_GRID_SPACING`` between them,
+    offset by *margin_top* inside the scroll child.
+    """
+    if card_count <= 0 or columns <= 0 or tile_edge <= 0 or viewport_height <= 0:
+        return (0, 0)
+
+    stride = tile_edge + RELEASE_GRID_SPACING
+    scroll_bottom = scroll_y + viewport_height
+    num_rows = (card_count + columns - 1) // columns
+
+    first_row = max(0, math.floor((scroll_y - margin_top - tile_edge) / stride) + 1)
+    last_row = min(
+        num_rows - 1,
+        max(0, math.ceil((scroll_bottom - margin_top) / stride) - 1),
+    )
+
+    first_row = max(0, first_row - prefetch_rows)
+    last_row = min(num_rows - 1, last_row + prefetch_rows)
+    if first_row > last_row:
+        first_row = max(0, last_row - prefetch_rows)
+
+    start = first_row * columns
+    end = min(card_count, (last_row + 1) * columns)
+    return (start, end)

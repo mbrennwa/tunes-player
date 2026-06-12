@@ -1,14 +1,14 @@
-# Tunes — architecture, roadmap, and TODO
+# Tunes — technical architecture
 
-This document is the single place for design decisions, ordered milestones, and open
-work items (for contributors and automated agents). The README stays short; details
-live here.
+Design decisions and how the codebase is structured. The README stays short; this
+document describes what Tunes is, how it works, and what is planned. Work tracking
+lives on GitHub Issues.
 
 ## Product
 
 | Item | Choice |
 |------|--------|
-| Display name | **Tunes** (rename candidates: [docs/NAMING.md](NAMING.md)) |
+| Display name | **Tunes** |
 | Package / CLI / icon name | **tunes-player** |
 | GTK / D-Bus app ID | `tunes.player` |
 | License | **GPL-3.0-or-later** (see [License rationale](#license-rationale)) |
@@ -26,13 +26,14 @@ live here.
   [Media keys](#media-keys-requirement)).
 - Integrate **streaming** (Tidal, Deezer, Qobuz) via provider-specific APIs
   (official developer paths where available; see [Streaming](#streaming)).
-  **TIDAL** and **Qobuz** are implemented; **Deezer** is not started.
+  **TIDAL** and **Qobuz** are implemented; **Deezer** and **Spotify** are not.
 - Present sources as **one searchable library** (see [Unified catalog](#unified-catalog)).
 - **Simple** Libadwaita GUI; native GNOME look (not Qt on Linux).
 
 ### Out of scope for v0.1
 
-- **Deezer** streaming backend.
+- **Deezer** and **Spotify** streaming backends (no supported full-playback API for mpv-style
+  clients today; see [Streaming](#streaming)).
 - Unified cross-source deduplication (beyond basic federated search).
 - **Playlists** (create, edit, browse) — see [Main window layout](#main-window-layout-minimal).
 - macOS / Windows UI.
@@ -69,32 +70,6 @@ Other formats may play via mpv later without full library indexing until explici
 **Music** was avoided: GNOME ships **Music** (`gnome-music`). **Tunes** is distinct;
 `iTunes` echo is acceptable for a FOSS niche player for now.
 
-Possible renames (e.g. **Panmelos**, **Allmusic**, **Holoplay**, **Sourcebox**, and
-others) with rationale and collisions are in **[docs/NAMING.md](NAMING.md)**.
-
----
-
-## Implementation status (current)
-
-| Area | Status |
-|------|--------|
-| Local scan + SQLite index | Done (`core/library/`, multiprocessing scan worker) |
-| `Release` / `Track` models | Done — unified release across local + streaming |
-| `PlayableSource` + `resolve_track` | Done (`core/backends/`) |
-| `PlaybackEngine` + `MpvEngine` | Done — queue, skip, seek, events |
-| Device volume + bit-perfect profile | Partial — PipeWire/Pulse via `wpctl`/`pactl`; exclusive ALSA not done |
-| MPRIS + GDK media keys | Done |
-| GTK shell (search, New Releases, Suggest Music, source filter, queue sheet) | Done |
-| Settings (Sources, Audio, Application, Diagnostics) | Done |
-| TIDAL (OAuth, search, playback, New Releases, Suggest Music) | Done |
-| Qobuz (credentials, login, search, playback, New Releases, Suggest Music) | Done |
-| Federated search (phase A) | Done in `PlayerService.search()` — no separate `catalog/` module yet |
-| New Releases + Suggest Music aggregation | Done in `core/home.py` + `PlayerService` |
-| Deezer | Not started |
-| Minimized compact controller | Not started |
-| UPnP / AES67 output | Not started |
-| DEB packaging | Not started |
-
 ---
 
 ## Repository layout
@@ -113,13 +88,16 @@ tunes_player/
 │   │   └── qobuz/     # in-tree REST client, convert, ids
 │   ├── library/       # db, store, scanner, scan_worker, release_logic, art_cache
 │   └── playback/
-│       └── engine.py  # PlaybackEngine protocol
+│       ├── engine.py     # PlaybackEngine protocol
+│       ├── mpv_cli.py    # mpv CLI/property helpers (base_audio_options, …)
+│       └── mpv_events.py # end-file reason helpers
 ├── engines/
-│   └── mpv.py         # MpvEngine (libmpv, headless)
+│   ├── factory.py         # create_playback_engine()
+│   └── mpv.py             # MpvEngine — in-process libmpv
 ├── platform/
 │   └── linux/         # MPRIS, PipeWire/Pulse volume (audio.py)
 └── ui/
-    └── gtk/           # app, views, preferences, now_playing, album_grid, …
+    └── gtk/           # app, views, preferences, now_playing, release_grid, …
 ```
 
 Federated search and home aggregation live in **`PlayerService`** and **`core/home.py`**
@@ -140,10 +118,20 @@ Future: `ui/qt/` for macOS/Windows; same `PlayerService` API.
 - **No GTK types in core models** — use `art_uri: str`, opaque IDs like
   `local:…`, `tidal:…`, `qobuz:…` (Deezer reserved: `deezer:…`).
 - **Release** is the primary browse/playback unit (album, EP, single, partial/synthetic
-  local groups); `Album` is a backward-compatible alias in `core/models.py`.
+  local groups). SQLite and tag metadata still use `album_*` column names intentionally.
 
 GTK runs on the main loop; mpv callbacks post to a queue → GLib idle (same pattern
 will work for Qt signals later).
+
+**Album art (`art_uri`):**
+
+- `Release.art_uri` is the canonical cover value for UI and MPRIS.
+- **Local** art is backed by the `album_art` SQLite table and on-disk cache under
+  `{data_dir}/art/`; URIs use the `tunes://art/local/…` scheme. `art_updated` events
+  mean local cache rows changed — refresh via `PlayerService.refresh_local_release_art_uris()`.
+- **Streaming** art is an HTTPS URL set when the catalog row is fetched (TIDAL/Qobuz APIs).
+  It lives on the in-memory `Release` object (and shell cache payload), not in
+  `LibraryStore`. UI must not re-resolve streaming covers through the local store.
 
 **Errors and logging:**
 
@@ -153,8 +141,8 @@ will work for Qt signals later).
   configured at app startup. Log file: `{user_data_dir}/tunes-player.log` (typically
   `~/.local/share/tunes-player/tunes-player.log`). Override verbosity with
   `TUNES_LOG_LEVEL=DEBUG`.
-- Optional startup probe (`engines/mpv.probe_playback_engine`) warns when libmpv is
-  missing before the user presses Play.
+- Optional startup probe (`engines.factory.probe_playback_engine`) warns when the
+  `mpv` binary is missing before the user presses Play.
 
 **Why GTK on Linux:** native Libadwaita on GNOME. Qt was rejected for Linux primary UI
 (native-widget concerns on GNOME). Qt remains the likely choice for a later macOS UI.
@@ -247,7 +235,7 @@ lyrics, streaming source badges in browse views.
 |------|----------|
 | **Application** | New Releases cutoff (days) — local, TIDAL, and Qobuz new-release selection |
 | **Sources** | **Local files:** music folders, scan library. **Streaming:** TIDAL sign-in/out (OAuth via browser); Qobuz App ID/Secret, save credentials, email/password sign-in/out |
-| **Audio** | Bit-perfect toggle (subtitle reflects device vs software volume), output device dropdown (PipeWire/Pulse sinks) |
+| **Audio** | Output device dropdown (PipeWire/Pulse sinks, bit-perfect potential labels); allow software-volume fallback when no sink control |
 | **Diagnostics** | Log file path (copy button) |
 
 **Unifying principle:** Local files and streaming services are both **sources** of music.
@@ -263,7 +251,10 @@ files live in **core/backends/** and `platformdirs` config/data dirs. Settings U
 - **New Releases / Suggest Music:** merged selections from local + signed-in services.
 - **Search:** federated release results (local first, then streaming append).
 - **Release detail / playback:** same views for `local:…`, `tidal:…`, `qobuz:…` IDs.
-- **Now Playing:** quality hint (e.g. FLAC metadata, “TIDAL”, “QOBUZ”); source badge deferred.
+- **Now Playing:** quality hint (e.g. FLAC metadata, “TIDAL”, “QOBUZ”) plus **playback
+  path** (`ALSA bit-perfect`, resample notes, `via PipeWire`). The path line is
+  **authoritative from the engine** (negotiated mpv/ALSA state), not only pre-load
+  inference in `PlayerService`.
 - **Playlists:** not implemented — catalog phase D.
 
 ---
@@ -276,7 +267,7 @@ Same layering as GUI:
 |-------|----------------|
 | `core/backends/` | Resolve `Track` → `PlayableSource` (file path or HTTPS URL) |
 | `PlayerService` | Queue, play/pause/skip/seek, volume, federated search, home feeds |
-| `engines/mpv.py` | `PlaybackEngine` — load URI, play/pause/seek, emit position |
+| `engines/mpv.py` | `PlaybackEngine` — in-process libmpv via python-mpv (load, play/pause/seek, events) |
 | `platform/linux/audio.py` | Output device list, **endpoint volume**, mpv audio-device mapping |
 | `platform/linux/mpris.py` | D-Bus controls from **PlayerService**, not from GTK or mpv |
 | `ui/gtk/` | Displays state; calls `PlayerService` only |
@@ -299,25 +290,40 @@ class PlayableSource:
 
 ### mpv
 
-- Default and preferred engine on **all** OSes (cross-platform).
+- Default and preferred **decoder/output** on **all** OSes (cross-platform).
 - Music-only: run **headless** (no video surface) — avoids embedding mpv in GTK/Qt.
-- **python-mpv** / libmpv stays inside `engines/`, not in UI.
+- **Today:** **in-process libmpv** via `python-mpv`; `MpvEngine` in `engines/mpv.py`
+  runs on the GTK main thread. `PlayerService` owns queue, device profile, and
+  transport; mpv property observers enqueue `EngineEvent`s drained on the UI thread.
 
 ### Bit-perfect playback (requirement)
 
-Audiophile use is a **product requirement**, not an optional extra.
+Audiophile use is a **product requirement**, not an optional extra — but on Linux v1 it
+is scoped to **direct ALSA hardware**, not the default PipeWire/Pulse sink path.
 
-**Goal:** when bit-perfect mode is on, audio reaches the DAC in the **original format**
+**Goal:** for focused local listening, audio reaches the DAC in the **original format**
 (sample rate, bit depth, channel layout) without Tunes applying sample manipulation
 (volume gain, resampling, ReplayGain, EQ, etc.).
 
-**Engine (mpv) — typical constraints when bit-perfect is enabled:**
+**Linux v1 — two output paths:**
+
+| Path | Bit-perfect (sample-accurate) | What Tunes guarantees |
+|------|-------------------------------|---------------------|
+| **ALSA `alsa:hw:…`** (listed first in Settings) | Yes, when file format matches hardware caps and device volume is used | Per-track rate/format via mpv; optional **Exclusive device access**; honest resample labels |
+| **PipeWire / Pulse sink** (default for most desktops) | **No** — not a roadmap priority | Unity gain in mpv (no soft volume); **sink volume**; UI note **via PipeWire** |
+
+PipeWire is the normal **mixed desktop** path (Discord, notifications, other apps).
+Mixing and sink rate policy happen outside Tunes, so strict bit-perfect is already
+impossible there. Users who want sample-accurate local FLAC/WAV should pick the **ALSA
+hardware** entry for their DAC, not the PipeWire sink with the same name.
+
+**Engine (mpv) — constraints on the unity-gain / ALSA paths:**
 
 - Keep mpv **volume at 100%**; do not use mpv soft volume for listening level.
 - Disable **ReplayGain** and other DSP that modifies samples.
-- Avoid **resampling** (configure AO/backend so output matches source rate where
-  possible).
-- Prefer a direct path to the chosen device (ALSA device, PipeWire node, etc.).
+- On **direct ALSA**, avoid resampling where hardware caps allow (see `output_profile.py`).
+- On **PipeWire sinks**, route to `pulse/…` for volume integration only — do not claim
+  bit-perfect in UI or docs for that path.
 - On Windows/macOS later: exclusive / hog mode where available (WASAPI exclusive,
   CoreAudio hog).
 
@@ -327,10 +333,25 @@ Audiophile use is a **product requirement**, not an optional extra.
   player changes samples. Volume must move to the **device or sink**.
 - **Streaming** (Tidal/Deezer/Qobuz) may already be lossy or transcoded; “bit-perfect” means
   **no additional processing in Tunes**, not that the stream is hi-res MQA/bitstream.
-- **Local FLAC/WAV** is the primary bit-perfect use case for v1.
+- **Local FLAC/WAV** is the primary bit-perfect use case for v1 (ALSA hw only).
 
 Implement bit-perfect as an explicit **settings profile** applied when constructing
-`MpvEngine` (see `platform/*/audio.py`), not scattered mpv flags in UI code.
+the playback engine (`MpvEngine` / in-process mpv), not
+scattered mpv flags in UI code.
+
+**Not planned (v1):** PipeWire pro-audio / rate-matched sink bit-perfect. ALSA hw +
+optional exclusive access covers solo listening; PipeWire remains the correct default
+for everyday desktop use.
+
+**Linux v1 implements:** unity-gain mpv (`volume=100`, no ReplayGain); volume via
+**VolumeController** (not mpv soft gain on the bit-perfect path); honest UI labels for
+bit-perfect vs software-volume fallback and resampling; Tunes-only output routing
+without changing the system default sink; per-sink bit-perfect potential hints;
+direct ALSA `hw:` with per-track rate/format matching (`alsa_caps`, `output_profile`);
+optional **Exclusive device access** (`pw-cli` suspend on card).
+
+**Later (other platforms):** WASAPI exclusive (Windows), CoreAudio hog mode (macOS);
+optional UI footnote when hardware volume is below max but playback is labeled bit-perfect.
 
 ### Volume control (requirement)
 
@@ -367,54 +388,13 @@ Linux implementations (platform/linux/audio.py):
 **UI:** show when volume is **device** vs **software** (e.g. badge or subtitle in
 preferences) so users know bit-perfect status is intact.
 
-### Output endpoints (planned — local only today)
+### Output endpoints
 
-Tunes supports more than one **output type**. Endpoints are not all “ALSA cards”;
-network renderers use a different control path than local mpv playback.
+**Today:** local PipeWire/Pulse sink selection and volume, plus direct ALSA hw devices
+(`platform/linux/audio.py`, Settings → Audio → Output device). See [Volume control](#volume-control-requirement).
 
-**Today:** local PipeWire/Pulse sink selection and volume only (`platform/linux/audio.py`,
-Settings → Audio → Output device). UPnP and pro-audio adapters are not implemented.
-
-**Priorities (product order):**
-
-| Priority | Type | Typical hardware | Implementation sketch |
-|----------|------|------------------|------------------------|
-| **1 — Local** | Linux audio sink | DAC, headphones, USB interface on the Tunes machine | `mpv` → PipeWire node or ALSA device; **VolumeController** on that sink; full bit-perfect control |
-| **2 — Network (open)** | UPnP / DLNA **Media Renderer** | TVs, AVRs, hi-fi streamers, NAS-friendly speakers (any OS on device) | SSDP discovery; push `PlayableSource.uri` via AVTransport; sync transport/volume from renderer; device decodes (lossless URL when possible) |
-| **3 — Optional / later** | **AES67** / **Dante** / Ravenna | Studio/install, some high-end gear | PCM over Ethernet; PTP/multicast complexity; only if there is demand — treat as separate pro-audio adapter |
-
-**Explicitly not on the roadmap:** Logitech Media Server / Squeezelite (awkward fit for
-a standalone player). **Deferred / low priority:** Snapcast, PipeWire/Pulse **network**
-sinks (Linux-only receivers), AirPlay sender, Google Cast — may revisit for compatibility
-but not core architecture.
-
-**Local (priority 1)** — see [Volume control](#volume-control-requirement) and
-`platform/linux/audio.py` (planned): list sinks and ALSA devices; apply bit-perfect mpv
-profile to the selected local endpoint.
-
-**UPnP renderer (priority 2)** — for non-Linuxy LAN devices:
-
-- `core/backends/` still resolves `Track` → `PlayableSource` (often `http://` to a
-  short-lived file server on the Tunes host, or a reachable `file://` if the renderer
-  shares storage).
-- A **renderer adapter** (e.g. `platform/linux/upnp.py` or `engines/upnp_renderer.py`)
-  implements play/pause/seek/volume against the device’s UPnP services, not mpv PCM output.
-- **PlayerService** chooses engine by selected output: **local** → `MpvEngine`; **UPnP**
-  → renderer adapter. Queue and library logic stay in `core/`.
-- **Bit-perfect** on renderers is *best-effort*: send lossless sources without transcoding
-  in Tunes; document that the device may still resample or apply DSP.
-- **OpenHome** (UPnP profile for hi-fi) is an enhancement on the same stack if needed
-  for gapless/playlist quality on supported brands.
-
-**AES67 / Dante (optional)** — cool for pro installs; heavy (timing, multicast, licensing
-of stacks). Spec-only until someone needs it; do not block v1 local + UPnP work.
-
-```text
-Settings → Output
-  ├── Local: PipeWire sink / ALSA device   → MpvEngine + VolumeController
-  ├── Network: UPnP Media Renderer (list)  → RendererAdapter (URI push)
-  └── (future) AES67 / Dante endpoint      → pro adapter
-```
+Networked output (UPnP/DLNA renderers, AES67/Dante, and related options) is not
+implemented. Design notes are in [GitHub issue #60](https://github.com/mbrennwa/tunes-player/issues/60).
 
 ### Media keys (requirement)
 
@@ -476,6 +456,10 @@ volume display stay consistent without the user touching the app.
 Do not require the Tunes window to be focused; external volume changes must be
 observable while browsing or in minimized mode.
 
+**Today:** outbound control via **MPRIS** and GDK media keys is implemented. Inbound
+`VolumeController.subscribe()` — syncing hardware or stack volume changes back into the
+UI — is not wired yet.
+
 ### Events (core → UI)
 
 Examples: `TrackStarted`, `PositionChanged`, `TrackFinished`, `PlaybackError`.
@@ -485,21 +469,23 @@ UI never polls mpv properties directly.
 
 ## Unified catalog
 
-“One music store” is phased:
+“One music store” evolves in phases:
 
-| Phase | User experience | Status |
-|-------|-----------------|--------|
-| A | One search box; results tagged Local / Tidal / Deezer / Qobuz | **Done** — `PlayerService.search()` merges local + signed-in backends |
-| B | Merged list, heuristic duplicate titles | Not started |
-| C | Dedup via MusicBrainz / ISRC / UPC | Not started |
-| D | Unified playlists, “prefer local if duplicate” | Not started |
+1. **Federated search (today):** one search box; results tagged by source (Local, TIDAL,
+   Qobuz). **`PlayerService.search()`** queries the local store first, then appends
+   signed-in streaming backends.
+2. **Heuristic merge (planned):** merged browse lists with duplicate-title collapsing.
+3. **Strong dedup (planned):** MusicBrainz / ISRC / UPC identity. Today the release grid
+   shows one tile per catalog quality tier (`core/release_quality_tiles.py`); the shell
+   quality filter is browse-only.
+4. **Unified playlists (planned):** cross-source playlists with “prefer local if duplicate”
+   playback policy.
 
-Search is implemented in **`PlayerService.search()`** (local store first, then TIDAL and
-Qobuz append). A dedicated `core/catalog/` module may appear if dedup/merge grows beyond
-the service facade.
+A dedicated `core/catalog/` module may appear if dedup/merge logic outgrows
+**PlayerService**.
 
-**Prefer local:** when the same album exists locally and on a service, default play
-local file (match on normalized artist/title or MBID later) — not implemented yet.
+**Prefer local (planned):** when the same album exists locally and on a service, default
+to the local file (match on normalized artist/title or MBID).
 
 ---
 
@@ -577,8 +563,10 @@ collects TIDAL track radio (when playing TIDAL), **continue listening** (`play_h
 TIDAL / Qobuz editorial catalogs, and local **rediscover**, then dedupes by `release.id`.
 
 **Sort order** (higher `added_ns` first): all **local** releases, then streaming by source
-name — **Deezer**, **Qobuz**, **TIDAL** (Deezer not implemented yet). Within each group,
-recent plays or catalog order apply.
+name — **Qobuz**, **TIDAL**. Within each group, recent plays or catalog order apply.
+
+`Source.DEEZER` and `deezer:…` IDs are reserved for a future backend but Deezer does not
+appear in the source filter or UI labels until implemented.
 
 LLM-based recommendations are out of scope. **Last.fm** (optional later): scrobble from
 `play_history`, similar-artist API, opt-in credentials in Settings.
@@ -593,7 +581,17 @@ README includes a user-facing [disclaimer](../README.md#streaming-disclaimer).
 
 **TIDAL** and **Qobuz** backends are implemented in `core/backends/` with OAuth or
 account login, federated search, stream URL resolution at play time, and New Releases /
-Suggestions feeds. **Deezer** is planned next.
+Suggestions feeds.
+
+**Deezer** is not implemented: the documented API exposes 30-second previews, not
+full-track URLs for mpv; new OAuth app registration on the developer portal is often
+unavailable. Unofficial gateway playback used by other FOSS tools is out of scope until
+Deezer offers a supported full-playback path.
+
+**Spotify** is not implemented: the Web API does not expose full-track URLs for mpv;
+playback requires the Web Playback SDK, Spotify Connect, or the official app.
+Unofficial librespot-style integration is out of scope until a supported native path
+exists.
 
 One **provider abstraction** pattern — auth, catalog/search, resolve `PlayableSource` at
 play time — is shared across backends via `resolve_track()` and `PlayerService`.
@@ -604,11 +602,12 @@ Commercial hi-fi apps often have **formal partnerships** with lossless services;
 FOSS desktop player should not depend on that. There is no Spotify-like open ecosystem
 for lossless streaming — plan per provider:
 
-| Provider | Access model | Status in Tunes |
-|----------|--------------|-----------------|
-| **Tidal** | Official developer platform; OAuth via `tidalapi` | **Done** — first streaming backend |
-| **Qobuz** | JSON API; user-supplied app credentials | **Done** — in-tree REST client |
-| **Deezer** | Documented developer API | **Not started** — planned second streaming backend |
+| Provider | Access model | In Tunes |
+|----------|--------------|----------|
+| **Tidal** | Official developer platform; OAuth via `tidalapi` | Implemented (`core/backends/tidal/`) |
+| **Qobuz** | JSON API; user-supplied app credentials | Implemented (`core/backends/qobuz/`) |
+| **Deezer** | Documented developer API (previews only); partnership TBD | Not implemented |
+| **Spotify** | Web API + SDK/Connect (no direct stream URLs) | Not implemented |
 
 Optional: contact Qobuz about third-party open-source clients. Official app credentials
 for Tunes would switch the default from user-supplied keys to bundled defaults without
@@ -621,13 +620,19 @@ tunes_player/core/backends/
   playable.py, resolve.py, local.py
   tidal/       # TidalClient — oauth, search, streams, home feeds (tidalapi)
   qobuz/       # QobuzClient — config credentials, session, signed stream URLs
-  deezer/      # (planned)
+  deezer/      # (not implemented)
+  spotify/     # (not implemented)
 ```
+
+**TIDAL catalog quality (grid enrich):** CD vs hi-res filter buckets use album/track
+`media_metadata_tags` / OpenAPI `mediaTags`. Peak rate/depth labels use album fields when
+present, otherwise a **serialized, cached** first-track stream resolution probe
+(`core/backends/tidal/catalog_stream_probe.py`) so enrich does not burst the same
+rate limit as playback. Playback stream URLs are still resolved only at play time.
 
 ### Auth and credentials
 
 - **Tidal:** OAuth via developer registration; tokens in config (see `platformdirs`).
-- **Deezer:** documented API auth (details when implementing).
 - **Qobuz:** see [Qobuz credentials](#qobuz-credentials).
 
 #### Qobuz credentials
@@ -666,6 +671,7 @@ update) replace app id/secret; session tokens are separate.
 |----------|------------|--------------|
 | Tidal | `tidalapi` | LGPL-3.0 — OK inside GPL app |
 | Deezer | TBD (REST/client) | Confirm before linking |
+| Spotify | TBD (SDK/Connect) | Confirm before linking |
 | Qobuz | in-tree client (urllib) | No third-party SDK linked |
 
 See [License rationale](#license-rationale).
@@ -678,7 +684,7 @@ See [License rationale](#license-rationale).
 
 | Dependency | License | Note |
 |------------|---------|------|
-| mpv / libmpv | GPLv2+ | Playback engine |
+| mpv / python-mpv (in-process) | GPLv2+ | Playback engine |
 | mutagen | GPLv2+ | Tags / local metadata |
 | GTK / Libadwaita | LGPL | OK inside GPL app |
 | tidalapi | LGPL-3.0 | TIDAL backend |
@@ -696,86 +702,30 @@ instead of mpv). **AGPL** is unnecessary for a desktop app.
 | GitHub repo | `mbrennwa/tunes-player` |
 | Debian package | `tunes-player` (not bare `tunes`) |
 | Binary | `tunes-player` |
-| Desktop file | `data/tunes-player.desktop` |
+| Desktop file | `data/tunes.player.desktop` (basename must match GTK app ID) |
 | Config | `platformdirs` → `~/.config/tunes-player/config.json` |
 | Library DB | `~/.local/share/tunes-player/library.db` |
 | Sessions | `tidal-session.json`, `qobuz-session.json` under data dir |
 
----
-
-## Roadmap (ordered)
-
-Status as of current tree — see [Implementation status](#implementation-status-current).
-
-1. ~~Local folder scan + SQLite library index.~~ **Done**
-2. ~~`PlaybackEngine` + `MpvEngine` + queue; GTK transport bar; **MPRIS + media keys**.~~ **Done** (minimized compact controller still open)
-3. **Local output:** bit-perfect profile + output device selection + **`VolumeController`**. **Partial** — PipeWire/Pulse sink volume works; exclusive ALSA / full bit-perfect path open (see TODO)
-4. **External control interface** — inbound volume from device/stack → Tunes UI + MPRIS. **Partial** — outbound MPRIS done; inbound `VolumeController.subscribe()` not wired
-5. DEB package with declared depends (`python3-gi`, `gir1.2-adw-1`, `mpv`, …). **Not started**
-6. **UPnP / DLNA Media Renderer** output. **Not started**
-7. ~~**Streaming — Tidal**.~~ **Done**
-8. **Streaming — Deezer**. **Not started**
-9. ~~**Streaming — Qobuz**.~~ **Done**
-10. ~~Federated catalog search (phase A).~~ **Done** in `PlayerService.search()`
-11. Heuristic dedup / prefer-local. **Not started**
-12. Optional Qt UI for macOS. **Not started**
-13. Playlists UI. **Not started**
-14. **(Optional)** AES67 / Dante LAN output. **Not started**
+DEB packages are built from `debian/` via `tools/build-deb.sh`; release workflow is
+documented in [RELEASE.md](RELEASE.md).
 
 ---
 
-## TODO
+## Planned work
 
-Trackable open items. Ordered milestones are in [Roadmap](#roadmap-ordered) above.
+Areas described elsewhere in this document but not fully built, or only partially
+implemented. These are design targets — progress is tracked on GitHub Issues.
 
-### Streaming
-
-- [ ] **Deezer backend** — auth, search, playback, home feeds (second streaming provider).
-
-### Discover / recommendations
-
-- [ ] **Last.fm (optional)** — opt-in scrobbling from `play_history`; use Last.fm
-  similar-artist / recommendation APIs to enrich Suggestions without LLM.
-
-### Control / integration
-
-- [ ] **Minimized compact controller** — small always-on-top transport-only window mode.
-- [ ] **External control interface** — expose a control surface for external tools;
-  sync device/DAC/stack volume changes back into Tunes (UI, MPRIS, related state).
-  Builds on `VolumeController.subscribe()` and MPRIS/D-Bus. See
-  [External control interface](#external-control-interface-requirement).
-
-### Bit-perfect playback (mpv output profile)
-
-mpv remains the right engine (decode, seek, formats, streaming, cross-platform).
-Bit-perfect is an **output policy** on top of mpv — not a reason to replace it.
-Today only the mpv-side half is done (volume 100%, ReplayGain off, device/sink
-volume when `_effective_bit_perfect()` is true). PCM may still be resampled or
-mixed by PipeWire/Pulse before the DAC.
-
-**Done:**
-
-- [x] mpv soft gain disabled when bit-perfect is effective (`volume=100`, no ReplayGain).
-- [x] Volume slider routes to **VolumeController** (PipeWire/Pulse sink), not mpv gain.
-- [x] UI indicates bit-perfect vs software-volume fallback.
-
-**Still needed for proper bit-perfect:**
-
-- [ ] **Output path** — when bit-perfect is on, prefer direct ALSA (or a PipeWire
-  pro-audio / exclusive node) instead of the default mixed/resampling sink path.
-- [ ] **Exclusive / hog mode** — where supported, take exclusive device access so
-  nothing else resamples or mixes on that output.
-- [ ] **Rate and format matching** — configure mpv/AO so output matches source sample
-  rate, bit depth, and channel layout (no silent resampling).
-- [ ] **Device selection** — let users pick a specific ALSA `hw:` (or equivalent)
-  device, not only a Pulse/PipeWire sink name.
-- [ ] **Profile wiring** — apply the above in `engines/mpv.py` + `platform/linux/audio.py`
-  when constructing `MpvEngine` (see [Bit-perfect playback](#bit-perfect-playback-requirement));
-  keep PipeWire-first path for non-bit-perfect / device-volume use.
-- [ ] **UI honesty** — show which output path is active (e.g. sink vs direct ALSA,
-  exclusive on/off) so users know bit-perfect status is intact.
-- [ ] **Platform parity (later)** — WASAPI exclusive (Windows), CoreAudio hog mode
-  (macOS); same `PlaybackEngine` profile idea, different platform backends.
+| Area | Concept |
+|------|---------|
+| **UI** | [Minimized compact controller](#minimized-player-compact-controller--not-implemented); playlists browser; folder browse; full-screen Now Playing |
+| **Catalog** | Heuristic merge, MusicBrainz/ISRC dedup, unified playlists, prefer-local playback ([Unified catalog](#unified-catalog)) |
+| **Control** | Inbound volume sync via `VolumeController.subscribe()` ([External control interface](#external-control-interface-requirement)) |
+| **Streaming** | Deezer and Spotify backends when supported playback APIs exist ([Streaming](#streaming)) |
+| **Output** | Networked endpoints ([#60](https://github.com/mbrennwa/tunes-player/issues/60)) |
+| **Platform** | Qt UI for macOS/Windows; WASAPI/CoreAudio bit-perfect parity ([Bit-perfect playback](#bit-perfect-playback-requirement)) |
+| **Discover** | Last.fm scrobbling and similar-artist recommendations (opt-in; see [Home content](#home-content-local--streaming)) |
 
 ---
 
@@ -788,5 +738,6 @@ mixed by PipeWire/Pulse before the DAC.
 - Assume a normal venv sees `gi` without `--system-site-packages`.
 - Route the main volume slider through **mpv soft volume** while bit-perfect is enabled.
 - Enable ReplayGain or resampling silently in bit-perfect mode.
+- Document or label **PipeWire/Pulse sinks** as bit-perfect (they are not; ALSA hw is).
 - Handle media keys only in focused GTK windows without **MPRIS** (breaks GNOME /
   headset / lock-screen control when unfocused).

@@ -18,7 +18,6 @@ EnabledSourcesChanged = Callable[[frozenset[Source]], None]
 _CHIP_LABELS: dict[Source, str] = {
     Source.LOCAL: "Local",
     Source.TIDAL: "Tidal",
-    Source.DEEZER: "Deezer",
     Source.QOBUZ: "Qobuz",
 }
 

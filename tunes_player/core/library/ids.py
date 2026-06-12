@@ -28,4 +28,6 @@ def artist_id(name: str) -> str:
 
 
 def track_id(path: str) -> str:
-    return make_id("local:track", path)
+    # Case-sensitive: paths may differ only by letter case on Linux.
+    digest = hashlib.sha256(path.strip().encode()).hexdigest()[:16]
+    return f"local:track:{digest}"

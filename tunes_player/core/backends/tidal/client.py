@@ -1,4 +1,4 @@
-"""TIDAL API access via tidalapi (optional dependency)."""
+"""TIDAL API access via tidalapi."""
 
 from __future__ import annotations
 
@@ -7,20 +7,37 @@ import concurrent.futures
 import contextlib
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+TidalRailFilter = Literal["all", "new_releases", "recommendations"]
+
 from tunes_player.core.backends.playable import PlayableSource
 from tunes_player.core.backends.tidal import convert, ids as tidal_ids
+from tunes_player.core.backends.tidal.stream_quality import (
+    negotiate_stream_payload,
+    payload_audio_quality,
+    playback_quality_candidates,
+    quality_request_value,
+    session_quality_for_subscription,
+    subscription_allows_hi_res,
+)
 from tunes_player.core.home import (
     NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
     SUGGESTIONS_SIMILAR_LIMIT,
+    SUGGESTIONS_SIMILAR_TIMEOUT_SEC,
     SUGGESTIONS_STREAMING_PER_SOURCE_LIMIT,
     RecentlyAddedItem,
 )
 from tunes_player.core.models import Release, Track
+from tunes_player.core.release_quality import (
+    PlaybackPreference,
+    playback_preference_from_shell,
+)
 
 if TYPE_CHECKING:
     import tidalapi
@@ -94,7 +111,72 @@ class _CollectedTidalObject:
 
 
 class TidalUnavailableError(RuntimeError):
-    """Raised when tidalapi is not installed or login failed."""
+    """Raised when TIDAL is unavailable or login failed."""
+
+
+class _SessionErrorKind(Enum):
+    TRANSIENT = "transient"
+    AUTH = "auth"
+    UNKNOWN = "unknown"
+
+
+def _tidalapi_stored_field(data: dict[str, Any], key: str) -> str | None:
+    entry = data.get(key)
+    if isinstance(entry, dict):
+        value = entry.get("data")
+        if value is not None:
+            return str(value)
+    return None
+
+
+def _session_file_has_credentials(session_file: Path) -> bool:
+    if not session_file.is_file():
+        return False
+    try:
+        raw = json.loads(session_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(raw, dict):
+        return False
+    if _tidalapi_stored_field(raw, "refresh_token"):
+        return True
+    access = _tidalapi_stored_field(raw, "access_token")
+    session_id = _tidalapi_stored_field(raw, "session_id")
+    return bool(access and session_id)
+
+
+def _session_has_credentials(session: object) -> bool:
+    if getattr(session, "refresh_token", None):
+        return True
+    return bool(getattr(session, "access_token", None) and getattr(session, "session_id", None))
+
+
+def _classify_session_error(exc: BaseException) -> _SessionErrorKind:
+    try:
+        from tidalapi.exceptions import AuthenticationError
+
+        if isinstance(exc, AuthenticationError):
+            return _SessionErrorKind.AUTH
+    except ImportError:
+        pass
+    try:
+        import requests
+        from requests.exceptions import HTTPError
+
+        if isinstance(exc, (requests.ConnectionError, requests.Timeout, HTTPError)):
+            if isinstance(exc, HTTPError) and exc.response is not None:
+                status = exc.response.status_code
+                if status >= 500:
+                    return _SessionErrorKind.TRANSIENT
+                if status in (401, 403):
+                    return _SessionErrorKind.AUTH
+            elif not isinstance(exc, HTTPError):
+                return _SessionErrorKind.TRANSIENT
+    except ImportError:
+        pass
+    if isinstance(exc, TimeoutError):
+        return _SessionErrorKind.TRANSIENT
+    return _SessionErrorKind.UNKNOWN
 
 
 def tidalapi_available() -> bool:
@@ -117,7 +199,9 @@ class TidalClient:
         self._oauth_future: concurrent.futures.Future[bool] | None = None
         self._oauth_link: LinkLogin | None = None
         self._oauth_error: str | None = None
+        self._hi_res_entitled: bool | None = None
         self._stream_cache: dict[tuple[int, str], tuple[dict[str, Any], float]] = {}
+        self._session_lock = threading.RLock()
 
     @property
     def session_file(self) -> Path:
@@ -127,15 +211,50 @@ class TidalClient:
         return tidalapi_available()
 
     def is_logged_in(self) -> bool:
+        with self._session_lock:
+            return self._has_stored_credentials_unlocked()
+
+    def needs_lossless_relogin(self) -> bool:
+        """Legacy device-link sessions cannot stream FLAC; PKCE sign-in is required."""
+        with self._session_lock:
+            session = self._get_session_unlocked()
+            if session is None or not self._has_stored_credentials_unlocked():
+                return False
+            return not bool(getattr(session, "is_pkce", False))
+
+    def stream_format_label(self, track_id: str | None = None) -> str:
+        from tunes_player.core.playback_quality import (
+            tidal_format_label,
+            tidal_stream_format_label,
+        )
+
         session = self._get_session()
         if session is None:
-            return False
+            return "Unknown format"
+        if track_id:
+            numeric = tidal_ids.parse_prefixed_id(track_id, "track")
+            if numeric is not None:
+                try:
+                    tidal_track = session.track(numeric)
+                    if tidal_track.audio_quality:
+                        from tunes_player.core.backends.tidal.stream_quality import (
+                            normalize_api_quality,
+                            track_peak_quality,
+                        )
+
+                        catalog = normalize_api_quality(tidal_track.audio_quality)
+                        if catalog != "HIGH" or track_peak_quality(tidal_track) >= 2:
+                            return tidal_format_label(audio_quality=catalog)
+                except Exception:
+                    log.debug(
+                        "Could not read TIDAL track quality for %s",
+                        track_id,
+                        exc_info=True,
+                    )
         try:
-            return bool(session.check_login())
-        except Exception as exc:
-            log.warning("TIDAL login check failed: %s", exc)
-            self._drop_session()
-            return False
+            return tidal_stream_format_label(str(session.config.quality))
+        except Exception:
+            return "Unknown format"
 
     def account_label(self) -> str | None:
         session = self._get_session()
@@ -164,10 +283,13 @@ class TidalClient:
         session = self._ensure_session()
         url = redirect_url.strip()
         if not url:
-            raise TidalUnavailableError("Paste the full URL from your browser.")
+            raise TidalUnavailableError(
+                "Paste the full address from your browser’s location bar."
+            )
         if "code=" not in url:
             raise TidalUnavailableError(
-                "That URL does not look like a TIDAL redirect (no authorization code)."
+                "That address does not look like a TIDAL sign-in redirect "
+                "(it should contain “code=”). Copy the whole location bar after signing in."
             )
         try:
             token = session.pkce_get_auth_token(url)
@@ -178,6 +300,10 @@ class TidalClient:
             raise TidalUnavailableError(str(exc)) from exc
         if not session.check_login():
             raise TidalUnavailableError("TIDAL login did not complete.")
+        self._hi_res_entitled = None
+        self._stream_cache.clear()
+        self._activate_lossless_api_client(session)
+        self._apply_preferred_stream_quality(session)
         self.save_session()
         self._oauth_error = None
 
@@ -234,6 +360,8 @@ class TidalClient:
         if not session.check_login():
             self._oauth_error = "TIDAL login did not complete."
             return "failed"
+        self._activate_lossless_api_client(session)
+        self._apply_preferred_stream_quality(session)
         self.save_session()
         return "success"
 
@@ -241,11 +369,11 @@ class TidalClient:
         return self._oauth_error
 
     def save_session(self) -> None:
-        session = self._get_session()
-        if session is None:
-            return
-        self._session_file.parent.mkdir(parents=True, exist_ok=True)
-        session.save_session_to_file(self._session_file)
+        with self._session_lock:
+            session = self._session
+            if session is None:
+                return
+            self._save_session_unlocked(session)
 
     def cancel_oauth(self) -> None:
         """Abort an in-progress device-link login."""
@@ -253,7 +381,10 @@ class TidalClient:
 
     def logout(self) -> None:
         self.cancel_oauth()
-        self._drop_session()
+        with self._session_lock:
+            self._hi_res_entitled = None
+            self._stream_cache.clear()
+            self._invalidate_session_unlocked()
 
     def _clear_stored_session(self) -> None:
         if self._session_file.is_file():
@@ -262,10 +393,83 @@ class TidalClient:
             except OSError:
                 log.warning("Could not remove TIDAL session file %s", self._session_file)
 
-    def _drop_session(self) -> None:
-        """Forget in-memory and on-disk TIDAL credentials."""
+    def _invalidate_session(self) -> None:
+        """Forget in-memory and on-disk TIDAL credentials after confirmed auth failure."""
+        with self._session_lock:
+            self._invalidate_session_unlocked()
+
+    def _invalidate_session_unlocked(self) -> None:
         self._clear_stored_session()
+        self._hi_res_entitled = None
+        self._stream_cache.clear()
         self._session = None
+
+    def _has_stored_credentials_unlocked(self) -> bool:
+        if not tidalapi_available():
+            return False
+        if self._session is not None and _session_has_credentials(self._session):
+            return True
+        return _session_file_has_credentials(self._session_file)
+
+    def _save_session_unlocked(self, session: object) -> None:
+        if not _session_has_credentials(session):
+            return
+        self._session_file.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            session.save_session_to_file(self._session_file)
+        except Exception:
+            log.warning("Could not persist TIDAL session", exc_info=True)
+
+    def _finish_session_setup_unlocked(self, session: object) -> None:
+        self._activate_lossless_api_client(session)
+        if not bool(getattr(session, "is_pkce", False)):
+            log.warning(
+                "TIDAL session uses legacy device sign-in (320 kbps only); "
+                "sign out and sign in again for lossless playback"
+            )
+        self._apply_preferred_stream_quality(session)
+        self._save_session_unlocked(session)
+
+    def _try_refresh_session_unlocked(self, session: object) -> bool:
+        refresh_token = getattr(session, "refresh_token", None)
+        if not refresh_token:
+            return False
+        try:
+            refreshed = session.token_refresh(refresh_token)
+        except Exception as exc:
+            if _classify_session_error(exc) == _SessionErrorKind.AUTH:
+                log.warning("TIDAL refresh token invalid; sign in again (%s)", exc)
+                self._invalidate_session_unlocked()
+            else:
+                log.warning("TIDAL token refresh failed (%s)", exc)
+            return False
+        if not refreshed:
+            return False
+        try:
+            if not session.check_login():
+                return False
+        except Exception as exc:
+            if _classify_session_error(exc) == _SessionErrorKind.AUTH:
+                log.warning("TIDAL session invalid after refresh; sign in again (%s)", exc)
+                self._invalidate_session_unlocked()
+            else:
+                log.warning("TIDAL login check failed after refresh (%s)", exc)
+            return False
+        self._finish_session_setup_unlocked(session)
+        return True
+
+    def _session_is_live_unlocked(self, session: object) -> bool:
+        try:
+            if session.check_login():
+                return True
+            return self._try_refresh_session_unlocked(session)
+        except Exception as exc:
+            if _classify_session_error(exc) == _SessionErrorKind.AUTH:
+                log.warning("TIDAL session invalid; sign in again (%s)", exc)
+                self._invalidate_session_unlocked()
+                return False
+            log.warning("TIDAL session validation failed (%s)", exc)
+            return False
 
     def search_releases(self, query: str, *, limit: int = 25) -> list[Release]:
         session = self._require_login()
@@ -273,14 +477,14 @@ class TidalClient:
         releases: list[Release] = []
         seen: set[str] = set()
         for item in results.get("albums", []):
-            release = convert.release_from_tidal(session, item)
+            release = convert.release_stub_from_tidal(session, item)
             if release.id not in seen:
                 seen.add(release.id)
                 releases.append(release)
         for item in results.get("tracks", []):
             track = convert.track_from_tidal(session, item)
-            if track.album_title and item.album is not None:
-                release = convert.release_from_tidal(session, item.album)
+            if track.release_title and item.album is not None:
+                release = convert.release_stub_from_tidal(session, item.album)
                 if release.id not in seen:
                     seen.add(release.id)
                     releases.append(release)
@@ -302,11 +506,15 @@ class TidalClient:
             import tidalapi.album as tidal_album_mod
             import tidalapi.media as tidal_media_mod
 
-            collected = _collect_tidal_home_pages(session)
+            collected = _collect_tidal_home_pages(
+                session,
+                include_explore=False,
+                include_legacy_home=False,
+                max_depth=2,
+                rail_filter="new_releases",
+            )
 
             for entry in collected:
-                if not entry.from_new_release_rail:
-                    continue
                 try:
                     for raw in _expand_tidal_mix_contents(entry.raw):
                         item = _recently_added_from_tidal_object(
@@ -321,6 +529,10 @@ class TidalClient:
                             continue
                         seen_album_ids.add(item.release.id)
                         items.append(item)
+                        if len(items) >= limit:
+                            break
+                    if len(items) >= limit:
+                        break
                 except Exception:
                     log.debug(
                         "Skipping TIDAL new-release item %s",
@@ -349,11 +561,15 @@ class TidalClient:
             import tidalapi.album as tidal_album_mod
             import tidalapi.media as tidal_media_mod
 
-            collected = _collect_tidal_home_pages(session)
+            collected = _collect_tidal_home_pages(
+                session,
+                include_explore=False,
+                include_legacy_home=False,
+                max_depth=2,
+                rail_filter="recommendations",
+            )
             rank = 0
             for entry in collected:
-                if entry.from_new_release_rail:
-                    continue
                 try:
                     for raw in _expand_tidal_mix_contents(entry.raw):
                         item = _recently_added_from_tidal_object(
@@ -398,8 +614,24 @@ class TidalClient:
             return []
         session = self._require_login()
         try:
-            tidal_track = session.track(numeric)
-            radio_tracks = tidal_track.get_track_radio(limit=limit * 3)
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="tunes-tidal-radio",
+            ) as executor:
+                future = executor.submit(
+                    _fetch_tidal_track_radio,
+                    session,
+                    numeric,
+                    limit * 3,
+                )
+                radio_tracks = future.result(timeout=SUGGESTIONS_SIMILAR_TIMEOUT_SEC)
+        except concurrent.futures.TimeoutError:
+            log.warning(
+                "TIDAL track radio timed out for %s after %.0fs",
+                seed_track_id,
+                SUGGESTIONS_SIMILAR_TIMEOUT_SEC,
+            )
+            return []
         except Exception as exc:
             # Track radio is optional for Suggestion; TIDAL often returns 5xx here.
             log.warning(
@@ -414,7 +646,7 @@ class TidalClient:
         for index, raw in enumerate(radio_tracks):
             if raw.album is None:
                 continue
-            release = convert.release_from_tidal(session, raw.album)
+            release = convert.release_stub_from_tidal(session, raw.album)
             if release.id in seen:
                 continue
             seen.add(release.id)
@@ -437,6 +669,15 @@ class TidalClient:
             log.debug("Could not resolve TIDAL release for track %s", track_id, exc_info=True)
             return None
 
+    def get_release_summary(self, release_id: str) -> Release | None:
+        """Release metadata for grids without loading every track."""
+        numeric = tidal_ids.parse_prefixed_id(release_id, "album")
+        if numeric is None:
+            return None
+        session = self._require_login()
+        album = session.album(numeric)
+        return convert.release_from_tidal(session, album)
+
     def get_release(self, release_id: str) -> Release | None:
         numeric = tidal_ids.parse_prefixed_id(release_id, "album")
         if numeric is None:
@@ -449,24 +690,13 @@ class TidalClient:
             session,
             album,
             owned_track_count=len(tracks),
+            tracks=tracks,
         )
-        return Release(
-            id=release.id,
-            title=release.title,
-            artist_name=release.artist_name,
-            source=release.source,
-            track_count=len(tracks),
-            expected_track_count=release.expected_track_count,
-            completeness=release.completeness,
-            release_type=release.release_type,
-            year=release.year,
-            genre=release.genre,
-            art_uri=release.art_uri,
-            duration_sec=duration or None,
-        )
+        if duration:
+            from dataclasses import replace
 
-    def get_album(self, album_id: str) -> Release | None:
-        return self.get_release(album_id)
+            release = replace(release, duration_sec=duration)
+        return release
 
     def get_release_tracks(self, release_id: str) -> list[Track]:
         numeric = tidal_ids.parse_prefixed_id(release_id, "album")
@@ -478,9 +708,6 @@ class TidalClient:
         for item in album.tracks():
             tracks.append(convert.track_from_tidal(session, item, album=album))
         return tracks
-
-    def get_album_tracks(self, album_id: str) -> list[Track]:
-        return self.get_release_tracks(album_id)
 
     def get_track(self, track_id: str) -> Track | None:
         numeric = tidal_ids.parse_prefixed_id(track_id, "track")
@@ -502,12 +729,17 @@ class TidalClient:
         tidal_track = session.track(numeric)
         if tidal_track.album is not None:
             album_id = tidal_ids.album_id(tidal_track.album.id)
-            queue = self.get_album_tracks(album_id)
+            queue = self.get_release_tracks(album_id)
             index = next((i for i, item in enumerate(queue) if item.id == track_id), 0)
             return queue, index
         return [track], 0
 
-    def resolve_playable(self, track_id: str) -> PlayableSource | None:
+    def resolve_playable(
+        self,
+        track_id: str,
+        *,
+        playback_preference: PlaybackPreference | None = None,
+    ) -> PlayableSource | None:
         numeric = tidal_ids.parse_prefixed_id(track_id, "track")
         if numeric is None:
             return None
@@ -515,12 +747,17 @@ class TidalClient:
         track = session.track(numeric)
         metadata = convert.track_from_tidal(session, track)
         try:
-            payload = self._fetch_stream_payload(session, numeric)
+            payload = self._fetch_stream_payload(
+                session,
+                numeric,
+                track,
+                playback_preference=playback_preference,
+            )
             presentation = payload.get("assetPresentation")
             if presentation == "PREVIEW":
                 raise TidalUnavailableError(
                     "TIDAL only returned a ~30s preview for this account. "
-                    "Sign out, then sign in again with the device link (not PKCE). "
+                    "Sign out, then sign in again (Settings → Sources → TIDAL). "
                     "A paid TIDAL subscription is required for full tracks."
                 )
             manifest_b64 = payload.get("manifest")
@@ -539,11 +776,46 @@ class TidalClient:
         except Exception:
             log.exception("Failed to resolve TIDAL stream for track %s", numeric)
             return None
-        return PlayableSource(uri=playback_uri, metadata=metadata)
+        from tunes_player.core.playback_quality import (
+            tidal_format_label_from_stream_payload,
+            tidal_stream_file_metadata,
+        )
 
-    def _fetch_stream_payload(self, session: object, track_id: int) -> dict[str, Any]:
-        quality = str(session.config.quality)
-        cache_key = (track_id, quality)
+        format_label = tidal_format_label_from_stream_payload(payload)
+        return PlayableSource(
+            uri=playback_uri,
+            metadata=metadata,
+            format_label=format_label,
+            stream_metadata=tidal_stream_file_metadata(payload),
+        )
+
+    def _fetch_stream_payload(
+        self,
+        session: object,
+        track_id: int,
+        tidal_track: object,
+        *,
+        playback_preference: PlaybackPreference | None = None,
+    ) -> dict[str, Any]:
+        from tunes_player.core.backends.tidal.stream_quality import (
+            cap_session_quality_for_preference,
+        )
+
+        preference = playback_preference or playback_preference_from_shell(frozenset())
+        session_quality = cap_session_quality_for_preference(
+            quality_request_value(session.config.quality),
+            preference,
+        )
+        candidates = playback_quality_candidates(
+            session_quality,
+            tidal_track,
+            preference=preference,
+        )
+        cache_key = (
+            track_id,
+            preference.max_tier,
+            ",".join(candidates),
+        )
         now = time.monotonic()
         cached = self._stream_cache.get(cache_key)
         if cached is not None:
@@ -552,17 +824,57 @@ class TidalClient:
                 return payload
             del self._stream_cache[cache_key]
 
-        payload = self._request_stream_payload(session, track_id)
+        payload, chosen = negotiate_stream_payload(
+            candidates,
+            lambda quality: self._request_stream_payload(session, track_id, quality),
+            preference=preference,
+        )
+        from tunes_player.core.backends.tidal.stream_quality import (
+            should_warn_hi_res_filter_miss,
+            should_warn_lossy_stream_fallback,
+        )
+
+        resolved = payload_audio_quality(payload)
+        if should_warn_hi_res_filter_miss(
+            payload,
+            tidal_track,
+            preference=preference,
+        ):
+            log.warning(
+                "TIDAL track %s: catalog hi-res but stream resolved to %s",
+                track_id,
+                resolved,
+            )
+        if should_warn_lossy_stream_fallback(candidates, resolved):
+            log.warning(
+                "TIDAL track %s is streaming at HIGH (320 kbps) after trying %s",
+                track_id,
+                ", ".join(candidates),
+            )
+        elif resolved != "HIGH":
+            log.debug(
+                "TIDAL track %s stream tier %s -> %s",
+                track_id,
+                chosen,
+                resolved,
+            )
         self._stream_cache[cache_key] = (payload, now + _STREAM_CACHE_TTL_SEC)
         return payload
 
-    def _request_stream_payload(self, session: object, track_id: int) -> dict[str, Any]:
+    def _request_stream_payload(
+        self,
+        session: object,
+        track_id: int,
+        audio_quality: str,
+    ) -> dict[str, Any]:
         from tidalapi.exceptions import TooManyRequests
 
         params = {
             "playbackmode": "STREAM",
-            "audioquality": session.config.quality,
+            "audioquality": audio_quality,
             "assetpresentation": "FULL",
+            "deviceType": "BROWSER",
+            "platform": "WEB",
         }
         last_rate_limit: TooManyRequests | None = None
         for attempt in range(_STREAM_RETRY_ATTEMPTS):
@@ -626,14 +938,23 @@ class TidalClient:
         return path
 
     def _require_login(self) -> tidalapi.Session:
-        if not self.is_logged_in():
-            raise TidalUnavailableError("Not signed in to TIDAL")
-        session = self._get_session()
-        if session is None:
-            raise TidalUnavailableError("Not signed in to TIDAL")
-        return session
+        with self._session_lock:
+            if not self._has_stored_credentials_unlocked():
+                raise TidalUnavailableError("Not signed in to TIDAL")
+            session = self._get_session_unlocked()
+            if session is None:
+                raise TidalUnavailableError("Not signed in to TIDAL")
+            if not self._session_is_live_unlocked(session):
+                raise TidalUnavailableError(
+                    "TIDAL is temporarily unavailable. Check your connection."
+                )
+            return session
 
     def _get_session(self) -> tidalapi.Session | None:
+        with self._session_lock:
+            return self._get_session_unlocked()
+
+    def _get_session_unlocked(self) -> tidalapi.Session | None:
         if self._session is not None:
             return self._session
         if not tidalapi_available():
@@ -641,20 +962,91 @@ class TidalClient:
         import tidalapi
 
         self._session = tidalapi.Session()
-        if self._session_file.is_file():
+        if not self._session_file.is_file():
+            return self._session
+        try:
+            self._session.load_session_from_file(self._session_file)
             try:
-                self._session.load_session_from_file(self._session_file)
+                if self._session.check_login():
+                    self._finish_session_setup_unlocked(self._session)
+                else:
+                    self._try_refresh_session_unlocked(self._session)
             except Exception as exc:
+                if _classify_session_error(exc) == _SessionErrorKind.AUTH:
+                    log.warning("TIDAL session expired or invalid; sign in again (%s)", exc)
+                    self._invalidate_session_unlocked()
+                    self._session = tidalapi.Session()
+                else:
+                    log.warning(
+                        "TIDAL session validation failed (%s); keeping stored credentials",
+                        exc,
+                    )
+        except Exception as exc:
+            if _classify_session_error(exc) == _SessionErrorKind.AUTH:
                 log.warning("TIDAL session expired or invalid; sign in again (%s)", exc)
-                self._clear_stored_session()
+                self._invalidate_session_unlocked()
                 self._session = tidalapi.Session()
+            else:
+                log.warning(
+                    "TIDAL session load failed (%s); keeping stored credentials",
+                    exc,
+                )
         return self._session
+
+    @staticmethod
+    def _activate_lossless_api_client(session: object) -> None:
+        """Use the PKCE API client (required for FLAC / hi-res streams)."""
+        enable = getattr(session, "client_enable_hires", None)
+        if callable(enable):
+            enable()
+
+    def _apply_preferred_stream_quality(self, session: object) -> None:
+        """Set session default to the best tier this subscription allows."""
+        try:
+            from tidalapi.media import Quality
+        except ImportError:
+            return
+        self._activate_lossless_api_client(session)
+        hi_res = self._subscription_allows_hi_res(session)
+        tier = session_quality_for_subscription(hi_res_entitled=hi_res)
+        if tier == "HI_RES_LOSSLESS":
+            session.audio_quality = Quality.hi_res_lossless
+        else:
+            session.audio_quality = Quality.high_lossless
+        log.debug("TIDAL session stream tier set to %s", tier)
+
+    def _subscription_allows_hi_res(self, session: object) -> bool:
+        if self._hi_res_entitled is not None:
+            return self._hi_res_entitled
+        self._hi_res_entitled = self._probe_subscription_hi_res(session)
+        return self._hi_res_entitled
+
+    @staticmethod
+    def _probe_subscription_hi_res(session: object) -> bool:
+        try:
+            user = session.user
+            user_id = getattr(user, "id", None)
+            if user_id is None:
+                return False
+            response = session.request.basic_request(
+                "GET",
+                f"users/{user_id}/subscription",
+            )
+            if not response.ok:
+                return False
+            payload = response.json()
+            if not isinstance(payload, dict):
+                return False
+            return subscription_allows_hi_res(payload)
+        except Exception:
+            log.debug("TIDAL subscription probe failed", exc_info=True)
+            return False
 
     def _ensure_session(self) -> tidalapi.Session:
         session = self._get_session()
         if session is None:
             raise TidalUnavailableError(
-                "tidalapi is not installed. Install with: pip install 'tunes-player[streaming]'"
+                "TIDAL is unavailable (tidalapi could not be loaded)"
             )
         return session
 
@@ -719,16 +1111,30 @@ def _category_is_recommendation_rail(category: object) -> bool:
     return False
 
 
-def _collect_tidal_home_pages(session: Any) -> list[_CollectedTidalObject]:
+def _fetch_tidal_track_radio(session: Any, track_id: int, limit: int) -> list[object]:
+    tidal_track = session.track(track_id)
+    return list(tidal_track.get_track_radio(limit=limit))
+
+
+def _collect_tidal_home_pages(
+    session: Any,
+    *,
+    include_explore: bool = True,
+    include_legacy_home: bool = True,
+    max_depth: int = 4,
+    rail_filter: TidalRailFilter = "all",
+) -> list[_CollectedTidalObject]:
     visited_pages: set[int] = set()
     collected: list[_CollectedTidalObject] = []
     with _quiet_tidalapi_page_warnings():
         pages: list[object] = [session.home()]
-        for loader in (
-            lambda: session.home(use_legacy_endpoint=True),
-            session.explore,
-            session.for_you,
-        ):
+        optional_loaders: list[object] = []
+        if include_legacy_home:
+            optional_loaders.append(lambda: session.home(use_legacy_endpoint=True))
+        if include_explore:
+            optional_loaders.append(session.explore)
+        optional_loaders.append(session.for_you)
+        for loader in optional_loaders:
             try:
                 pages.append(loader())
             except Exception:
@@ -739,6 +1145,8 @@ def _collect_tidal_home_pages(session: Any) -> list[_CollectedTidalObject]:
                     session,
                     page,
                     visited=visited_pages,
+                    max_depth=max_depth,
+                    rail_filter=rail_filter,
                 ),
             )
     return collected
@@ -826,6 +1234,7 @@ def _collect_tidal_page_objects(
     max_depth: int = 4,
     new_release_rail: bool = False,
     recommendation_rail: bool = False,
+    rail_filter: TidalRailFilter = "all",
 ) -> list[_CollectedTidalObject]:
     page_key = id(page)
     if page_key in visited:
@@ -840,6 +1249,10 @@ def _collect_tidal_page_objects(
             is_rec = (
                 recommendation_rail or _category_is_recommendation_rail(category)
             ) and not is_new
+            if rail_filter == "new_releases" and not is_new:
+                continue
+            if rail_filter == "recommendations" and not is_rec:
+                continue
             for item in getattr(category, "items", None) or []:
                 if item is not None:
                     collected.append(_CollectedTidalObject(item, is_new, is_rec))
@@ -859,6 +1272,7 @@ def _collect_tidal_page_objects(
                             max_depth=max_depth,
                             new_release_rail=is_new,
                             recommendation_rail=is_rec,
+                            rail_filter=rail_filter,
                         )
                     )
         return collected
@@ -866,6 +1280,10 @@ def _collect_tidal_page_objects(
     try:
         for item in page:
             if item is not None:
+                if rail_filter == "new_releases" and not new_release_rail:
+                    continue
+                if rail_filter == "recommendations" and not recommendation_rail:
+                    continue
                 collected.append(
                     _CollectedTidalObject(item, new_release_rail, recommendation_rail),
                 )
@@ -905,7 +1323,7 @@ def _recently_added_from_tidal_object(
         added_ns = _tidal_album_added_ns(raw)
         return RecentlyAddedItem(
             added_ns=added_ns,
-            release=convert.release_from_tidal(session, raw),
+            release=convert.release_stub_from_tidal(session, raw),
         )
     if isinstance(raw, tidal_media_mod.Track):
         release_date = _tidal_track_release_date(raw)
@@ -920,7 +1338,7 @@ def _recently_added_from_tidal_object(
             return None
         return RecentlyAddedItem(
             added_ns=added_ns,
-            release=convert.release_from_tidal(session, raw.album),
+            release=convert.release_stub_from_tidal(session, raw.album),
         )
     page_item_type = getattr(raw, "type", None)
     if page_item_type == "ALBUM" and callable(getattr(raw, "get", None)):

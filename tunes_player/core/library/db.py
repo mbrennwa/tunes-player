@@ -3,9 +3,44 @@
 from __future__ import annotations
 
 import sqlite3
+import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
 
-SCHEMA_VERSION = 6
+T = TypeVar("T")
+
+SCHEMA_VERSION = 7
+
+LOCK_RETRY_ATTEMPTS = 6
+LOCK_RETRY_BASE_DELAY_SEC = 0.15
+
+
+def is_locked_error(exc: BaseException) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
+
+
+def with_db_retry(
+    operation: Callable[[], T],
+    *,
+    on_locked: Callable[[sqlite3.OperationalError, int], None] | None = None,
+) -> T:
+    """Run *operation*; retry on SQLITE locked errors."""
+    last_error: sqlite3.OperationalError | None = None
+    for attempt in range(LOCK_RETRY_ATTEMPTS):
+        try:
+            return operation()
+        except sqlite3.OperationalError as exc:
+            if on_locked is not None:
+                on_locked(exc, attempt)
+            if not is_locked_error(exc) or attempt == LOCK_RETRY_ATTEMPTS - 1:
+                raise
+            last_error = exc
+            time.sleep(LOCK_RETRY_BASE_DELAY_SEC * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("db retry loop exited without result")
+
 
 _SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -41,7 +76,8 @@ CREATE TABLE IF NOT EXISTS tracks (
     year INTEGER,
     is_synthetic INTEGER NOT NULL DEFAULT 0,
     total_tracks INTEGER,
-    genre TEXT
+    genre TEXT,
+    release_type_tag TEXT
 );
 
 CREATE TABLE IF NOT EXISTS album_art (
@@ -51,9 +87,19 @@ CREATE TABLE IF NOT EXISTS album_art (
     updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS play_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_id TEXT NOT NULL,
+    release_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    played_at_ns INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tracks_album_id ON tracks(album_id);
 CREATE INDEX IF NOT EXISTS idx_tracks_album_artist ON tracks(album_artist);
 CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
+CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at_ns DESC);
+CREATE INDEX IF NOT EXISTS idx_play_history_release ON play_history(release_id);
 """
 
 _MIGRATION_V2 = """
@@ -114,6 +160,12 @@ def _add_column_if_missing(
     connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
+def _ensure_repair(connection: sqlite3.Connection) -> None:
+    """Idempotent repair for objects missing on mis-initialized DBs."""
+    connection.executescript(_MIGRATION_V6_PLAY_HISTORY)
+    _add_column_if_missing(connection, "tracks", "release_type_tag", "TEXT")
+
+
 def _migrate_v5(connection: sqlite3.Connection) -> None:
     _add_column_if_missing(
         connection,
@@ -132,7 +184,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA journal_mode = WAL")
-    connection.execute("PRAGMA busy_timeout = 5000")
+    connection.execute("PRAGMA busy_timeout = 30000")
     _migrate(connection)
     return connection
 
@@ -147,6 +199,7 @@ def _migrate(connection: sqlite3.Connection) -> None:
             "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
+        _ensure_repair(connection)
         connection.commit()
         return
 
@@ -161,9 +214,13 @@ def _migrate(connection: sqlite3.Connection) -> None:
         _migrate_v5(connection)
     if stored_version < 6:
         connection.executescript(_MIGRATION_V6_PLAY_HISTORY)
+    if stored_version < 7:
+        _add_column_if_missing(connection, "tracks", "release_type_tag", "TEXT")
     if stored_version < SCHEMA_VERSION:
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
             (str(SCHEMA_VERSION),),
         )
         connection.commit()
+    _ensure_repair(connection)
+    connection.commit()
