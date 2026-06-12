@@ -14,7 +14,6 @@ from tunes_player.core.release_quality import (
 from tunes_player.core.release_quality import catalog_quality_label_for_release
 from tunes_player.core.release_quality_tiles import (
     expand_releases_by_quality_tier,
-    log_grid_quality_tiles,
     parse_catalog_release_id,
     parse_quality_tier_suffix,
     playback_tier_for_release_id,
@@ -183,22 +182,6 @@ class PlaybackTierForReleaseIdTests(unittest.TestCase):
             summaries={tile.id: tile},
         )
         self.assertEqual(tier, QUALITY_FILTER_CD)
-
-
-class LogGridQualityTilesTests(unittest.TestCase):
-    def test_logs_tile_fields(self) -> None:
-        release = replace(
-            _release(
-                "tidal:album:1@hi_res",
-                tiers=frozenset({QUALITY_FILTER_HI_RES}),
-            ),
-            quality_tier=QUALITY_FILTER_HI_RES,
-        )
-        with self.assertLogs("tunes_player.core.release_quality_tiles", level="INFO") as captured:
-            log_grid_quality_tiles([release])
-        joined = "\n".join(captured.output)
-        self.assertIn("quality_tier='hi_res'", joined)
-        self.assertIn("catalog_release_id=", joined)
 
 
 if __name__ == "__main__":

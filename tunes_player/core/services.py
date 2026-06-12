@@ -70,7 +70,6 @@ EventCallback = Callable[[str], None]
 Unsubscribe = Callable[[], None]
 
 log = logging.getLogger(__name__)
-_timeline_log = logging.getLogger("tunes_player.playback.timeline")
 _QUEUE_END_MARGIN_SEC = 1.0
 _UNSET_PLAYBACK_PREFERENCE = object()
 
@@ -1838,14 +1837,6 @@ class PlayerService:
         if not self._playlist_meta:
             return
         pos = self._playlist_position()
-        _timeline_log.info(
-            "skip_next requested queue[%s/%s] service_pos=%.2f dur=%s track=%s",
-            pos,
-            len(self._playlist_meta),
-            self._position_sec,
-            self._duration_sec,
-            self._current_track.id if self._current_track else None,
-        )
         if pos + 1 >= len(self._playlist_meta):
             engine = self._engine
             if engine is not None:
@@ -2540,19 +2531,6 @@ class PlayerService:
 
     def _reset_engine_unlocked(self) -> None:
         engine = self._engine
-        from tunes_player.core.playback.mpv_logging import format_action_provenance
-
-        mpv_pid = None
-        if engine is not None:
-            proc = getattr(engine, "_proc", None)
-            if proc is not None and hasattr(proc, "pid"):
-                mpv_pid = proc.pid
-        log.info(
-            "Resetting playback engine mpv_pid=%s engine_id=%s (%s)",
-            mpv_pid,
-            id(engine) if engine is not None else None,
-            format_action_provenance(skip=1),
-        )
         self._release_exclusive_session()
         if engine is not None:
             engine.quit()
@@ -2691,15 +2669,8 @@ class PlayerService:
 
     def _ensure_engine_locked(self) -> PlaybackEngine | None:
         with self._engine_init_lock:
-            from tunes_player.core.playback.mpv_logging import format_action_provenance
-
             engine = self._engine
             if engine is not None and not self._engine_is_available(engine):
-                log.info(
-                    "Replacing unavailable playback engine engine_id=%s (%s)",
-                    id(engine),
-                    format_action_provenance(skip=1),
-                )
                 self._engine = None
                 try:
                     engine.quit()
@@ -2725,8 +2696,6 @@ class PlayerService:
         )
 
     def _create_playback_engine(self) -> PlaybackEngine | None:
-        from tunes_player.core.playback.mpv_logging import format_action_provenance
-
         try:
             from tunes_player.engines.factory import create_playback_engine
 
@@ -2745,11 +2714,6 @@ class PlayerService:
         except RuntimeError as exc:
             self._report_error(str(exc), exc=exc)
             return None
-        log.info(
-            "Created in-process playback engine engine_id=%s (%s)",
-            id(self._engine),
-            format_action_provenance(skip=1),
-        )
         return self._engine
 
     def _sync_exclusive_session_for_profile(self, profile: PlaybackOutputProfile) -> None:
@@ -3012,14 +2976,6 @@ class PlayerService:
             self._emit("playback_changed")
             return
 
-        _timeline_log.info(
-            "auto_advance queue[%s/%s] audible=%.2fs time-pos=%.2fs dur=%.2fs",
-            index,
-            len(self._playlist_meta),
-            self._audible_position_sec,
-            time_pos,
-            duration,
-        )
         self._play_queue_index(index + 1)
 
     def _start_playlist(
@@ -3279,13 +3235,6 @@ class PlayerService:
         self._direct_alsa_recovery_attempts = 0
         self._auto_advanced_from_index = None
         self._sync_duration_from_engine()
-        _timeline_log.info(
-            "service track_started queue[%s/%s] %s -> %s",
-            index,
-            len(self._playlist_meta),
-            previous.id if previous is not None else None,
-            track.id,
-        )
         self._emit("playback_changed", "queue_changed")
 
     def _record_playback(self, track: Track) -> None:
@@ -3499,13 +3448,6 @@ class PlayerService:
             self._maybe_auto_advance_queue()
             return
         if event == "track_finished":
-            _timeline_log.info(
-                "service track_finished track=%s ui_pos=%.2f audible=%.2f dur=%s",
-                self._current_track.id if self._current_track else None,
-                self._position_sec,
-                self._audible_position_sec,
-                self._duration_sec,
-            )
             track = self._current_track
             if track is not None:
                 try:

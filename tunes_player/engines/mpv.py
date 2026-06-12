@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING
 from tunes_player.core.playback.buffer_policy import (
     classify_playback_uri,
     direct_alsa_engine_options,
-    log_buffer_policy,
     mpv_options_for_input,
 )
 from tunes_player.core.playback.engine import EngineEvent
@@ -38,7 +37,6 @@ if TYPE_CHECKING:
 EngineCallback = Callable[[EngineEvent], None]
 
 _LOG = logging.getLogger(__name__)
-_TIMELINE_LOG = logging.getLogger("tunes_player.playback.timeline")
 _SEEK_END_MARGIN_SEC = 1.0
 
 
@@ -542,7 +540,6 @@ class MpvEngine:
             warmup=warmup,
             software_volume=self._software_volume,
         )
-        log_buffer_policy(input_class, uri, options)
         for key, value in options.items():
             try:
                 self._set_property(key, value)
@@ -665,7 +662,6 @@ class MpvEngine:
         self._track_end_signaled = False
         self._seed_playback_position(0.0)
         self._duration_sec = None
-        _TIMELINE_LOG.info("track_started emit uri=%s", uri[:72] if uri else "")
         self._emit("track_started")
 
     def _observe_path_property(self, prop_name: str) -> None:
@@ -743,7 +739,6 @@ class MpvEngine:
                 self._playing = False
                 self._emit("playback_error")
             elif end_file_triggers_track_finished(reason):
-                _TIMELINE_LOG.debug("end-file demuxer eof — snap position for queue")
                 self._snap_positions_to_track_end()
                 self._playing = False
                 self._emit("track_eof")

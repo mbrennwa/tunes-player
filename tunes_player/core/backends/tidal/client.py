@@ -857,7 +857,7 @@ class TidalClient:
                 ", ".join(candidates),
             )
         else:
-            log.info(
+            log.debug(
                 "TIDAL track %s stream tier %s -> %s",
                 track_id,
                 chosen,

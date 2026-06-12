@@ -17,10 +17,7 @@ from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.logging_config import configure_logging
 from tunes_player.core.models import Release, Source
-from tunes_player.core.release_quality_tiles import (
-    log_grid_quality_tiles,
-    parse_catalog_release_id,
-)
+from tunes_player.core.release_quality_tiles import parse_catalog_release_id
 from tunes_player.core.release_quality import streaming_catalog_quality_needs_enrich
 from tunes_player.core.services import PlayerService
 from tunes_player.core.shell_state import (
@@ -1171,7 +1168,6 @@ class TunesWindow(Adw.ApplicationWindow):
             filtered_count=len(releases),
             catalog_count=catalog_count,
         )
-        log_grid_quality_tiles(releases)
 
     def _catalog_releases_for_message(self, state: ShellState) -> list[Release]:
         if self._cache_matches(state) and self._cached_releases:

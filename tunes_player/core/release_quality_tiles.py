@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import re
 from dataclasses import replace
 
@@ -15,8 +14,6 @@ from tunes_player.core.release_quality import (
     acoustic_tier_from_lossless,
     is_acoustic_hi_res,
 )
-
-_log = logging.getLogger(__name__)
 
 _TIER_SUFFIX_RE = re.compile(r"@(compressed|cd|hi_res)$")
 _TIER_ORDER = (
@@ -138,26 +135,6 @@ def expand_releases_by_quality_tier(releases: list[Release]) -> list[Release]:
             for tier in ordered:
                 output.append(_tile_for_tier(release, tier, catalog_id=catalog_id))
     return output
-
-
-def log_grid_quality_tiles(releases: list[Release]) -> None:
-    if not releases:
-        _log.info("Grid tiles: empty (0)")
-        return
-    _log.info("Grid tiles: %d", len(releases))
-    for index, release in enumerate(releases, start=1):
-        _log.info(
-            "Grid tile %d/%d: id=%s catalog_release_id=%s quality_tier=%r "
-            "peak_quality_tier=%r peak_sample_rate_hz=%s peak_bit_depth=%s",
-            index,
-            len(releases),
-            release.id,
-            release.catalog_release_id or release.id,
-            release.quality_tier or "",
-            release.peak_quality_tier or "",
-            release.peak_sample_rate_hz,
-            release.peak_bit_depth,
-        )
 
 
 def playback_tier_for_release_id(

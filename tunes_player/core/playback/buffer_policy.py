@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import logging
 from enum import Enum
 from pathlib import Path
 from urllib.parse import unquote, urlparse
-
-LOG = logging.getLogger(__name__)
 
 # LAN NAS / streaming: modest demuxer cache for brief NFS or HTTPS stalls.
 _NETWORK_DEMUXER_READAHEAD_SEC = 8.0
@@ -143,17 +140,3 @@ def merge_playback_note(
     if extra in base:
         return base
     return f"{base} · {extra}"
-
-
-def log_buffer_policy(
-    input_class: InputClass,
-    uri: str,
-    options: dict[str, object],
-) -> None:
-    preview = uri if len(uri) <= 120 else f"{uri[:117]}..."
-    LOG.info(
-        "Playback buffer policy %s for %s: %s",
-        input_class.value,
-        preview,
-        options,
-    )
