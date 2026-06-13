@@ -28,6 +28,7 @@ from tunes_player.ui.gtk.release_grid import (
     release_grid_visible_card_indices,
 )
 from tunes_player.ui.gtk.art import ArtLoader
+from tunes_player.ui.gtk.release_label_menu import attach_release_label_menu
 from tunes_player.ui.gtk.util import (
     effective_release_duration_sec,
     escape_markup,
@@ -519,6 +520,11 @@ class ReleaseDetailView(Gtk.Box):
         setattr(art_frame, "_tunes_release_id", release.id)
         art_frame.set_valign(Gtk.Align.FILL)
         header_row.append(art_frame)
+        attach_release_label_menu(
+            art_frame,
+            service=service,
+            release_id=release.id,
+        )
         self._detail_service = service
         self._detail_release_id = release.id
         self._detail_art_frame = art_frame
@@ -868,6 +874,12 @@ class ReleaseTileGrid(Gtk.Box):
         )
         setattr(card, "_tunes_art_small", small)
         _attach_album_card_activate(card, on_activate)
+        if self._service is not None:
+            attach_release_label_menu(
+                card,
+                service=self._service,
+                release_id=release.id,
+            )
         self._cards.append(card)
         if self._service is not None:
             release_id = getattr(card, "_tunes_release_id", None)

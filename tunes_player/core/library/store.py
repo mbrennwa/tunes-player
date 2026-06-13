@@ -158,6 +158,8 @@ class LibraryStore:
         if self._write_connection is not None:
             self._write_connection.close()
         self._write_connection = connect(self._db_path)
+        self._prune_release_label_tables(self._write_connection)
+        self._write_connection.commit()
 
     @_locked_db
     def track_count(self) -> int:
@@ -593,6 +595,313 @@ class LibraryStore:
             return items
 
         return self._with_connection(query)
+
+    @staticmethod
+    def _normalize_label_name(name: str) -> str:
+        return name.strip()
+
+    @staticmethod
+    def _prune_stale_release_labels(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            DELETE FROM release_labels
+            WHERE (
+                release_id GLOB 'local:*'
+                AND CASE
+                    WHEN instr(release_id, '@') > 0
+                    THEN substr(release_id, 1, instr(release_id, '@') - 1)
+                    ELSE release_id
+                END NOT IN (SELECT DISTINCT album_id FROM tracks)
+            )
+            OR (release_id GLOB 'tidal:*' AND release_id NOT GLOB 'tidal:album:*')
+            OR (release_id GLOB 'qobuz:*' AND release_id NOT GLOB 'qobuz:album:*')
+            """,
+        )
+
+    @staticmethod
+    def _prune_orphan_user_labels(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            DELETE FROM user_labels
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM release_labels rl
+                WHERE rl.label_id = user_labels.id
+            )
+            """,
+        )
+
+    @staticmethod
+    def _prune_release_label_tables(connection: sqlite3.Connection) -> None:
+        LibraryStore._prune_stale_release_labels(connection)
+        LibraryStore._prune_orphan_user_labels(connection)
+
+    @_locked_db
+    def prune_release_label_tables(self) -> None:
+        if self._write_connection is None:
+            raise RuntimeError("library store write connection is closed")
+
+        def attempt() -> None:
+            try:
+                self._prune_release_label_tables(self._write_connection)
+                self._write_connection.commit()
+            except Exception:
+                try:
+                    self._write_connection.rollback()
+                except sqlite3.OperationalError:
+                    pass
+                raise
+
+        def rollback_on_locked(_exc: sqlite3.OperationalError, _attempt: int) -> None:
+            try:
+                self._write_connection.rollback()
+            except sqlite3.OperationalError:
+                pass
+
+        with_db_retry(attempt, on_locked=rollback_on_locked)
+
+    @_locked_db
+    def list_user_label_names(self) -> tuple[str, ...]:
+        def query(connection: sqlite3.Connection) -> tuple[str, ...]:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT ul.name
+                FROM user_labels ul
+                JOIN release_labels rl ON rl.label_id = ul.id
+                ORDER BY ul.name COLLATE NOCASE
+                """,
+            ).fetchall()
+            return tuple(str(row["name"]) for row in rows)
+
+        return self._with_connection(query)
+
+    @_locked_db
+    def get_release_label_names(self, release_id: str) -> frozenset[str]:
+        def query(connection: sqlite3.Connection) -> frozenset[str]:
+            rows = connection.execute(
+                """
+                SELECT ul.name
+                FROM release_labels rl
+                JOIN user_labels ul ON ul.id = rl.label_id
+                WHERE rl.release_id = ?
+                ORDER BY ul.name COLLATE NOCASE
+                """,
+                (release_id,),
+            ).fetchall()
+            return frozenset(str(row["name"]) for row in rows)
+
+        return self._with_connection(query)
+
+    @_locked_db
+    def labels_for_release_ids(
+        self,
+        release_ids: list[str],
+    ) -> dict[str, frozenset[str]]:
+        if not release_ids:
+            return {}
+
+        def query(connection: sqlite3.Connection) -> dict[str, frozenset[str]]:
+            placeholders = ",".join("?" * len(release_ids))
+            rows = connection.execute(
+                f"""
+                SELECT rl.release_id, ul.name
+                FROM release_labels rl
+                JOIN user_labels ul ON ul.id = rl.label_id
+                WHERE rl.release_id IN ({placeholders})
+                ORDER BY ul.name COLLATE NOCASE
+                """,
+                release_ids,
+            ).fetchall()
+            result: dict[str, set[str]] = {release_id: set() for release_id in release_ids}
+            for row in rows:
+                result.setdefault(str(row["release_id"]), set()).add(str(row["name"]))
+            return {
+                release_id: frozenset(names)
+                for release_id, names in result.items()
+            }
+
+        return self._with_connection(query)
+
+    @_locked_db
+    def list_flagged_release_ids(self) -> tuple[str, ...]:
+        def query(connection: sqlite3.Connection) -> tuple[str, ...]:
+            rows = connection.execute(
+                """
+                SELECT release_id, MAX(tagged_at_ns) AS latest
+                FROM release_labels
+                GROUP BY release_id
+                ORDER BY latest DESC
+                """,
+            ).fetchall()
+            return tuple(str(row["release_id"]) for row in rows)
+
+        return self._with_connection(query)
+
+    def _label_id_for_name(
+        self,
+        connection: sqlite3.Connection,
+        name: str,
+        *,
+        create: bool = False,
+    ) -> int | None:
+        normalized = self._normalize_label_name(name)
+        if not normalized:
+            return None
+        row = connection.execute(
+            "SELECT id, name FROM user_labels WHERE name = ? COLLATE NOCASE",
+            (normalized,),
+        ).fetchone()
+        if row is not None:
+            return int(row["id"])
+        if not create:
+            return None
+        when = time.time_ns()
+        cursor = connection.execute(
+            "INSERT INTO user_labels(name, created_at_ns) VALUES (?, ?)",
+            (normalized, when),
+        )
+        return int(cursor.lastrowid)
+
+    @_locked_db
+    def ensure_user_label(self, name: str) -> str:
+        if self._write_connection is None:
+            raise RuntimeError("library store write connection is closed")
+        normalized = self._normalize_label_name(name)
+        if not normalized:
+            raise ValueError("label name must not be empty")
+
+        def attempt() -> str:
+            try:
+                label_id = self._label_id_for_name(
+                    self._write_connection,
+                    normalized,
+                    create=True,
+                )
+                if label_id is None:
+                    raise ValueError("label name must not be empty")
+                row = self._write_connection.execute(
+                    "SELECT name FROM user_labels WHERE id = ?",
+                    (label_id,),
+                ).fetchone()
+                self._write_connection.commit()
+                return str(row["name"]) if row is not None else normalized
+            except Exception:
+                try:
+                    self._write_connection.rollback()
+                except sqlite3.OperationalError:
+                    pass
+                raise
+
+        def rollback_on_locked(_exc: sqlite3.OperationalError, _attempt: int) -> None:
+            try:
+                self._write_connection.rollback()
+            except sqlite3.OperationalError:
+                pass
+
+        return with_db_retry(attempt, on_locked=rollback_on_locked)
+
+    @_locked_db
+    def set_release_labels(self, release_id: str, labels: frozenset[str]) -> None:
+        if self._write_connection is None:
+            raise RuntimeError("library store write connection is closed")
+        normalized = frozenset(
+            self._normalize_label_name(label)
+            for label in labels
+            if self._normalize_label_name(label)
+        )
+
+        def attempt() -> None:
+            try:
+                self._write_connection.execute(
+                    "DELETE FROM release_labels WHERE release_id = ?",
+                    (release_id,),
+                )
+                when = time.time_ns()
+                for label in sorted(normalized, key=lambda item: item.casefold()):
+                    label_id = self._label_id_for_name(
+                        self._write_connection,
+                        label,
+                        create=True,
+                    )
+                    if label_id is None:
+                        continue
+                    self._write_connection.execute(
+                        """
+                        INSERT INTO release_labels(release_id, label_id, tagged_at_ns)
+                        VALUES (?, ?, ?)
+                        """,
+                        (release_id, label_id, when),
+                    )
+                self._prune_orphan_user_labels(self._write_connection)
+                self._write_connection.commit()
+            except Exception:
+                try:
+                    self._write_connection.rollback()
+                except sqlite3.OperationalError:
+                    pass
+                raise
+
+        def rollback_on_locked(_exc: sqlite3.OperationalError, _attempt: int) -> None:
+            try:
+                self._write_connection.rollback()
+            except sqlite3.OperationalError:
+                pass
+
+        with_db_retry(attempt, on_locked=rollback_on_locked)
+
+    @_locked_db
+    def toggle_release_label(self, release_id: str, label: str, *, on: bool) -> None:
+        if self._write_connection is None:
+            raise RuntimeError("library store write connection is closed")
+        normalized = self._normalize_label_name(label)
+        if not normalized:
+            raise ValueError("label name must not be empty")
+
+        def attempt() -> None:
+            try:
+                if on:
+                    label_id = self._label_id_for_name(
+                        self._write_connection,
+                        normalized,
+                        create=True,
+                    )
+                    if label_id is None:
+                        raise ValueError("label name must not be empty")
+                    when = time.time_ns()
+                    self._write_connection.execute(
+                        """
+                        INSERT OR IGNORE INTO release_labels(release_id, label_id, tagged_at_ns)
+                        VALUES (?, ?, ?)
+                        """,
+                        (release_id, label_id, when),
+                    )
+                else:
+                    self._write_connection.execute(
+                        """
+                        DELETE FROM release_labels
+                        WHERE release_id = ?
+                          AND label_id IN (
+                              SELECT id FROM user_labels WHERE name = ? COLLATE NOCASE
+                          )
+                        """,
+                        (release_id, normalized),
+                    )
+                self._prune_orphan_user_labels(self._write_connection)
+                self._write_connection.commit()
+            except Exception:
+                try:
+                    self._write_connection.rollback()
+                except sqlite3.OperationalError:
+                    pass
+                raise
+
+        def rollback_on_locked(_exc: sqlite3.OperationalError, _attempt: int) -> None:
+            try:
+                self._write_connection.rollback()
+            except sqlite3.OperationalError:
+                pass
+
+        with_db_retry(attempt, on_locked=rollback_on_locked)
 
     @staticmethod
     def quality_hint(metadata: FileMetadata | None) -> str:

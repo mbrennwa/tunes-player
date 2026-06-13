@@ -220,6 +220,78 @@ class DbMigrationTests(unittest.TestCase):
             self.assertEqual(version, SCHEMA_VERSION)
             self.assertIn("play_history", tables)
 
+    def test_v8_user_labels_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "library.db"
+            connection = sqlite3.connect(db_path)
+            connection.executescript(
+                """
+                CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO meta(key, value) VALUES ('schema_version', '7');
+                CREATE TABLE files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path TEXT NOT NULL UNIQUE,
+                    mtime_ns INTEGER NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    indexed_at_ns INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE tracks (
+                    id TEXT PRIMARY KEY,
+                    file_id INTEGER NOT NULL,
+                    album_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    artist TEXT NOT NULL,
+                    album_artist TEXT NOT NULL,
+                    album TEXT NOT NULL,
+                    is_synthetic INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE play_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    track_id TEXT NOT NULL,
+                    release_id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    played_at_ns INTEGER NOT NULL
+                );
+                """
+            )
+            connection.commit()
+            connection.close()
+
+            connect(db_path)
+            connect(db_path)
+
+            connection = sqlite3.connect(db_path)
+            version = int(
+                connection.execute(
+                    "SELECT value FROM meta WHERE key = 'schema_version'",
+                ).fetchone()[0],
+            )
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'",
+                ).fetchall()
+            }
+            connection.close()
+            self.assertEqual(version, SCHEMA_VERSION)
+            self.assertIn("user_labels", tables)
+            self.assertIn("release_labels", tables)
+
+    def test_fresh_connect_creates_user_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "library.db"
+            connect(db_path)
+            connection = sqlite3.connect(db_path)
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'",
+                ).fetchall()
+            }
+            connection.close()
+            self.assertIn("user_labels", tables)
+            self.assertIn("release_labels", tables)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,7 +10,7 @@ from typing import TypeVar
 
 T = TypeVar("T")
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 LOCK_RETRY_ATTEMPTS = 6
 LOCK_RETRY_BASE_DELAY_SEC = 0.15
@@ -100,6 +100,22 @@ CREATE INDEX IF NOT EXISTS idx_tracks_album_artist ON tracks(album_artist);
 CREATE INDEX IF NOT EXISTS idx_tracks_title ON tracks(title);
 CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at_ns DESC);
 CREATE INDEX IF NOT EXISTS idx_play_history_release ON play_history(release_id);
+
+CREATE TABLE IF NOT EXISTS user_labels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    created_at_ns INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS release_labels (
+    release_id TEXT NOT NULL,
+    label_id INTEGER NOT NULL REFERENCES user_labels(id) ON DELETE CASCADE,
+    tagged_at_ns INTEGER NOT NULL,
+    PRIMARY KEY (release_id, label_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_release_labels_label_id ON release_labels(label_id);
+CREATE INDEX IF NOT EXISTS idx_release_labels_release_id ON release_labels(release_id);
 """
 
 _MIGRATION_V2 = """
@@ -143,6 +159,22 @@ CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at_
 CREATE INDEX IF NOT EXISTS idx_play_history_release ON play_history(release_id);
 """
 
+_MIGRATION_V8_USER_LABELS = """
+CREATE TABLE IF NOT EXISTS user_labels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    created_at_ns INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS release_labels (
+    release_id TEXT NOT NULL,
+    label_id INTEGER NOT NULL REFERENCES user_labels(id) ON DELETE CASCADE,
+    tagged_at_ns INTEGER NOT NULL,
+    PRIMARY KEY (release_id, label_id)
+);
+CREATE INDEX IF NOT EXISTS idx_release_labels_label_id ON release_labels(label_id);
+CREATE INDEX IF NOT EXISTS idx_release_labels_release_id ON release_labels(release_id);
+"""
+
 
 def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
     rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
@@ -163,6 +195,7 @@ def _add_column_if_missing(
 def _ensure_repair(connection: sqlite3.Connection) -> None:
     """Idempotent repair for objects missing on mis-initialized DBs."""
     connection.executescript(_MIGRATION_V6_PLAY_HISTORY)
+    connection.executescript(_MIGRATION_V8_USER_LABELS)
     _add_column_if_missing(connection, "tracks", "release_type_tag", "TEXT")
 
 
@@ -216,6 +249,8 @@ def _migrate(connection: sqlite3.Connection) -> None:
         connection.executescript(_MIGRATION_V6_PLAY_HISTORY)
     if stored_version < 7:
         _add_column_if_missing(connection, "tracks", "release_type_tag", "TEXT")
+    if stored_version < 8:
+        connection.executescript(_MIGRATION_V8_USER_LABELS)
     if stored_version < SCHEMA_VERSION:
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",

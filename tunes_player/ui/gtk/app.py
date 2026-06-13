@@ -35,6 +35,8 @@ from tunes_player.core.shell_state import (
     genres_in_selection,
     prune_enabled_genres,
     prune_enabled_quality_tiers,
+    prune_enabled_labels,
+    labels_in_selection,
     quality_tiers_in_selection,
     release_to_cache_payload,
     releases_from_cache_payloads,
@@ -51,6 +53,7 @@ from tunes_player.ui.gtk.shell_controller import (
     format_release_count_label,
 )
 from tunes_player.ui.gtk.genre_filter_menu import GenreFilterMenu
+from tunes_player.ui.gtk.label_filter_menu import LabelFilterMenu
 from tunes_player.ui.gtk.quality_multi_switch import QualityMultiSwitch
 from tunes_player.ui.gtk.release_sort_switch import ReleaseSortSwitch
 from tunes_player.ui.gtk.release_type_multi_switch import ReleaseTypeMultiSwitch
@@ -76,11 +79,13 @@ _PRESET_LABELS = {
     ShellBase.NEW_MUSIC: "New Releases",
     ShellBase.SUGGESTION: "Suggest Music",
     ShellBase.ALL_LOCAL: "All Local",
+    ShellBase.FLAGGED: "Flagged",
 }
 _LOADING_MESSAGES = {
     ShellBase.NEW_MUSIC: "Loading new releases…",
     ShellBase.SUGGESTION: "Finding suggestions...",
     ShellBase.ALL_LOCAL: "Loading local library…",
+    ShellBase.FLAGGED: "Loading flagged releases…",
 }
 _CATALOG_ENRICH_CONCURRENCY = 2
 
@@ -108,6 +113,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._queue_sheet: QueueSheet | None = None
         self._source_multi: SourceMultiSwitch | None = None
         self._genre_filter: GenreFilterMenu | None = None
+        self._label_filter: LabelFilterMenu | None = None
         self._release_type_multi: ReleaseTypeMultiSwitch | None = None
         self._quality_filter_multi: QualityMultiSwitch | None = None
         self._sort_switch: ReleaseSortSwitch | None = None
@@ -261,6 +267,11 @@ class TunesWindow(Adw.ApplicationWindow):
         self._suggestion_btn.connect("toggled", self._on_suggestion_toggled)
         search_row.append(self._suggestion_btn)
 
+        self._flagged_btn = Gtk.ToggleButton(label="Flagged")
+        self._flagged_btn.add_css_class("shell-preset-btn")
+        self._flagged_btn.connect("toggled", self._on_flagged_toggled)
+        search_row.append(self._flagged_btn)
+
         self._all_local_btn = Gtk.ToggleButton(label="All Local")
         self._all_local_btn.add_css_class("shell-preset-btn")
         self._all_local_btn.connect("toggled", self._on_all_local_toggled)
@@ -292,6 +303,14 @@ class TunesWindow(Adw.ApplicationWindow):
         self._genre_filter_slot.set_halign(Gtk.Align.START)
         self._genre_filter_slot.set_margin_start(24)
         filter_row.append(self._genre_filter_slot)
+
+        self._label_filter_slot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self._label_filter_slot.add_css_class("shell-genre-filter-slot")
+        self._label_filter_slot.set_visible(False)
+        self._label_filter_slot.set_hexpand(False)
+        self._label_filter_slot.set_halign(Gtk.Align.START)
+        self._label_filter_slot.set_margin_start(24)
+        filter_row.append(self._label_filter_slot)
 
         self._quality_filter_slot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         self._quality_filter_slot.add_css_class("shell-quality-filter-slot")
@@ -390,19 +409,28 @@ class TunesWindow(Adw.ApplicationWindow):
         self._cached_releases = self._service.expand_releases_with_cache(list(releases))
         self._sync_release_type_multi()
         self._sync_genre_filter()
+        self._sync_label_filter()
         self._sync_quality_filter()
         self._sync_sort_switch()
 
     def _available_sources(self) -> frozenset[Source]:
         return frozenset(available_sources(self._service))
 
+    def _labels_by_id_for(self, releases: list[Release]) -> dict[str, frozenset[str]]:
+        if not releases:
+            return {}
+        return self._service.labels_for_releases([release.id for release in releases])
+
     def _filtered_from_cache(self, state: ShellState) -> list[Release]:
+        labels_by_id = self._labels_by_id_for(self._cached_releases)
         return apply_shell_view_filters(
             self._cached_releases,
             enabled_sources=state.enabled_sources,
             enabled_genres=state.enabled_genres,
             enabled_release_types=state.enabled_release_types,
             enabled_quality_tiers=state.enabled_quality_tiers,
+            enabled_labels=state.enabled_labels,
+            labels_by_id=labels_by_id,
             available_sources=self._available_sources(),
             sort_key=state.sort_key,
             sort_descending=state.sort_descending,
@@ -436,6 +464,7 @@ class TunesWindow(Adw.ApplicationWindow):
             state = replace(
                 state,
                 enabled_genres=frozenset(),
+                enabled_labels=frozenset(),
                 sort_key=None,
                 cached_releases=(),
             )
@@ -457,6 +486,7 @@ class TunesWindow(Adw.ApplicationWindow):
             self._new_music_btn.set_active(state.base == ShellBase.NEW_MUSIC)
             self._suggestion_btn.set_active(state.base == ShellBase.SUGGESTION)
             self._all_local_btn.set_active(state.base == ShellBase.ALL_LOCAL)
+            self._flagged_btn.set_active(state.base == ShellBase.FLAGGED)
         finally:
             self._updating_preset = False
 
@@ -464,7 +494,12 @@ class TunesWindow(Adw.ApplicationWindow):
             current = self._search_entry.get_text()
             if current != state.search_query:
                 self._search_entry.set_text(state.search_query)
-        elif state.base in (ShellBase.NEW_MUSIC, ShellBase.SUGGESTION, ShellBase.ALL_LOCAL):
+        elif state.base in (
+            ShellBase.NEW_MUSIC,
+            ShellBase.SUGGESTION,
+            ShellBase.ALL_LOCAL,
+            ShellBase.FLAGGED,
+        ):
             if self._search_entry.get_text():
                 self._search_entry.set_text("")
 
@@ -472,6 +507,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._sync_source_multi()
         self._sync_release_type_multi()
         self._sync_genre_filter()
+        self._sync_label_filter()
         self._sync_quality_filter()
         self._sync_sort_switch()
 
@@ -615,6 +651,41 @@ class TunesWindow(Adw.ApplicationWindow):
         self._schedule_persist()
         self._display_cached_selection()
 
+    def _sync_label_filter(self) -> None:
+        labels_by_id = self._labels_by_id_for(self._cached_releases)
+        available = labels_in_selection(self._cached_releases, labels_by_id)
+        show = bool(self._cached_releases) and bool(available)
+        state = self._shell_state
+        pruned = prune_enabled_labels(state.enabled_labels, available)
+        if pruned != state.enabled_labels:
+            self._shell_state = replace(state, enabled_labels=pruned)
+            state = self._shell_state
+
+        self._label_filter_slot.set_visible(show)
+        if not show:
+            return
+
+        if self._label_filter is None:
+            self._label_filter = LabelFilterMenu(
+                on_changed=self._on_label_filter_changed,
+            )
+            self._label_filter.set_hexpand(False)
+            self._label_filter_slot.append(self._label_filter)
+        self._label_filter.set_labels(available, state.enabled_labels)
+
+    def _on_label_filter_changed(self, enabled_labels: frozenset[str]) -> None:
+        self._set_enabled_labels(enabled_labels)
+
+    def _set_enabled_labels(self, enabled_labels: frozenset[str]) -> None:
+        state = self._shell_state
+        if state.enabled_labels == enabled_labels:
+            return
+        self._shell_state = replace(state, enabled_labels=enabled_labels)
+        if self._label_filter is not None:
+            self._label_filter.set_enabled_labels(enabled_labels)
+        self._schedule_persist()
+        self._display_cached_selection()
+
     def _rebuild_source_filters(self) -> None:
         sources = available_sources(self._service)
         pruned = prune_enabled_sources(self._shell_state.enabled_sources, sources)
@@ -684,6 +755,14 @@ class TunesWindow(Adw.ApplicationWindow):
         if button.get_active():
             self._activate_preset(ShellBase.ALL_LOCAL)
         elif self._shell_state.base == ShellBase.ALL_LOCAL:
+            button.set_active(True)
+
+    def _on_flagged_toggled(self, button: Gtk.ToggleButton) -> None:
+        if getattr(self, "_updating_preset", False):
+            return
+        if button.get_active():
+            self._activate_preset(ShellBase.FLAGGED)
+        elif self._shell_state.base == ShellBase.FLAGGED:
             button.set_active(True)
 
     def _commit_selection_change(
@@ -1090,6 +1169,11 @@ class TunesWindow(Adw.ApplicationWindow):
                 "Could not load your local library.",
                 "Could not load All Local. Try again in a moment.",
             )
+        if request.base == ShellBase.FLAGGED:
+            return (
+                "Could not load flagged releases.",
+                "Could not load Flagged. Try again in a moment.",
+            )
         return (
             f"Could not load {title}. Check your connection and sign-in.",
             f"Could not load {title}. Try again in a moment.",
@@ -1312,6 +1396,19 @@ class TunesWindow(Adw.ApplicationWindow):
             GLib.idle_add(self._on_sources_or_library_changed)
         elif event == "art_updated":
             GLib.idle_add(self._on_art_updated)
+        elif event == "flags_changed":
+            GLib.idle_add(self._on_flags_changed)
+        return False
+
+    def _on_flags_changed(self) -> bool:
+        state = self._shell_state
+        if state.base == ShellBase.FLAGGED:
+            self._invalidate_selection_cache()
+            self._reload_grid()
+            return False
+        if self._cache_matches(state) and self._cached_releases:
+            self._sync_label_filter()
+            self._display_cached_selection(state)
         return False
 
     def _on_art_updated(self) -> bool:

@@ -1411,6 +1411,36 @@ class PlayerService:
             self._store.reconnect()
         self._emit("library_updated")
 
+    def list_user_labels(self) -> tuple[str, ...]:
+        self._store.prune_release_label_tables()
+        return self._store.list_user_label_names()
+
+    def get_release_labels(self, release_id: str) -> frozenset[str]:
+        return self._store.get_release_label_names(release_id)
+
+    def labels_for_releases(self, release_ids: list[str]) -> dict[str, frozenset[str]]:
+        return self._store.labels_for_release_ids(release_ids)
+
+    def set_release_labels(self, release_id: str, labels: frozenset[str]) -> None:
+        self._store.set_release_labels(release_id, labels)
+        self.notify_flags_changed()
+
+    def toggle_release_label(self, release_id: str, label: str, *, on: bool) -> None:
+        self._store.toggle_release_label(release_id, label, on=on)
+        self.notify_flags_changed()
+
+    def list_flagged_releases(self) -> list[Release]:
+        releases: list[Release] = []
+        for release_id in self._store.list_flagged_release_ids():
+            release = self.get_release(release_id)
+            if release is not None:
+                releases.append(release)
+        return releases
+
+    def notify_flags_changed(self) -> None:
+        """Call after user label associations change."""
+        self._emit("flags_changed")
+
     def refresh_local_release_art_uris(self, releases: list[Release]) -> list[Release]:
         """Refresh art_uri on local releases from the library store."""
         local_ids = [release.id for release in releases if release.source == Source.LOCAL]

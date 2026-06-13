@@ -27,6 +27,7 @@ from tunes_player.core.shell_state import (
     ShellBase,
     ShellState,
     apply_genre_filter,
+    apply_label_filter,
     apply_quality_filter,
     apply_release_type_filter,
     apply_shell_sort,
@@ -38,6 +39,8 @@ from tunes_player.core.shell_state import (
     genres_in_selection,
     parse_shell_state,
     prune_enabled_genres,
+    prune_enabled_labels,
+    labels_in_selection,
     cached_releases_have_quality_tiers,
     prune_enabled_quality_tiers,
     refresh_local_peak_quality_tiers,
@@ -87,6 +90,7 @@ class TestShellStateParsing(unittest.TestCase):
         self.assertEqual(state.search_scope, SearchScope.ALL)
         self.assertEqual(state.enabled_sources, frozenset())
         self.assertEqual(state.enabled_genres, frozenset())
+        self.assertEqual(state.enabled_labels, frozenset())
         self.assertEqual(state.enabled_release_types, frozenset())
         self.assertEqual(state.enabled_quality_tiers, frozenset())
         self.assertIsNone(state.sort_key)
@@ -406,6 +410,53 @@ class TestGenreSelectionHelpers(unittest.TestCase):
         )
         self.assertEqual(pruned, frozenset({"Rock"}))
 
+    def test_apply_label_filter_or_semantics(self) -> None:
+        releases = [
+            _release("local:1", Source.LOCAL),
+            _release("local:2", Source.LOCAL),
+            _release("tidal:1", Source.TIDAL),
+        ]
+        labels_by_id = {
+            "local:1": frozenset({"buy"}),
+            "local:2": frozenset({"listen"}),
+            "tidal:1": frozenset({"buy", "listen"}),
+        }
+        filtered = apply_label_filter(
+            releases,
+            frozenset({"buy", "listen"}),
+            labels_by_id,
+        )
+        self.assertEqual(
+            [release.id for release in filtered],
+            ["local:1", "local:2", "tidal:1"],
+        )
+
+    def test_labels_in_selection(self) -> None:
+        releases = [
+            _release("local:1", Source.LOCAL),
+            _release("local:2", Source.LOCAL),
+        ]
+        labels_by_id = {
+            "local:1": frozenset({"Buy"}),
+            "local:2": frozenset({"buy"}),
+        }
+        self.assertEqual(labels_in_selection(releases, labels_by_id), ("Buy",))
+
+    def test_prune_enabled_labels(self) -> None:
+        pruned = prune_enabled_labels(
+            frozenset({"buy", "stale"}),
+            ("buy", "listen"),
+        )
+        self.assertEqual(pruned, frozenset({"buy"}))
+
+    def test_enabled_labels_roundtrip(self) -> None:
+        state = ShellState(
+            base=ShellBase.FLAGGED,
+            enabled_labels=frozenset({"buy", "listen"}),
+        )
+        restored = ShellState.from_dict(state.to_dict())
+        self.assertEqual(restored, state)
+
 
 class TestRefreshLocalPeakQualityTiers(unittest.TestCase):
     def test_replaces_stale_cached_tier(self) -> None:
@@ -676,6 +727,29 @@ class TestShellStateConfigPersistence(unittest.TestCase):
             raw = json.loads(path.read_text(encoding="utf-8"))
             self.assertIn("cached_releases", raw["shell_state"])
             self.assertEqual(raw["shell_state"]["enabled_genres"], ["Rock"])
+
+    def test_config_roundtrip_with_enabled_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            manager = ConfigManager(path)
+            manager.load()
+            state = ShellState(
+                base=ShellBase.FLAGGED,
+                enabled_labels=frozenset({"buy", "listen"}),
+            )
+            manager.set_shell_state(state)
+
+            other = ConfigManager(path)
+            other.load()
+            self.assertEqual(
+                other.config.shell_state.enabled_labels,
+                frozenset({"buy", "listen"}),
+            )
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                sorted(raw["shell_state"]["enabled_labels"]),
+                ["buy", "listen"],
+            )
 
 
 if __name__ == "__main__":

@@ -79,6 +79,8 @@ def filter_empty_message(state: ShellState) -> str | None:
     """Explain an empty grid when the catalog still has releases."""
     if state.enabled_genres:
         return "No releases match the selected genres."
+    if state.enabled_labels:
+        return "No releases match the selected labels."
     if state.enabled_release_types:
         return "No releases match the selected release types."
     if state.enabled_quality_tiers:
@@ -122,6 +124,12 @@ def empty_grid_message(
             "TIDAL or Qobuz in Settings → Sources."
         )
 
+    if state.base == ShellBase.FLAGGED:
+        return (
+            "No flagged releases yet.\n"
+            "Right-click a release tile to add a label."
+        )
+
     if state.base == ShellBase.SEARCH and state.search_query.strip():
         return f'No results for “{state.search_query}”.'
 
@@ -160,6 +168,8 @@ def fetch_base_releases(
         if not service.config.config.music_folders:
             return []
         return service.list_releases()
+    if base == ShellBase.FLAGGED:
+        return service.list_flagged_releases()
     return []
 
 

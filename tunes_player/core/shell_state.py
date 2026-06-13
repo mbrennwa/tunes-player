@@ -31,6 +31,7 @@ class ShellBase(str, Enum):
     NEW_MUSIC = "new_music"
     SUGGESTION = "suggestion"
     ALL_LOCAL = "all_local"
+    FLAGGED = "flagged"
 
 
 class SearchScope(str, Enum):
@@ -95,6 +96,8 @@ class ShellState:
     enabled_release_types: frozenset[str] = field(default_factory=frozenset)
     # Empty set = all quality tiers enabled. Non-empty = OR on available_quality_tiers.
     enabled_quality_tiers: frozenset[str] = field(default_factory=frozenset)
+    # Empty set = no label filter. Non-empty = OR match on user labels.
+    enabled_labels: frozenset[str] = field(default_factory=frozenset)
     # None = preserve cache order; otherwise single-field sort after filters.
     sort_key: str | None = None
     sort_descending: bool = True
@@ -118,6 +121,8 @@ class ShellState:
             payload["enabled_release_types"] = sorted(self.enabled_release_types)
         if self.enabled_quality_tiers:
             payload["enabled_quality_tiers"] = sorted(self.enabled_quality_tiers)
+        if self.enabled_labels:
+            payload["enabled_labels"] = sorted(self.enabled_labels)
         if self.sort_key is not None:
             payload["sort_key"] = self.sort_key
         if self.sort_descending is not True:
@@ -147,6 +152,7 @@ class ShellState:
         enabled_genres = _parse_enabled_genres(raw)
         enabled_release_types = _parse_enabled_release_types(raw)
         enabled_quality_tiers = _parse_enabled_quality_tiers(raw)
+        enabled_labels = _parse_enabled_labels(raw)
         sort_key, sort_descending = _parse_sort_state(raw)
         cached_releases = _parse_cached_releases(raw)
         return cls(
@@ -157,6 +163,7 @@ class ShellState:
             enabled_genres=enabled_genres,
             enabled_release_types=enabled_release_types,
             enabled_quality_tiers=enabled_quality_tiers,
+            enabled_labels=enabled_labels,
             sort_key=sort_key,
             sort_descending=sort_descending,
             cached_releases=cached_releases,
@@ -418,6 +425,17 @@ def _parse_enabled_release_types(raw: dict[str, Any]) -> frozenset[str]:
     )
 
 
+def _parse_enabled_labels(raw: dict[str, Any]) -> frozenset[str]:
+    enabled_raw = raw.get("enabled_labels")
+    if not isinstance(enabled_raw, list):
+        return frozenset()
+    return frozenset(
+        str(item).strip()
+        for item in enabled_raw
+        if isinstance(item, str) and str(item).strip()
+    )
+
+
 def _parse_enabled_quality_tiers(raw: dict[str, Any]) -> frozenset[str]:
     enabled_raw = raw.get("enabled_quality_tiers")
     if not isinstance(enabled_raw, list):
@@ -618,6 +636,41 @@ def prune_enabled_quality_tiers(
     return frozenset(tier for tier in enabled_quality_tiers if tier in available)
 
 
+def prune_enabled_labels(
+    enabled_labels: frozenset[str],
+    available_labels: tuple[str, ...] | frozenset[str],
+) -> frozenset[str]:
+    available = frozenset(available_labels)
+    return frozenset(label for label in enabled_labels if label in available)
+
+
+def labels_in_selection(
+    releases: list[Release] | tuple[Release, ...],
+    labels_by_id: dict[str, frozenset[str]],
+) -> tuple[str, ...]:
+    """Distinct user labels on *releases*, sorted case-insensitively."""
+    by_key: dict[str, str] = {}
+    for release in releases:
+        for label in labels_by_id.get(release.id, frozenset()):
+            key = label.casefold()
+            by_key.setdefault(key, label)
+    return tuple(sorted(by_key.values(), key=lambda item: item.casefold()))
+
+
+def apply_label_filter(
+    releases: list[Release],
+    enabled_labels: frozenset[str],
+    labels_by_id: dict[str, frozenset[str]],
+) -> list[Release]:
+    if not enabled_labels:
+        return list(releases)
+    return [
+        release
+        for release in releases
+        if enabled_labels & labels_by_id.get(release.id, frozenset())
+    ]
+
+
 def apply_quality_filter(
     releases: list[Release],
     enabled_quality_tiers: frozenset[str],
@@ -705,6 +758,8 @@ def apply_shell_view_filters(
     enabled_genres: frozenset[str],
     enabled_release_types: frozenset[str] | None = None,
     enabled_quality_tiers: frozenset[str] | None = None,
+    enabled_labels: frozenset[str] | None = None,
+    labels_by_id: dict[str, frozenset[str]] | None = None,
     available_sources: frozenset[Source] | None = None,
     sort_key: str | None = None,
     sort_descending: bool = True,
@@ -719,6 +774,11 @@ def apply_shell_view_filters(
         enabled_release_types or frozenset(),
     )
     filtered = apply_genre_filter(filtered, enabled_genres)
+    filtered = apply_label_filter(
+        filtered,
+        enabled_labels or frozenset(),
+        labels_by_id or {},
+    )
     filtered = apply_quality_filter(
         filtered,
         enabled_quality_tiers or frozenset(),
