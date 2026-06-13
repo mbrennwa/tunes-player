@@ -46,3 +46,5 @@ Streaming requires your own paid subscriptions where applicable. Features can br
 ## License
 
 GPL-3.0-or-later — see [LICENSE](LICENSE).
+
+This project was developed with substantial assistance from AI coding tools. The code was reviewed through iterative development, discussion, testing, and acceptance by the project maintainer. A targeted search for third-party code did not identify any license incompatibilities.
