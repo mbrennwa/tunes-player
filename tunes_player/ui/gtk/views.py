@@ -28,7 +28,10 @@ from tunes_player.ui.gtk.release_grid import (
     release_grid_visible_card_indices,
 )
 from tunes_player.ui.gtk.art import ArtLoader
-from tunes_player.ui.gtk.release_label_menu import attach_release_label_menu
+from tunes_player.ui.gtk.save_to_disk_menu import (
+    attach_release_context_menu,
+    attach_track_save_menu,
+)
 from tunes_player.ui.gtk.util import (
     effective_release_duration_sec,
     escape_markup,
@@ -520,10 +523,11 @@ class ReleaseDetailView(Gtk.Box):
         setattr(art_frame, "_tunes_release_id", release.id)
         art_frame.set_valign(Gtk.Align.FILL)
         header_row.append(art_frame)
-        attach_release_label_menu(
+        attach_release_context_menu(
             art_frame,
             service=service,
             release_id=release.id,
+            source=release.source,
         )
         self._detail_service = service
         self._detail_release_id = release.id
@@ -600,7 +604,9 @@ class ReleaseDetailView(Gtk.Box):
         scrolled.set_child(list_box)
 
         for index, track in enumerate(tracks):
-            list_box.append(_compact_track_row(track, index=index))
+            row = _compact_track_row(track, index=index)
+            attach_track_save_menu(row, service=service, track=track)
+            list_box.append(row)
 
     def _on_playback_event(self, event: str) -> None:
         if event == "position_changed":
@@ -875,10 +881,11 @@ class ReleaseTileGrid(Gtk.Box):
         setattr(card, "_tunes_art_small", small)
         _attach_album_card_activate(card, on_activate)
         if self._service is not None:
-            attach_release_label_menu(
+            attach_release_context_menu(
                 card,
                 service=self._service,
                 release_id=release.id,
+                source=release.source,
             )
         self._cards.append(card)
         if self._service is not None:

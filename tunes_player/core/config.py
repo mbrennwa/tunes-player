@@ -129,6 +129,7 @@ class AppConfig:
     qobuz_app_secret: str | None = None
     qobuz_stream_format_id: int = 27
     new_music_within_days: int = NEW_MUSIC_LOCAL_WITHIN_DAYS_DEFAULT
+    last_save_folder: str | None = None
     shell_state: ShellState = field(default_factory=ShellState)
 
 
@@ -212,6 +213,10 @@ class ConfigManager:
         volume_control_mode = raw.get("volume_control_mode")
         if volume_control_mode not in {None, "hardware", "software", "fixed"}:
             volume_control_mode = None
+        last_save_raw = raw.get("last_save_folder")
+        last_save_folder = None
+        if last_save_raw:
+            last_save_folder = _normalize_folder_path(last_save_raw) or str(last_save_raw).strip() or None
         self._config = AppConfig(
             music_folders=folders,
             music_folder_added_at=added_at,
@@ -233,6 +238,7 @@ class ConfigManager:
             new_music_within_days=normalize_new_music_within_days(
                 raw.get("new_music_within_days", NEW_MUSIC_LOCAL_WITHIN_DAYS_DEFAULT),
             ),
+            last_save_folder=last_save_folder,
             shell_state=parse_shell_state(raw.get("shell_state")),
         )
         return self._config
@@ -262,6 +268,7 @@ class ConfigManager:
             "qobuz_app_secret": self._config.qobuz_app_secret,
             "qobuz_stream_format_id": self._config.qobuz_stream_format_id,
             "new_music_within_days": self._config.new_music_within_days,
+            "last_save_folder": self._config.last_save_folder,
             "shell_state": self._config.shell_state.to_dict(),
         }
         self._path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -392,6 +399,14 @@ class ConfigManager:
 
     def set_new_music_within_days(self, days: int) -> None:
         self._config.new_music_within_days = normalize_new_music_within_days(days)
+        self.save()
+
+    def set_last_save_folder(self, folder: str | None) -> None:
+        if folder is None or not str(folder).strip():
+            self._config.last_save_folder = None
+        else:
+            normalized = _normalize_folder_path(folder)
+            self._config.last_save_folder = normalized or str(folder).strip()
         self.save()
 
     def set_shell_state(self, state: ShellState) -> None:
