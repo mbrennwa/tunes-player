@@ -20,6 +20,12 @@ def show_error_toast(overlay: Adw.ToastOverlay, message: str) -> None:
     overlay.add_toast(toast)
 
 
+def show_toast(overlay: Adw.ToastOverlay, message: str, *, timeout: int = _TOAST_TIMEOUT_SEC) -> None:
+    toast = Adw.Toast.new(message)
+    toast.set_timeout(timeout)
+    overlay.add_toast(toast)
+
+
 def attach_error_toasts(overlay: Adw.ToastOverlay, service: PlayerService) -> None:
     """Show playback errors from PlayerService on an existing toast overlay."""
 

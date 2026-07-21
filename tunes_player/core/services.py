@@ -9,6 +9,7 @@ import os
 import sqlite3
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
@@ -40,6 +41,24 @@ from tunes_player.core.library.scanner import ScanFileError
 from tunes_player.core.library.scan_process import terminate_orphan_library_scans
 from tunes_player.core.library.scan_worker import close_scan_queue, create_scan_process
 from tunes_player.core.models import Release, Source, Track
+from tunes_player.core.save_to_disk import (
+    SaveCancelled,
+    SaveToDiskError,
+    build_track_path,
+    cleanup_download_cache,
+    download_cache_dir,
+    download_https,
+    fetch_cover_bytes,
+    infer_extension,
+    is_mpd_uri,
+    is_writable_dir,
+    music_folder_for_path,
+    promote_part_to_destination,
+    remux_mpd,
+    rmtree_quiet,
+    tracks_need_disc_prefix,
+    write_tags,
+)
 from tunes_player.core.shell_state import refresh_local_release_art_uris
 from tunes_player.core.playback.engine import EngineEvent, PlaybackEngine
 from tunes_player.core.playback.output_profile import (
@@ -235,7 +254,15 @@ class PlayerService:
         self._pending_track_loads: Queue[_PreparedTrackLoad] = Queue()
         self._discover_fetch_lock = threading.Lock()
         self._engine_init_lock = threading.Lock()
+        self._download_thread: threading.Thread | None = None
+        self._download_cancel = threading.Event()
+        self._download_lock = threading.Lock()
+        self._download_progress: tuple[int, int, str] | None = None
+        self._download_last_error: str | None = None
+        self._download_cancelled_on_shutdown = False
+        self._download_saved_count = 0
         data_dir = self._config_manager.data_dir
+        cleanup_download_cache(data_dir)
         self._tidal = TidalClient(
             data_dir / "tidal-session.json",
             cache_dir=data_dir / "tidal-cache",
@@ -2063,6 +2090,13 @@ class PlayerService:
             self._maybe_auto_advance_queue()
 
     def shutdown(self) -> None:
+        was_downloading = self.is_saving_to_disk()
+        self.cancel_save_to_disk()
+        thread = self._download_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5.0)
+        if was_downloading:
+            self._download_cancelled_on_shutdown = True
         self._tidal.save_session()
         self._pending_scan_jobs.clear()
         self._incremental_coalesce.clear()
@@ -2087,6 +2121,203 @@ class PlayerService:
             engine.quit()
         self._store.close()
 
+    def is_saving_to_disk(self) -> bool:
+        thread = self._download_thread
+        return thread is not None and thread.is_alive()
+
+    @property
+    def download_progress(self) -> tuple[int, int, str] | None:
+        return self._download_progress
+
+    @property
+    def download_last_error(self) -> str | None:
+        return self._download_last_error
+
+    @property
+    def download_saved_count(self) -> int:
+        return self._download_saved_count
+
+    def consume_download_cancelled_on_shutdown(self) -> bool:
+        flag = self._download_cancelled_on_shutdown
+        self._download_cancelled_on_shutdown = False
+        return flag
+
+    def set_last_save_folder(self, folder: str | None) -> None:
+        self._config_manager.set_last_save_folder(folder)
+
+    def cancel_save_to_disk(self) -> None:
+        self._download_cancel.set()
+
+    def start_save_to_disk(
+        self,
+        *,
+        track_ids: list[str] | None = None,
+        tracks: list[Track] | None = None,
+        dest_dir: str,
+    ) -> None:
+        """Queue a sequential save job for streaming tracks into dest_dir."""
+        track_list = list(tracks or [])
+        ids = [t.id for t in track_list] if track_list else [tid for tid in (track_ids or []) if tid]
+        if not ids:
+            raise SaveToDiskError("No tracks to save.")
+        by_id = {t.id: t for t in track_list}
+        dest = Path(dest_dir).expanduser()
+        if not is_writable_dir(dest):
+            raise SaveToDiskError(f"Folder is not writable: {dest}")
+        with self._download_lock:
+            if self.is_saving_to_disk():
+                raise SaveToDiskError("A download is already in progress.")
+            self._download_cancel = threading.Event()
+            self._download_progress = None
+            self._download_last_error = None
+            self._download_saved_count = 0
+            self._download_cancelled_on_shutdown = False
+            thread = threading.Thread(
+                target=self._run_save_to_disk_job,
+                args=(list(ids), str(dest.resolve()), by_id),
+                name="tunes-save-to-disk",
+                daemon=True,
+            )
+            self._download_thread = thread
+            thread.start()
+        self._emit("download_started")
+
+    def _run_save_to_disk_job(
+        self,
+        track_ids: list[str],
+        dest_dir: str,
+        tracks_by_id: dict[str, Track],
+    ) -> None:
+        job_id = uuid.uuid4().hex
+        cache_root = download_cache_dir(self._config_manager.data_dir)
+        job_dir = cache_root / job_id
+        saved_paths: list[Path] = []
+        cancelled = False
+        errors: list[str] = []
+        try:
+            job_dir.mkdir(parents=True, exist_ok=True)
+            known_tracks = [tracks_by_id[tid] for tid in track_ids if tid in tracks_by_id]
+            include_disc = tracks_need_disc_prefix(known_tracks)
+            total = len(track_ids)
+            for index, track_id in enumerate(track_ids, start=1):
+                if self._download_cancel.is_set():
+                    cancelled = True
+                    break
+                track = tracks_by_id.get(track_id)
+                label = track.title if track is not None else track_id
+                self._download_progress = (index, total, label)
+                self._emit("download_progress")
+                try:
+                    path = self._save_one_track(
+                        track_id,
+                        dest_root=Path(dest_dir),
+                        job_dir=job_dir,
+                        index=index,
+                        include_disc=include_disc,
+                        track=track,
+                    )
+                except SaveCancelled:
+                    cancelled = True
+                    break
+                except SaveToDiskError as exc:
+                    errors.append(f"{label}: {exc}")
+                    log.warning("Save to disk failed for %s: %s", track_id, exc)
+                    continue
+                except Exception as exc:
+                    errors.append(f"{label}: {exc}")
+                    log.exception("Save to disk failed for %s", track_id)
+                    continue
+                saved_paths.append(path)
+            self._download_saved_count = len(saved_paths)
+            if saved_paths:
+                self._enqueue_saved_paths_scan(saved_paths)
+            if cancelled:
+                self._emit("download_cancelled")
+            elif errors and not saved_paths:
+                self._download_last_error = errors[0]
+                self._emit("download_error")
+            else:
+                if errors:
+                    self._download_last_error = (
+                        f"Saved {len(saved_paths)} track(s); "
+                        f"{len(errors)} failed. {errors[0]}"
+                    )
+                self._emit("download_finished")
+        finally:
+            rmtree_quiet(job_dir)
+            self._download_progress = None
+            with self._download_lock:
+                if self._download_thread is threading.current_thread():
+                    self._download_thread = None
+
+    def _save_one_track(
+        self,
+        track_id: str,
+        *,
+        dest_root: Path,
+        job_dir: Path,
+        index: int,
+        include_disc: bool,
+        track: Track | None,
+    ) -> Path:
+        if self._download_cancel.is_set():
+            raise SaveCancelled()
+        if track_id.startswith("local:"):
+            raise SaveToDiskError("Local tracks are already on disk.")
+        if not (
+            track_id.startswith("tidal:") or track_id.startswith("qobuz:")
+        ):
+            raise SaveToDiskError("Only TIDAL and Qobuz tracks can be saved.")
+        try:
+            source = resolve_track(
+                self._store,
+                track_id,
+                tidal=self._tidal,
+                qobuz=self._qobuz,
+                playback_preference=self._playback_preference_for_shell(),
+            )
+        except (TidalUnavailableError, QobuzUnavailableError) as exc:
+            raise SaveToDiskError(str(exc)) from exc
+        if source is None:
+            raise SaveToDiskError("Could not resolve stream URL.")
+        meta = track or source.metadata
+        for_mpd = is_mpd_uri(source.uri)
+        ext = infer_extension(source.uri, source.stream_metadata, for_mpd=for_mpd)
+        part_path = job_dir / f"{index:04d}{ext}"
+        if for_mpd:
+            remux_mpd(source.uri, part_path, cancel_event=self._download_cancel)
+        else:
+            if not source.uri.startswith(("http://", "https://")):
+                raise SaveToDiskError("Unsupported stream URL for download.")
+            download_https(source.uri, part_path, cancel_event=self._download_cancel)
+        cover = fetch_cover_bytes(meta.art_uri)
+        try:
+            write_tags(part_path, meta, cover_bytes=cover)
+        except Exception:
+            log.exception("Failed writing tags for %s", track_id)
+        dest_path = build_track_path(
+            dest_root,
+            meta,
+            ext,
+            include_disc=include_disc,
+        )
+        return promote_part_to_destination(part_path, dest_path)
+
+    def _enqueue_saved_paths_scan(self, paths: list[Path]) -> None:
+        by_folder: dict[str, list[str]] = {}
+        folders = list(self._config_manager.config.music_folders)
+        for path in paths:
+            folder = music_folder_for_path(path, folders)
+            if folder is None:
+                continue
+            by_folder.setdefault(folder, []).append(str(path.resolve()))
+        for folder, add_paths in by_folder.items():
+            self._run_on_main_thread(
+                lambda f=folder, p=list(add_paths): self.enqueue_incremental_scan(
+                    folder=f,
+                    add_paths=p,
+                )
+            )
     def subscribe(self, callback: EventCallback) -> Unsubscribe:
         self._listeners.append(callback)
 

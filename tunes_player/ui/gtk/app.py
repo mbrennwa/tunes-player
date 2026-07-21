@@ -43,7 +43,8 @@ from tunes_player.core.shell_state import (
 )
 from tunes_player.platform.linux.audio import create_volume_controller
 from tunes_player.ui.gtk.art import ArtLoader
-from tunes_player.ui.gtk.errors import attach_error_toasts, show_error_toast
+from tunes_player.ui.gtk.errors import attach_error_toasts, show_error_toast, show_toast
+from tunes_player.ui.gtk.save_to_disk_menu import attach_download_toasts
 from tunes_player.ui.gtk.now_playing import NowPlayingBar, attach_media_keys
 from tunes_player.ui.gtk.preferences import PreferencesWindow
 from tunes_player.ui.gtk.shell_controller import (
@@ -139,6 +140,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._build_shell()
         attach_media_keys(self, service)
         attach_error_toasts(self._toast_overlay, service)
+        attach_download_toasts(self._toast_overlay, service)
         service.subscribe(lambda event: GLib.idle_add(self._on_service_event, event))
         self.connect("close-request", self._on_close_request)
 
@@ -1431,31 +1433,12 @@ class TunesWindow(Adw.ApplicationWindow):
         return False
 
     def _on_library_updated(self) -> bool:
+        # Incremental scans (e.g. after Save to disk) can add new local releases.
+        # Always drop the selection cache; reload the grid when the user is at root.
+        self._invalidate_selection_cache()
         if not self._nav_at_root():
             return False
-
-        state = self._effective_shell_state()
-        if state.base == ShellBase.ALL_LOCAL:
-            releases = fetch_base_releases(
-                self._service,
-                state.base,
-                search_query=state.search_query,
-                search_scope=state.search_scope,
-            )
-            self._store_selection_cache(state, releases)
-            if self._cache_matches(state):
-                self._display_cached_selection(state)
-                self._schedule_persist()
-            return False
-
-        if self._cached_releases and any(
-            release.source == Source.LOCAL for release in self._cached_releases
-        ):
-            refreshed = self._refresh_cached_release_quality(list(self._cached_releases))
-            self._store_selection_cache(state, refreshed)
-            if self._cache_matches(state):
-                self._display_cached_selection(state)
-                self._schedule_persist()
+        self._reload_grid()
         return False
 
     def _open_queue_sheet(self, *_args: object) -> None:
@@ -1531,7 +1514,13 @@ def run() -> int:
             if mpris_service is not None:
                 mpris_service.stop()
                 mpris_service = None
+            was_downloading = service.is_saving_to_disk()
             service.shutdown()
+            if was_downloading or service.consume_download_cancelled_on_shutdown():
+                window = self.get_active_window()
+                overlay = getattr(window, "_toast_overlay", None) if window else None
+                if overlay is not None:
+                    show_toast(overlay, "Download cancelled")
             Adw.Application.do_shutdown(self)
 
     app = TunesApplication(application_id="tunes.player")

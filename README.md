@@ -43,6 +43,8 @@ To build or run from source, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 Tunes is **not affiliated with Qobuz, TIDAL, or any other streaming provider**.
 Streaming requires your own paid subscriptions where applicable. Features can break when providers change authentication or terms. Use at your own responsibility and in compliance with each service's terms of use.
 
+**Save to disk** uses the same streaming endpoints as playback (not an official download/purchase API). Saving streams may conflict with a provider's terms; you remain responsible for lawful use. Some TIDAL tracks are delivered as DASH/MPD and require **ffmpeg** on your `PATH` to remux into a single file.
+
 ## License
 
 GPL-3.0-or-later — see [LICENSE](LICENSE).

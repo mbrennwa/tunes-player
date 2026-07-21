@@ -579,6 +579,12 @@ Tunes is **not affiliated** with any streaming provider. Users need **own paid
 subscriptions** where required. Features can break when providers change auth or terms.
 README includes a user-facing [disclaimer](../README.md#streaming-disclaimer).
 
+**Save to disk** (right-click release/track → Save to disk…) resolves the same stream
+URLs used for playback, stages bytes under `{data_dir}/download-cache/`, tags the file,
+then atomically renames into the chosen folder. Paths under a configured music folder
+are indexed via **`enqueue_incremental_scan`** (not a full-library rescan). TIDAL
+DASH/MPD streams are remuxed with **ffmpeg** (`-c copy`). See issue #68.
+
 **TIDAL** and **Qobuz** backends are implemented in `core/backends/` with OAuth or
 account login, federated search, stream URL resolution at play time, and New Releases /
 Suggestions feeds.
