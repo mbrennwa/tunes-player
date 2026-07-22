@@ -3,7 +3,7 @@
 A daemon thread runs by default and compares recent engine samples (published
 from the GTK/owner poll path) against PipeWire/Pulse sink state and optional
 ALSA PCM health, logging sustained mismatches. Disable with
-``TUNES_PLAYBACK_HEALTH_LOG=0``.
+``TUNES_PLAYBACK_HEALTH_LOG=0``. Heartbeat every 10s at INFO.
 """
 
 from __future__ import annotations
@@ -100,6 +100,11 @@ def _coerce_bool(value: object) -> bool | None:
 def _coerce_text(value: object) -> str | None:
     if value is None:
         return None
+    if isinstance(value, dict):
+        name = value.get("name")
+        return str(name).strip() if name is not None else None
+    if isinstance(value, (list, tuple)) and value:
+        return _coerce_text(value[0])
     text = str(value).strip()
     return text or None
 
@@ -187,6 +192,8 @@ def _run_cmd(args: list[str], *, timeout: float = 2.0) -> str | None:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
