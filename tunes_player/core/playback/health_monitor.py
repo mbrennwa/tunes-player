@@ -1,8 +1,9 @@
 """Playback health diagnostics for silent-audio / stalled-progress issues (#67).
 
-When ``TUNES_PLAYBACK_HEALTH_LOG`` is enabled, a daemon thread compares recent
-engine samples (published from the GTK/owner poll path) against PipeWire/Pulse
-sink state and optional ALSA PCM health, and logs sustained mismatches.
+A daemon thread runs by default and compares recent engine samples (published
+from the GTK/owner poll path) against PipeWire/Pulse sink state and optional
+ALSA PCM health, logging sustained mismatches. Disable with
+``TUNES_PLAYBACK_HEALTH_LOG=0``.
 """
 
 from __future__ import annotations
