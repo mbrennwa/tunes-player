@@ -1,4 +1,4 @@
-"""Direct ALSA error recovery after playback_error (#46)."""
+"""Direct ALSA error recovery after playback_error (#46) and soft stall (#67)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from tunes_player.core.config import ConfigManager
+from tunes_player.core.playback.health_monitor import HealthIssue
 from tunes_player.core.playback.output_profile import PlaybackOutputProfile
 from tunes_player.core.services import PlayerService
 
@@ -99,6 +100,88 @@ class PlaybackAlsaRecoveryTests(unittest.TestCase):
 
         self.assertFalse(self._service._try_recover_direct_alsa_on_error())
         self.assertEqual(engine.recover_calls, [])
+
+
+class PlaybackSoftStallRecoveryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        config = ConfigManager(Path(self._tmpdir.name) / "config.toml")
+        config.load()
+        self._service = PlayerService(config=config)
+        self._profile = PlaybackOutputProfile(
+            direct_alsa=True,
+            use_exclusive=False,
+            allow_resample=False,
+            target_rate=44100,
+            target_bit_depth=16,
+            target_channels=2,
+            audio_format="s16",
+        )
+
+    def tearDown(self) -> None:
+        self._service._engine = None
+        self._service.shutdown()
+        self._tmpdir.cleanup()
+
+    def test_soft_stall_recovers_with_ao_then_full_reload(self) -> None:
+        engine = _RecoveryEngine()
+        self._service._playback_intended = True
+        self._service._output_profile = self._profile
+        self._service._engine = engine
+        events: list[str] = []
+        self._service.subscribe(events.append)
+
+        self._service._handle_soft_stall({"alsa_feed_stalled"})
+
+        self.assertEqual(
+            engine.recover_calls,
+            [
+                {"full_reload": False, "ao_reload_only": True},
+                {"full_reload": True, "ao_reload_only": False},
+            ],
+        )
+        self.assertEqual(self._service._direct_alsa_soft_stall_attempts, 1)
+        self.assertFalse(self._service.get_playback_state().position_stalled)
+        self.assertIn("playback_stalled", events)
+        self.assertIsNone(self._service.soft_stall_message())
+
+    def test_soft_stall_limited_to_three_attempts_per_track(self) -> None:
+        engine = _RecoveryEngine()
+        self._service._playback_intended = True
+        self._service._output_profile = self._profile
+        self._service._engine = engine
+        self._service._direct_alsa_soft_stall_attempts = 3
+        self._service._direct_alsa_recovery_at = time.monotonic() - 30.0
+
+        self._service._handle_soft_stall({"alsa_feed_stalled"})
+
+        self.assertEqual(engine.recover_calls, [])
+        self.assertTrue(self._service.get_playback_state().position_stalled)
+        self.assertEqual(self._service.soft_stall_message(), "Audio output stalled.")
+
+    def test_time_pos_only_stall_freezes_ui_without_ao_reload(self) -> None:
+        engine = _RecoveryEngine()
+        self._service._playback_intended = True
+        self._service._output_profile = self._profile
+        self._service._engine = engine
+
+        self._service._handle_soft_stall({"time_pos_stalled"})
+
+        self.assertEqual(engine.recover_calls, [])
+        self.assertTrue(self._service.get_playback_state().position_stalled)
+        self.assertEqual(
+            self._service.soft_stall_message(), "Playback position stalled."
+        )
+
+    def test_health_callback_routes_to_soft_stall_handler(self) -> None:
+        called: list[set[str]] = []
+        self._service._handle_soft_stall = (  # type: ignore[method-assign]
+            lambda codes: called.append(set(codes))
+        )
+        self._service._on_playback_health_issues(
+            [HealthIssue("alsa_feed_stalled", "pointers frozen")]
+        )
+        self.assertEqual(called, [{"alsa_feed_stalled"}])
 
 
 if __name__ == "__main__":

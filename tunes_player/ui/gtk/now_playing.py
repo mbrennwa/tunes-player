@@ -494,6 +494,7 @@ class NowPlayingBar(Gtk.Box):
         reported_sec: float,
         duration_sec: float,
         is_playing: bool,
+        position_stalled: bool = False,
     ) -> float:
         if track_id != self._progress_track_id:
             self._progress_track_id = track_id
@@ -506,7 +507,13 @@ class NowPlayingBar(Gtk.Box):
 
         reported_sec = max(0.0, min(reported_sec, duration_sec))
         now = time.monotonic()
-        if is_playing:
+        if position_stalled:
+            # Honest UI when audio/time-pos soft-stalls (#67): do not wall-clock
+            # extrapolate past the last reported engine position.
+            self._shown_sec = reported_sec
+            self._shown_anchor_sec = reported_sec
+            self._shown_anchor_at = None
+        elif is_playing:
             if (
                 self._shown_anchor_at is None
                 or reported_sec < self._shown_anchor_sec - 0.5
@@ -556,6 +563,7 @@ class NowPlayingBar(Gtk.Box):
             reported_sec=state.position_sec,
             duration_sec=duration,
             is_playing=state.is_playing,
+            position_stalled=state.position_stalled,
         )
         self._set_progress_fraction(position_sec / duration)
         self._update_seek_labels(position_sec, duration)

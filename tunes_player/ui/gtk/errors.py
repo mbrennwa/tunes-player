@@ -32,6 +32,8 @@ def attach_error_toasts(overlay: Adw.ToastOverlay, service: PlayerService) -> No
     def on_event(event: str) -> bool:
         if event == "playback_error":
             GLib.idle_add(_show_playback_error, overlay, service)
+        elif event == "playback_stalled":
+            GLib.idle_add(_show_playback_stalled, overlay, service)
         return False
 
     service.subscribe(lambda event: GLib.idle_add(on_event, event))
@@ -40,4 +42,10 @@ def attach_error_toasts(overlay: Adw.ToastOverlay, service: PlayerService) -> No
 def _show_playback_error(overlay: Adw.ToastOverlay, service: PlayerService) -> bool:
     message = service.last_error() or "Playback failed"
     show_error_toast(overlay, message)
+    return False
+
+
+def _show_playback_stalled(overlay: Adw.ToastOverlay, service: PlayerService) -> bool:
+    message = service.soft_stall_message() or "Audio output stalled."
+    show_toast(overlay, message)
     return False

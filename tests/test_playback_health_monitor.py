@@ -357,5 +357,50 @@ Sink Input #1
         self.assertTrue(health.has_playing_input)
 
 
+
+
+class SustainedIssuesHandlerTests(unittest.TestCase):
+    def test_handler_invoked_once_when_issue_becomes_sustained(self) -> None:
+        seen: list[list[str]] = []
+
+        def handler(issues: list[hm.HealthIssue]) -> None:
+            seen.append([i.code for i in issues])
+
+        clock = {"t": 0.0}
+        monitor = hm.PlaybackHealthMonitor(
+            interval_sec=0.2,
+            sustain_sec=0.5,
+            sink_probe=lambda **_kwargs: hm.SinkHealth(backend="none"),
+            clock=lambda: clock["t"],
+            on_sustained_issues=handler,
+        )
+        sample = hm.PlaybackHealthSample(
+            intended_playing=True,
+            engine_playing=True,
+            time_pos_sec=1.0,
+            sampled_at=0.0,
+            ao="alsa",
+            core_idle=True,
+        )
+        monitor.publish_sample(sample)
+        clock["t"] = 0.0
+        self.assertEqual(monitor.poll_once(), [])
+        self.assertEqual(seen, [])
+        clock["t"] = 1.0
+        sustained = monitor.poll_once()
+        self.assertTrue(any(i.code == "core_idle" for i in sustained))
+        self.assertEqual(seen, [["core_idle"]])
+        # Already logged — handler should not fire again for same code
+        clock["t"] = 2.0
+        monitor.poll_once()
+        self.assertEqual(seen, [["core_idle"]])
+        monitor.clear_issues()
+        clock["t"] = 3.0
+        monitor.poll_once()
+        clock["t"] = 4.0
+        monitor.poll_once()
+        self.assertEqual(len(seen), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -148,8 +148,11 @@ will work for Qt signals later).
   (`time-pos`, `core-idle`, `paused-for-cache`, `ao`, …) with PipeWire/Pulse sink
   state (`pactl`/`wpctl`) and ALSA PCM health (`AlsaXrunMonitor`: xruns plus
   `hw_ptr`/`appl_ptr` advancement when using direct ALSA). Logs an INFO heartbeat
-  every 10s and WARNING on sustained mismatches — useful when audio goes silent
-  while the progress bar still moves. Disable with `TUNES_PLAYBACK_HEALTH_LOG=0`.
+  every 10s and WARNING on sustained mismatches. Sustained soft stalls
+  (`alsa_feed_stalled` / `alsa_not_running`) trigger main-thread direct-ALSA
+  recovery (`ao-reload` then full reload; no PipeWire fallback); `time_pos_stalled`
+  freezes the progress bar (no wall-clock extrapolation) and shows a toast.
+  Disable with `TUNES_PLAYBACK_HEALTH_LOG=0`.
 - Optional startup probe (`engines.factory.probe_playback_engine`) warns when the
   `mpv` binary is missing before the user presses Play.
 

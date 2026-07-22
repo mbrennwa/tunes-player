@@ -352,6 +352,7 @@ class PlaybackHealthMonitor:
         heartbeat_sec: float = _DEFAULT_HEARTBEAT_SEC,
         sink_probe: Callable[..., SinkHealth] | None = None,
         alsa_monitor: AlsaXrunMonitor | None = None,
+        on_sustained_issues: Callable[[list[HealthIssue]], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._interval_sec = max(0.2, float(interval_sec))
@@ -359,6 +360,7 @@ class PlaybackHealthMonitor:
         self._heartbeat_sec = max(0.0, float(heartbeat_sec))
         self._sink_probe = sink_probe or probe_sink_health
         self._alsa_monitor = alsa_monitor
+        self._on_sustained_issues = on_sustained_issues
         self._clock = clock
         self._lock = threading.Lock()
         self._latest: PlaybackHealthSample | None = None
@@ -413,6 +415,16 @@ class PlaybackHealthMonitor:
     def publish_sample(self, sample: PlaybackHealthSample) -> None:
         with self._lock:
             self._latest = sample
+
+    def set_sustained_issues_handler(
+        self, handler: Callable[[list[HealthIssue]], None] | None
+    ) -> None:
+        self._on_sustained_issues = handler
+
+    def clear_issues(self) -> None:
+        with self._lock:
+            self._issue_since.clear()
+            self._logged_codes.clear()
 
     def _maybe_heartbeat(self, sample: PlaybackHealthSample | None) -> None:
         if self._heartbeat_sec <= 0:
@@ -500,6 +512,7 @@ class PlaybackHealthMonitor:
 
         now = self._clock()
         sustained: list[HealthIssue] = []
+        newly_logged: list[HealthIssue] = []
         active_codes = {issue.code for issue in issues}
         with self._lock:
             for code in list(self._issue_since):
@@ -528,6 +541,12 @@ class PlaybackHealthMonitor:
                             current.mute,
                             sink.state or sink.detail or sink.backend,
                         )
+                        newly_logged.append(issue)
+        if newly_logged and self._on_sustained_issues is not None:
+            try:
+                self._on_sustained_issues(list(newly_logged))
+            except Exception:
+                log.exception("Playback health sustained-issues handler failed")
         return sustained
 
     def _run(self) -> None:

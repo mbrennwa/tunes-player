@@ -166,6 +166,7 @@ class PlaybackState:
     output_using_fallback: bool
     position_sec: float
     duration_sec: float | None
+    position_stalled: bool = False
 
 
 class PlayerService:
@@ -266,9 +267,16 @@ class PlayerService:
         self._download_last_error: str | None = None
         self._download_cancelled_on_shutdown = False
         self._download_saved_count = 0
+        self._playback_position_stalled = False
+        self._soft_stall_message: str | None = None
+        self._direct_alsa_soft_stall_attempts = 0
         self._playback_health_monitor: PlaybackHealthMonitor | None = (
             create_playback_health_monitor()
         )
+        if self._playback_health_monitor is not None:
+            self._playback_health_monitor.set_sustained_issues_handler(
+                self._on_playback_health_issues
+            )
         data_dir = self._config_manager.data_dir
         cleanup_download_cache(data_dir)
         self._tidal = TidalClient(
@@ -1533,6 +1541,7 @@ class PlayerService:
             output_using_fallback=self._output_using_fallback(),
             position_sec=self._position_sec,
             duration_sec=self._duration_sec,
+            position_stalled=self._playback_position_stalled,
         )
 
     def volume_mode(self) -> VolumeMode:
@@ -2603,6 +2612,85 @@ class PlayerService:
         )
         return True
 
+    def soft_stall_message(self) -> str | None:
+        return self._soft_stall_message
+
+    def _on_playback_health_issues(self, issues: list) -> None:
+        codes = {getattr(issue, "code", "") for issue in issues}
+        soft = codes & {"alsa_feed_stalled", "alsa_not_running", "time_pos_stalled"}
+        if not soft:
+            return
+        self._run_on_main_thread(lambda: self._handle_soft_stall(soft))
+
+    def _handle_soft_stall(self, codes: set[str]) -> None:
+        """Honest UI + direct-ALSA recovery for soft stalls (#67). No PipeWire fallback."""
+        self._playback_position_stalled = True
+        self._emit("playback_changed")
+        profile = self._output_profile
+        if profile is None or not profile.direct_alsa:
+            self._soft_stall_message = "Audio output stalled."
+            self._emit("playback_stalled")
+            return
+        if "alsa_feed_stalled" not in codes and "alsa_not_running" not in codes:
+            # time_pos only — freeze UI but don't ao-reload unless ALSA feed is stuck
+            if "time_pos_stalled" in codes:
+                self._soft_stall_message = "Playback position stalled."
+                self._emit("playback_stalled")
+            return
+        now = time.monotonic()
+        if now - self._direct_alsa_recovery_at < 8.0:
+            return
+        if self._direct_alsa_soft_stall_attempts >= 3:
+            self._soft_stall_message = "Audio output stalled."
+            self._emit("playback_stalled")
+            return
+        self._soft_stall_message = "Audio output stalled; recovering…"
+        self._emit("playback_stalled")
+        recovered = self._try_recover_direct_alsa_soft_stall()
+        if recovered:
+            self._playback_position_stalled = False
+            self._soft_stall_message = None
+            monitor = self._playback_health_monitor
+            if monitor is not None:
+                monitor.clear_issues()
+            self._emit("playback_changed")
+            log.warning("Recovered direct ALSA playback after soft stall")
+        else:
+            self._soft_stall_message = "Audio output stalled."
+            self._emit("playback_stalled")
+
+    def _try_recover_direct_alsa_soft_stall(self) -> bool:
+        """ao-reload then full-reload for soft ALSA stalls (pointers frozen, no end-file)."""
+        if not self._playback_intended:
+            return False
+        profile = self._output_profile
+        engine = self._engine
+        if (
+            profile is None
+            or not profile.direct_alsa
+            or engine is None
+            or not hasattr(engine, "recover_direct_alsa_output")
+        ):
+            return False
+        now = time.monotonic()
+        pos_before = self._engine_time_pos_sec(engine)
+        recovered = engine.recover_direct_alsa_output(ao_reload_only=True)
+        if not recovered:
+            recovered = engine.recover_direct_alsa_output(full_reload=True)
+        if not recovered:
+            return False
+        self._direct_alsa_recovery_at = now
+        self._direct_alsa_soft_stall_attempts += 1
+        self._sync_from_engine()
+        self._emit("playback_changed")
+        log.warning(
+            "Recovered direct ALSA after soft stall at %.2fs (attempt %d)",
+            pos_before,
+            self._direct_alsa_soft_stall_attempts,
+        )
+        return True
+
+
     def _tidal_quality_hint_for_track(self, track_id: str) -> str:
         if (
             self._tidal_playback_format_track_id == track_id
@@ -3204,6 +3292,9 @@ class PlayerService:
         self._playback_load_active = False
         self._playback_intended = resume
         self._direct_alsa_recovery_attempts = 0
+        self._direct_alsa_soft_stall_attempts = 0
+        self._playback_position_stalled = False
+        self._soft_stall_message = None
         self._is_playing = resume
         self._auto_advanced_from_index = None
         self._reset_playback_position(0.0)
@@ -3459,6 +3550,9 @@ class PlayerService:
         self._playback_load_active = False
         self._playback_intended = prepared.resume
         self._direct_alsa_recovery_attempts = 0
+        self._direct_alsa_soft_stall_attempts = 0
+        self._playback_position_stalled = False
+        self._soft_stall_message = None
         self._is_playing = prepared.resume
         source = prepared.source
         if source is not None:
@@ -3519,6 +3613,9 @@ class PlayerService:
             self.refresh_playback_position_for_ui()
         self._playback_load_active = False
         self._direct_alsa_recovery_attempts = 0
+        self._direct_alsa_soft_stall_attempts = 0
+        self._playback_position_stalled = False
+        self._soft_stall_message = None
         self._auto_advanced_from_index = None
         self._sync_duration_from_engine()
         self._emit("playback_changed", "queue_changed")
@@ -3665,11 +3762,22 @@ class PlayerService:
         engine = self._engine
         if engine is None:
             return
+        previous = self._position_sec
         query_fn = getattr(engine, "query_time_pos", None)
         if callable(query_fn):
             self._position_sec = max(0.0, query_fn())
         else:
             self._position_sec = max(0.0, engine.get_position())
+        if (
+            self._playback_position_stalled
+            and self._position_sec > previous + 0.2
+        ):
+            self._playback_position_stalled = False
+            self._soft_stall_message = None
+            monitor = self._playback_health_monitor
+            if monitor is not None:
+                monitor.clear_issues()
+            self._emit("playback_changed")
 
     def _sync_playback_position_from_engine(self) -> None:
         self.refresh_playback_position_for_ui()
