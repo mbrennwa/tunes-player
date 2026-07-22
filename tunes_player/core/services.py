@@ -61,6 +61,11 @@ from tunes_player.core.save_to_disk import (
 )
 from tunes_player.core.shell_state import refresh_local_release_art_uris
 from tunes_player.core.playback.engine import EngineEvent, PlaybackEngine
+from tunes_player.core.playback.health_monitor import (
+    PlaybackHealthMonitor,
+    create_playback_health_monitor,
+    sample_from_mpv_properties,
+)
 from tunes_player.core.playback.output_profile import (
     PlaybackOutputProfile,
     PlaybackPathInfo,
@@ -261,6 +266,9 @@ class PlayerService:
         self._download_last_error: str | None = None
         self._download_cancelled_on_shutdown = False
         self._download_saved_count = 0
+        self._playback_health_monitor: PlaybackHealthMonitor | None = (
+            create_playback_health_monitor()
+        )
         data_dir = self._config_manager.data_dir
         cleanup_download_cache(data_dir)
         self._tidal = TidalClient(
@@ -2088,6 +2096,54 @@ class PlayerService:
             self._sync_duration_from_engine()
             self.refresh_playback_position_for_ui()
             self._maybe_auto_advance_queue()
+        self._publish_playback_health_sample()
+
+    def _publish_playback_health_sample(self) -> None:
+        monitor = self._playback_health_monitor
+        if monitor is None:
+            return
+        engine = self._engine
+        if engine is None or not self._playback_intended:
+            monitor.publish_sample(
+                sample_from_mpv_properties(
+                    lambda _name: None,
+                    intended_playing=False,
+                    engine_playing=False,
+                    time_pos_sec=self._position_sec,
+                    endpoint_id=self._active_endpoint_id(),
+                    mpv_audio_device=self._mpv_audio_device(),
+                )
+            )
+            return
+
+        props: dict[str, object] = {}
+        snapshot = getattr(engine, "snapshot_health_properties", None)
+        if callable(snapshot):
+            try:
+                props = dict(snapshot())
+            except Exception:
+                log.debug("Playback health property snapshot failed", exc_info=True)
+
+        def _get(name: str) -> object:
+            return props.get(name)
+
+        try:
+            engine_playing = bool(engine.is_playing())
+            time_pos = float(engine.query_time_pos())
+        except Exception:
+            log.debug("Playback health engine sample failed", exc_info=True)
+            engine_playing = self._is_playing
+            time_pos = self._position_sec
+        monitor.publish_sample(
+            sample_from_mpv_properties(
+                _get,
+                intended_playing=True,
+                engine_playing=engine_playing,
+                time_pos_sec=time_pos,
+                endpoint_id=self._active_endpoint_id(),
+                mpv_audio_device=self._mpv_audio_device(),
+            )
+        )
 
     def shutdown(self) -> None:
         was_downloading = self.is_saving_to_disk()
@@ -2097,6 +2153,10 @@ class PlayerService:
             thread.join(timeout=5.0)
         if was_downloading:
             self._download_cancelled_on_shutdown = True
+        monitor = self._playback_health_monitor
+        self._playback_health_monitor = None
+        if monitor is not None:
+            monitor.stop()
         self._tidal.save_session()
         self._pending_scan_jobs.clear()
         self._incremental_coalesce.clear()

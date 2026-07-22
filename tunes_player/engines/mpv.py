@@ -391,6 +391,20 @@ class MpvEngine:
             return self._playing
         return not bool(paused)
 
+    def snapshot_health_properties(self) -> dict[str, object]:
+        """Read AO-related props for playback health diagnostics (#67).
+
+        Call from the engine owner / GTK poll thread, not from arbitrary workers.
+        """
+        names = (
+            "ao",
+            "audio-device",
+            "core-idle",
+            "paused-for-cache",
+            "mute",
+        )
+        return {name: self._get_property(name) for name in names}
+
     @property
     def load_in_progress(self) -> bool:
         return self._load_in_progress

@@ -38,6 +38,17 @@ Add music folders in **Settings → Sources**, and sign in to TIDAL or Qobuz to 
 
 To build or run from source, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## Diagnostics
+
+Logs go to `~/.local/share/tunes-player/tunes-player.log`. Useful env flags:
+
+| Variable | Effect |
+|----------|--------|
+| `TUNES_LOG_LEVEL=DEBUG` | More verbose file logging |
+| `TUNES_LOG_STDERR=1` | Mirror full log level to stderr |
+| `TUNES_PLAYBACK_HEALTH_LOG=1` | Background monitor for silent/stalled playback (#67) |
+| `TUNES_POSITION_POLL_LOG=1` | Spam mpv position polls to stderr |
+
 ## Streaming disclaimer
 
 Tunes is **not affiliated with Qobuz, TIDAL, or any other streaming provider**.

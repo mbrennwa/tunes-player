@@ -141,6 +141,14 @@ will work for Qt signals later).
   configured at app startup. Log file: `{user_data_dir}/tunes-player.log` (typically
   `~/.local/share/tunes-player/tunes-player.log`). Override verbosity with
   `TUNES_LOG_LEVEL=DEBUG`.
+- Optional stderr mirroring: `TUNES_LOG_STDERR=1` (otherwise stderr is WARNING+).
+- Optional position poll spam: `TUNES_POSITION_POLL_LOG=1`.
+- Optional playback health monitor (#67): `TUNES_PLAYBACK_HEALTH_LOG=1` starts a
+  daemon thread (`tunes-playback-health`) that compares GTK-published mpv samples
+  (`time-pos`, `core-idle`, `paused-for-cache`, `ao`, …) with PipeWire/Pulse sink
+  state (`pactl`/`wpctl`) and ALSA PCM xruns (`AlsaXrunMonitor`). Sustained
+  mismatches log at WARNING to the app log — useful when audio goes silent while
+  the progress bar still moves. Log-only; no UI toast yet.
 - Optional startup probe (`engines.factory.probe_playback_engine`) warns when the
   `mpv` binary is missing before the user presses Play.
 
