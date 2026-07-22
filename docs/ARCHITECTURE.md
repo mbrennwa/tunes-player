@@ -143,12 +143,13 @@ will work for Qt signals later).
   `TUNES_LOG_LEVEL=DEBUG`.
 - Optional stderr mirroring: `TUNES_LOG_STDERR=1` (otherwise stderr is WARNING+).
 - Optional position poll spam: `TUNES_POSITION_POLL_LOG=1`.
-- Optional playback health monitor (#67): `TUNES_PLAYBACK_HEALTH_LOG=1` starts a
-  daemon thread (`tunes-playback-health`) that compares GTK-published mpv samples
+- Playback health monitor (#67): enabled by default. A daemon thread
+  (`tunes-playback-health`) compares GTK-published mpv samples
   (`time-pos`, `core-idle`, `paused-for-cache`, `ao`, …) with PipeWire/Pulse sink
-  state (`pactl`/`wpctl`) and ALSA PCM xruns (`AlsaXrunMonitor`). Sustained
-  mismatches log at WARNING to the app log — useful when audio goes silent while
-  the progress bar still moves. Log-only; no UI toast yet.
+  state (`pactl`/`wpctl`) and ALSA PCM health (`AlsaXrunMonitor`: xruns plus
+  `hw_ptr`/`appl_ptr` advancement when using direct ALSA). Logs an INFO heartbeat
+  every 10s and WARNING on sustained mismatches — useful when audio goes silent
+  while the progress bar still moves. Disable with `TUNES_PLAYBACK_HEALTH_LOG=0`.
 - Optional startup probe (`engines.factory.probe_playback_engine`) warns when the
   `mpv` binary is missing before the user presses Play.
 

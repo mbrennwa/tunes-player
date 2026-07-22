@@ -46,7 +46,7 @@ Logs go to `~/.local/share/tunes-player/tunes-player.log`. Useful env flags:
 |----------|--------|
 | `TUNES_LOG_LEVEL=DEBUG` | More verbose file logging |
 | `TUNES_LOG_STDERR=1` | Mirror full log level to stderr |
-| `TUNES_PLAYBACK_HEALTH_LOG=1` | Background monitor for silent/stalled playback (#67) |
+| `TUNES_PLAYBACK_HEALTH_LOG=0` | Disable playback health monitor (on by default; #67) |
 | `TUNES_POSITION_POLL_LOG=1` | Spam mpv position polls to stderr |
 
 ## Streaming disclaimer

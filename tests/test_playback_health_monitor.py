@@ -11,12 +11,20 @@ from tunes_player.core.playback import health_monitor as hm
 
 
 class PlaybackHealthFlagTests(unittest.TestCase):
-    def test_flag_defaults_off(self) -> None:
+    def test_flag_defaults_on(self) -> None:
         with unittest.mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TUNES_PLAYBACK_HEALTH_LOG", None)
-            self.assertFalse(hm.playback_health_log_enabled())
+            self.assertTrue(hm.playback_health_log_enabled())
 
-    def test_flag_accepts_truthy(self) -> None:
+    def test_flag_accepts_disable(self) -> None:
+        for value in ("0", "no", "FALSE", "off"):
+            with self.subTest(value=value):
+                with unittest.mock.patch.dict(
+                    os.environ, {"TUNES_PLAYBACK_HEALTH_LOG": value}
+                ):
+                    self.assertFalse(hm.playback_health_log_enabled())
+
+    def test_flag_accepts_explicit_enable(self) -> None:
         for value in ("1", "yes", "TRUE"):
             with self.subTest(value=value):
                 with unittest.mock.patch.dict(
@@ -201,15 +209,49 @@ class PlaybackHealthMonitorTests(unittest.TestCase):
             self.assertIsNone(hm.create_playback_health_monitor())
 
         with unittest.mock.patch.dict(
-            os.environ, {"TUNES_PLAYBACK_HEALTH_LOG": "1"}
+            os.environ, {}, clear=False
         ), unittest.mock.patch.object(
             hm.PlaybackHealthMonitor, "start"
         ) as start:
+            os.environ.pop("TUNES_PLAYBACK_HEALTH_LOG", None)
             monitor = hm.create_playback_health_monitor()
             self.assertIsNotNone(monitor)
             start.assert_called_once()
             assert monitor is not None
             monitor.stop()
+
+    def test_heartbeat_logs_every_interval(self) -> None:
+        clock = {"t": 0.0}
+        monitor = hm.PlaybackHealthMonitor(
+            interval_sec=0.2,
+            sustain_sec=1.0,
+            heartbeat_sec=10.0,
+            sink_probe=lambda **_kwargs: hm.SinkHealth(backend="none"),
+            clock=lambda: clock["t"],
+        )
+        monitor.publish_sample(
+            hm.PlaybackHealthSample(
+                intended_playing=True,
+                engine_playing=True,
+                time_pos_sec=12.0,
+                sampled_at=0.0,
+                ao="alsa",
+                mpv_audio_device="alsa/hw:1,0",
+            )
+        )
+        with self.assertLogs(
+            "tunes_player.core.playback.health_monitor", level="INFO"
+        ) as logs:
+            clock["t"] = 0.0
+            monitor.poll_once()
+            clock["t"] = 5.0
+            monitor.poll_once()
+            clock["t"] = 10.0
+            monitor.poll_once()
+        heartbeats = [
+            r for r in logs.records if "playback health monitor alive" in r.getMessage()
+        ]
+        self.assertEqual(len(heartbeats), 2)
 
     def test_sample_from_mpv_properties(self) -> None:
         props = {
@@ -233,6 +275,51 @@ class PlaybackHealthMonitorTests(unittest.TestCase):
         self.assertFalse(sample.paused_for_cache)
         self.assertTrue(sample.mute)
         self.assertEqual(sample.endpoint_id, "pw:x")
+
+    def test_alsa_feed_stall_surfaced_as_health_issue(self) -> None:
+        class _FakeAlsa:
+            def poll(self, **_kwargs: object) -> list[object]:
+                from tunes_player.platform.linux.alsa_xrun_monitor import AlsaFeedIssue
+
+                return [
+                    AlsaFeedIssue(
+                        code="alsa_feed_stalled",
+                        message="ALSA PCM pointers not advancing path=/proc/asound/card1/...",
+                    )
+                ]
+
+            def reset(self) -> None:
+                return None
+
+        clock = {"t": 0.0}
+        monitor = hm.PlaybackHealthMonitor(
+            interval_sec=0.2,
+            sustain_sec=0.5,
+            sink_probe=lambda **_kwargs: hm.SinkHealth(backend="none"),
+            alsa_monitor=_FakeAlsa(),  # type: ignore[arg-type]
+            clock=lambda: clock["t"],
+        )
+        monitor.publish_sample(
+            hm.PlaybackHealthSample(
+                intended_playing=True,
+                engine_playing=True,
+                time_pos_sec=1.0,
+                sampled_at=0.0,
+                ao="alsa",
+                mpv_audio_device="alsa/hw:1,0",
+            )
+        )
+        clock["t"] = 0.0
+        self.assertEqual(monitor.poll_once(), [])
+        with self.assertLogs(
+            "tunes_player.core.playback.health_monitor", level="WARNING"
+        ) as logs:
+            clock["t"] = 1.0
+            sustained = monitor.poll_once()
+        self.assertTrue(any(i.code == "alsa_feed_stalled" for i in sustained))
+        self.assertTrue(
+            any("pointers not advancing" in r.getMessage() for r in logs.records)
+        )
 
 
 class ProbeSinkHealthTests(unittest.TestCase):

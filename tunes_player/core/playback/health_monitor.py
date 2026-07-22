@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 _ENV_FLAG = "TUNES_PLAYBACK_HEALTH_LOG"
 _DEFAULT_INTERVAL_SEC = 1.0
 _DEFAULT_SUSTAIN_SEC = 1.5
+_DEFAULT_HEARTBEAT_SEC = 10.0
 _MIN_TIME_POS_ADVANCE_RATIO = 0.25
 
 _PACTL_STATE = re.compile(r"^\s*State:\s*(\S+)", re.MULTILINE)
@@ -40,7 +41,11 @@ _WPCTL_MUTED = re.compile(r"\[MUTED\]", re.IGNORECASE)
 
 
 def playback_health_log_enabled() -> bool:
-    return os.environ.get(_ENV_FLAG, "").lower() in ("1", "yes", "true")
+    """Health monitor runs by default; set TUNES_PLAYBACK_HEALTH_LOG=0 to disable."""
+    raw = os.environ.get(_ENV_FLAG)
+    if raw is None or raw.strip() == "":
+        return True
+    return raw.lower() not in ("0", "no", "false", "off")
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,12 +341,14 @@ class PlaybackHealthMonitor:
         *,
         interval_sec: float = _DEFAULT_INTERVAL_SEC,
         sustain_sec: float = _DEFAULT_SUSTAIN_SEC,
+        heartbeat_sec: float = _DEFAULT_HEARTBEAT_SEC,
         sink_probe: Callable[..., SinkHealth] | None = None,
         alsa_monitor: AlsaXrunMonitor | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._interval_sec = max(0.2, float(interval_sec))
         self._sustain_sec = max(0.0, float(sustain_sec))
+        self._heartbeat_sec = max(0.0, float(heartbeat_sec))
         self._sink_probe = sink_probe or probe_sink_health
         self._alsa_monitor = alsa_monitor
         self._clock = clock
@@ -350,6 +357,8 @@ class PlaybackHealthMonitor:
         self._previous: PlaybackHealthSample | None = None
         self._issue_since: dict[str, float] = {}
         self._logged_codes: set[str] = set()
+        self._last_heartbeat_at: float | None = None
+        self._ticks = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -370,9 +379,10 @@ class PlaybackHealthMonitor:
         self._thread.start()
         log.info(
             "Playback health monitor started "
-            "(interval=%.1fs sustain=%.1fs; disable with %s=0)",
+            "(interval=%.1fs sustain=%.1fs heartbeat=%.0fs; disable with %s=0)",
             self._interval_sec,
             self._sustain_sec,
+            self._heartbeat_sec,
             _ENV_FLAG,
         )
 
@@ -387,12 +397,45 @@ class PlaybackHealthMonitor:
             self._previous = None
             self._issue_since.clear()
             self._logged_codes.clear()
+            self._last_heartbeat_at = None
+            self._ticks = 0
         if self._alsa_monitor is not None:
             self._alsa_monitor.reset()
 
     def publish_sample(self, sample: PlaybackHealthSample) -> None:
         with self._lock:
             self._latest = sample
+
+    def _maybe_heartbeat(self, sample: PlaybackHealthSample | None) -> None:
+        if self._heartbeat_sec <= 0:
+            return
+        now = self._clock()
+        last = self._last_heartbeat_at
+        if last is not None and now - last < self._heartbeat_sec:
+            return
+        self._last_heartbeat_at = now
+        if sample is None:
+            log.info(
+                "playback health monitor alive (ticks=%d, no sample yet)",
+                self._ticks,
+            )
+            return
+        age = max(0.0, now - sample.sampled_at)
+        active = sorted(self._issue_since)
+        log.info(
+            "playback health monitor alive "
+            "(ticks=%d intended_playing=%s engine_playing=%s "
+            "time-pos=%.3f sample_age=%.1fs ao=%s audio-device=%s "
+            "active_issues=%s)",
+            self._ticks,
+            sample.intended_playing,
+            sample.engine_playing,
+            sample.time_pos_sec,
+            age,
+            sample.ao,
+            sample.audio_device or sample.mpv_audio_device,
+            ",".join(active) if active else "-",
+        )
 
     def poll_once(self) -> list[HealthIssue]:
         """Run one evaluation cycle (used by the thread and by tests)."""
@@ -401,6 +444,9 @@ class PlaybackHealthMonitor:
             previous = self._previous
             if current is not None:
                 self._previous = current
+            self._ticks += 1
+
+        self._maybe_heartbeat(current)
 
         if current is None:
             return []
@@ -424,12 +470,25 @@ class PlaybackHealthMonitor:
 
         if self._alsa_monitor is not None:
             try:
-                self._alsa_monitor.poll(
+                ao = (current.ao or "").lower()
+                device = (
+                    current.mpv_audio_device or current.audio_device or ""
+                ).lower()
+                endpoint = (current.endpoint_id or "").lower()
+                expect_feeding = current.engine_playing and (
+                    ao == "alsa"
+                    or device.startswith("alsa/")
+                    or endpoint.startswith("alsa:")
+                )
+                feed_issues = self._alsa_monitor.poll(
                     mpv_audio_device=current.mpv_audio_device or current.audio_device,
                     endpoint_id=current.endpoint_id,
+                    expect_feeding=expect_feeding,
                 )
+                for feed in feed_issues:
+                    issues.append(HealthIssue(code=feed.code, message=feed.message))
             except Exception as exc:  # noqa: BLE001
-                log.debug("ALSA xrun poll failed: %s", exc)
+                log.debug("ALSA feed/xrun poll failed: %s", exc)
 
         now = self._clock()
         sustained: list[HealthIssue] = []
@@ -472,8 +531,13 @@ class PlaybackHealthMonitor:
 
 
 def create_playback_health_monitor() -> PlaybackHealthMonitor | None:
-    """Return a started monitor when the env flag is set, else None."""
+    """Return a started monitor unless explicitly disabled via env."""
     if not playback_health_log_enabled():
+        log.info(
+            "Playback health monitor disabled (%s=%s)",
+            _ENV_FLAG,
+            os.environ.get(_ENV_FLAG),
+        )
         return None
     alsa_monitor = None
     try:
