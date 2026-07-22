@@ -63,6 +63,21 @@ class MpvEngineTimelineTests(unittest.TestCase):
         engine._notify_track_started()
         self.assertAlmostEqual(engine._cached_time_pos(), 0.0)
 
+    def test_snapshot_health_properties(self) -> None:
+        engine = self._engine()
+        values = {
+            "ao": "pulse",
+            "audio-device": "pulse/demo",
+            "core-idle": False,
+            "paused-for-cache": True,
+            "mute": False,
+        }
+        engine._get_property = MagicMock(side_effect=values.__getitem__)  # type: ignore[method-assign]
+        snap = engine.snapshot_health_properties()
+        self.assertEqual(snap["ao"], "pulse")
+        self.assertEqual(snap["paused-for-cache"], True)
+        engine._get_property.assert_any_call("core-idle")
+
 
 if __name__ == "__main__":
     unittest.main()
