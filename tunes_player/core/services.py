@@ -2622,8 +2622,46 @@ class PlayerService:
             return
         self._run_on_main_thread(lambda: self._handle_soft_stall(soft))
 
+    def _soft_stall_near_track_end(self, *, margin_sec: float = 5.0) -> bool:
+        """True when stalled playback is within ``margin_sec`` of known duration (#66)."""
+        duration = self._effective_playback_duration_sec()
+        if duration is None or duration <= 0:
+            return False
+        engine = self._engine
+        time_pos = (
+            self._engine_time_pos_sec(engine)
+            if engine is not None
+            else self._position_sec
+        )
+        return time_pos >= duration - margin_sec
+
+    def _advance_after_near_end_soft_stall(self, codes: set[str]) -> None:
+        """Treat near-EOF soft stall as finished and advance — do not ao-reload (#66)."""
+        log.warning(
+            "Soft stall near track end (%s at %.2fs) — advancing queue instead of AO recovery",
+            ",".join(sorted(codes)) if codes else "-",
+            self._engine_time_pos_sec(self._engine)
+            if self._engine is not None
+            else self._position_sec,
+        )
+        self._playback_position_stalled = False
+        self._soft_stall_message = None
+        monitor = self._playback_health_monitor
+        if monitor is not None:
+            monitor.clear_issues()
+        self._is_playing = False
+        self._advance_queue_after_eof()
+        self._emit("playback_changed")
+
     def _handle_soft_stall(self, codes: set[str]) -> None:
-        """Honest UI + direct-ALSA recovery for soft stalls (#67). No PipeWire fallback."""
+        """Honest UI + mid-track direct-ALSA recovery for soft stalls (#67).
+
+        Near track end (#66): do not ao-reload — synthesize EOF and advance the queue.
+        """
+        if self._soft_stall_near_track_end():
+            self._advance_after_near_end_soft_stall(codes)
+            return
+
         self._playback_position_stalled = True
         self._emit("playback_changed")
         profile = self._output_profile
@@ -3313,6 +3351,7 @@ class PlayerService:
         return duration
 
     def _maybe_auto_advance_queue(self) -> None:
+        """Poll-based advance when time-pos reaches near track end (end-file fallback)."""
         if (
             not self._playback_intended
             or self._playback_load_active
@@ -3327,7 +3366,21 @@ class PlayerService:
         end_threshold = duration - _QUEUE_END_MARGIN_SEC
         if time_pos < end_threshold:
             return
+        self._advance_queue_from_current()
 
+    def _advance_queue_after_eof(self) -> None:
+        """Advance on mpv end-file EOF without requiring time-pos near duration (#66)."""
+        if (
+            not self._playback_intended
+            or self._playback_load_active
+            or not self._playlist_meta
+        ):
+            return
+        self._advance_queue_from_current()
+
+    def _advance_queue_from_current(self) -> None:
+        if not self._playlist_meta:
+            return
         index = self._playlist_position()
         if self._auto_advanced_from_index == index:
             return
@@ -3819,7 +3872,7 @@ class PlayerService:
             self._is_playing = False
             self._sync_duration_from_engine()
             self.refresh_playback_position_for_ui()
-            self._maybe_auto_advance_queue()
+            self._advance_queue_after_eof()
             return
         if event == "track_finished":
             track = self._current_track

@@ -183,6 +183,84 @@ class PlaybackSoftStallRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(called, [{"alsa_feed_stalled"}])
 
+    def test_soft_stall_near_track_end_advances_instead_of_recover(self) -> None:
+        from tunes_player.core.models import Source, Track
+
+        track_a = Track(
+            id="local:/music/a.flac",
+            title="A",
+            artist_name="Artist",
+            release_title="Album",
+            source=Source.LOCAL,
+            duration_sec=300.0,
+        )
+        track_b = Track(
+            id="local:/music/b.flac",
+            title="B",
+            artist_name="Artist",
+            release_title="Album",
+            source=Source.LOCAL,
+            duration_sec=200.0,
+        )
+        engine = _RecoveryEngine()
+        engine._position_sec = 297.3
+        engine.get_duration = lambda: 300.0  # type: ignore[method-assign]
+        self._service._playback_intended = True
+        self._service._output_profile = self._profile
+        self._service._engine = engine
+        self._service._duration_sec = 300.0
+        self._service._playlist_meta = [track_a, track_b]
+        self._service._queue_index = 0
+        self._service._current_track = track_a
+        advanced: list[int] = []
+        self._service._play_queue_index = (  # type: ignore[method-assign]
+            lambda index, **kwargs: advanced.append(index)
+        )
+
+        self._service._handle_soft_stall({"alsa_feed_stalled", "time_pos_stalled"})
+
+        self.assertEqual(engine.recover_calls, [])
+        self.assertEqual(advanced, [1])
+        self.assertFalse(self._service.get_playback_state().position_stalled)
+        self.assertIsNone(self._service.soft_stall_message())
+
+    def test_time_pos_stall_near_end_also_advances(self) -> None:
+        from tunes_player.core.models import Source, Track
+
+        track_a = Track(
+            id="local:/music/a.flac",
+            title="A",
+            artist_name="Artist",
+            release_title="Album",
+            source=Source.LOCAL,
+            duration_sec=300.0,
+        )
+        track_b = Track(
+            id="local:/music/b.flac",
+            title="B",
+            artist_name="Artist",
+            release_title="Album",
+            source=Source.LOCAL,
+            duration_sec=200.0,
+        )
+        engine = _RecoveryEngine()
+        engine._position_sec = 296.0
+        self._service._playback_intended = True
+        self._service._output_profile = self._profile
+        self._service._engine = engine
+        self._service._duration_sec = 300.0
+        self._service._playlist_meta = [track_a, track_b]
+        self._service._queue_index = 0
+        advanced: list[int] = []
+        self._service._play_queue_index = (  # type: ignore[method-assign]
+            lambda index, **kwargs: advanced.append(index)
+        )
+
+        self._service._handle_soft_stall({"time_pos_stalled"})
+
+        self.assertEqual(engine.recover_calls, [])
+        self.assertEqual(advanced, [1])
+
 
 if __name__ == "__main__":
     unittest.main()

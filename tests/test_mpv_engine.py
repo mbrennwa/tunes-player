@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import threading
 import unittest
 from unittest.mock import MagicMock
 
+from tunes_player.core.playback.output_profile import PlaybackOutputProfile
 from tunes_player.engines.mpv import MpvEngine
 
 
@@ -16,7 +18,7 @@ class MpvEngineTimelineTests(unittest.TestCase):
         engine._last_position_update_at = 0.0
         engine._on_event = None
         engine._time_pos_sec = 0.0
-        engine._time_pos_lock = __import__("threading").Lock()
+        engine._time_pos_lock = threading.Lock()
         engine._last_position_poll_log_sec = None
         engine._shutting_down = False
         engine._terminated = False
@@ -77,6 +79,57 @@ class MpvEngineTimelineTests(unittest.TestCase):
         self.assertEqual(snap["ao"], "pulse")
         self.assertEqual(snap["paused-for-cache"], True)
         engine._get_property.assert_any_call("core-idle")
+
+
+class MpvEngineTrackReplaceTests(unittest.TestCase):
+    def _direct_alsa_engine(self) -> MpvEngine:
+        engine = object.__new__(MpvEngine)
+        engine._loaded_uri = "/music/a.flac"
+        engine._load_in_progress = False
+        engine._last_position_update_at = 0.0
+        engine._on_event = None
+        engine._time_pos_sec = 0.0
+        engine._time_pos_lock = threading.Lock()
+        engine._last_position_poll_log_sec = None
+        engine._shutting_down = False
+        engine._terminated = False
+        engine._playing = True
+        engine._duration_sec = 180.0
+        engine._output_profile = None
+        engine._audio_device = "alsa/hw:1,0"
+        engine._endpoint_id = "alsa:hw:1:0"
+        engine._unity_gain = True
+        engine._software_volume = False
+        engine._volume = 1.0
+        engine._direct_alsa_device_open = True
+        engine._opened_exclusive = False
+        engine._keep_alsa_open_on_track_change = True
+        engine._last_output_format_key = (44100, "s16", 2, False)
+        engine._last_track_started_uri = "/music/a.flac"
+        engine._path_context = None
+        engine._path_info = None
+        engine._player = MagicMock()
+        engine._emit = MagicMock()  # type: ignore[method-assign]
+        engine._set_property = MagicMock()  # type: ignore[method-assign]
+        engine.refresh_playback_path_info = MagicMock()  # type: ignore[method-assign]
+        return engine
+
+    def test_track_replace_always_reloads_ao_when_usb_keep_open(self) -> None:
+        engine = self._direct_alsa_engine()
+        profile = PlaybackOutputProfile(
+            direct_alsa=True,
+            use_exclusive=False,
+            allow_resample=False,
+            target_rate=44100,
+            target_bit_depth=16,
+            target_channels=2,
+            audio_format="s16",
+        )
+        engine.load("/music/b.flac", output_profile=profile)
+        engine._player.command.assert_any_call("stop")
+        engine._player.command.assert_any_call("ao-reload")
+        engine._player.play.assert_called_with("/music/b.flac")
+        self.assertEqual(engine._loaded_uri, "/music/b.flac")
 
 
 if __name__ == "__main__":

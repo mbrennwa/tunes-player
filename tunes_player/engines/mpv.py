@@ -233,7 +233,9 @@ class MpvEngine:
                 and self._last_output_format_key is not None
                 and format_key != self._last_output_format_key
             )
-            if format_changed:
+            # Always reopen AO on track replace (#66). USB keep-open only
+            # skips redundant format/buffer property churn, not ao-reload.
+            if track_change and self._direct_alsa_device_open:
                 self._reload_direct_alsa_output(stop_first=True)
 
         self._load_in_progress = True
@@ -425,7 +427,8 @@ class MpvEngine:
         if self._recovering_direct_alsa:
             return False
         resume_sec = self._resume_position_sec()
-        if self._near_track_end(resume_sec) and not full_reload and not ao_reload_only:
+        # Near EOF: refuse AO recovery — PlayerService advances the queue (#66).
+        if self._near_track_end(resume_sec):
             return False
         self._recovering_direct_alsa = True
         try:
