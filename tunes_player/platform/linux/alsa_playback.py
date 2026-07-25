@@ -68,7 +68,11 @@ def effective_mpv_alsa_device(raw_device: str | None) -> str | None:
 
 
 def usb_alsa_keep_device_open(endpoint_id: str | None, mpv_device: str | None) -> bool:
-    """USB DACs stay open across track changes — ao-reload causes dropouts under load."""
+    """USB DACs skip redundant format/buffer property churn across track changes.
+
+    AO is still reopened via ``ao-reload`` on every track replace (#66); this flag
+    only avoids re-applying identical format/buffer mpv properties under load.
+    """
     return is_usb_alsa_playback(endpoint_id, mpv_device)
 
 

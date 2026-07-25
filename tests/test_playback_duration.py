@@ -168,6 +168,49 @@ class PlaybackDurationTests(unittest.TestCase):
         self._service._maybe_auto_advance_queue()
         self.assertEqual(advanced, [])
 
+    def test_track_eof_advances_even_when_time_pos_below_margin(self) -> None:
+        """EOF from mpv is enough; do not require time-pos near duration (#66)."""
+        track_a = self._track(duration_sec=240.0)
+        track_b = Track(
+            id="local:/music/next.flac",
+            title="Next",
+            artist_name="Artist",
+            release_title="Album",
+            source=Source.LOCAL,
+            duration_sec=200.0,
+        )
+        self._service._playlist_meta = [track_a, track_b]
+        self._service._queue_index = 0
+        self._service._current_track = track_a
+        self._service._playback_intended = True
+        self._service._is_playing = False
+        self._service._duration_sec = 240.0
+        # Stalled short of the poll threshold (duration - 1s).
+        self._service._engine = _DurationEngine(
+            duration=240.0,
+            position=230.0,
+            playing=False,
+        )
+        advanced: list[int] = []
+        self._service._play_queue_index = lambda index, **kwargs: advanced.append(index)  # type: ignore[method-assign]
+
+        self._service._handle_engine_event("track_eof")
+
+        self.assertEqual(advanced, [1])
+        self.assertEqual(self._service._auto_advanced_from_index, 0)
+
+    def test_poll_auto_advance_still_requires_near_end_time_pos(self) -> None:
+        self._service._playlist_meta = [self._track(), self._track()]
+        self._service._queue_index = 0
+        self._service._playback_intended = True
+        self._service._is_playing = True
+        self._service._duration_sec = 240.0
+        self._service._engine = _DurationEngine(duration=240.0, position=230.0)
+        advanced: list[int] = []
+        self._service._play_queue_index = lambda index, **kwargs: advanced.append(index)  # type: ignore[method-assign]
+        self._service._maybe_auto_advance_queue()
+        self.assertEqual(advanced, [])
+
     def test_progress_bar_fraction_from_mpv_position_and_duration(self) -> None:
         state = PlaybackState(
             current_track=None,
