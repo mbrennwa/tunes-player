@@ -30,7 +30,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tunes_player.core.config import ConfigManager
-from tunes_player.core.logging_config import configure_logging, diagnostics_log_path
+from tunes_player.core.logging_config import configure_logging
 from tunes_player.core.playback.output_profile import PlaybackOutputProfile
 from tunes_player.engines.factory import create_playback_engine
 from tunes_player.core.playback.mpv_events import END_FILE_ERROR
@@ -312,8 +312,8 @@ def main() -> int:
     args = parser.parse_args()
 
     os.environ.setdefault("TUNES_LOG_LEVEL", "INFO")
-    data_dir = ConfigManager().data_dir
-    log_path = configure_logging(data_dir)
+    config = ConfigManager()
+    log_path = configure_logging(config.state_dir, legacy_data_dir=config.data_dir)
     tracks = _resolve_tracks(_cache_dir())
     mpv_device = effective_mpv_alsa_device(args.device) or args.device
     card = parse_card_from_mpv_device(mpv_device)

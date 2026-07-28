@@ -138,9 +138,10 @@ will work for Qt signals later).
 - User-facing playback failures set `PlayerService.last_error()` and emit
   `playback_error`; the GTK shell shows an `Adw.Toast` (see `ui/gtk/errors.py`).
 - Diagnostics use the stdlib `logging` package (`tunes_player.core.logging_config`),
-  configured at app startup. Log file: `{user_data_dir}/tunes-player.log` (typically
-  `~/.local/share/tunes-player/tunes-player.log`), size-rotated at 5 MiB with 3
-  backups (~20 MiB worst case; #72). Override verbosity with `TUNES_LOG_LEVEL=DEBUG`.
+  configured at app startup. Log file: `{user_state_dir}/tunes-player.log` (typically
+  `~/.local/state/tunes-player/tunes-player.log`; #76), size-rotated at 5 MiB with 3
+  backups (~20 MiB worst case; #72). An existing log under the former data-dir path is
+  moved once on startup. Override verbosity with `TUNES_LOG_LEVEL=DEBUG`.
 - Optional stderr mirroring: `TUNES_LOG_STDERR=1` (otherwise stderr is WARNING+).
 - Optional position poll spam: `TUNES_POSITION_POLL_LOG=1`.
 - Playback health monitor (#67): enabled by default. A daemon thread
@@ -731,6 +732,7 @@ instead of mpv). **AGPL** is unnecessary for a desktop app.
 | Desktop file | `data/tunes.player.desktop` (basename must match GTK app ID) |
 | Config | `platformdirs` → `~/.config/tunes-player/config.json` |
 | Library DB | `~/.local/share/tunes-player/library.db` |
+| Logs | `~/.local/state/tunes-player/tunes-player.log` |
 | Sessions | `tidal-session.json`, `qobuz-session.json` under data dir |
 
 DEB packages are built from `debian/` via `tools/build-deb.sh`; release workflow is

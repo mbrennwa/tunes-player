@@ -1309,7 +1309,7 @@ class PlayerService:
                         log_folder_scan_failure(
                             finished_folder,
                             errors=result.errors,
-                            log_path=diagnostics_log_path(self._config_manager.data_dir),
+                            log_path=diagnostics_log_path(self._config_manager.state_dir),
                             file_errors=file_errors,
                         )
                     self._config_manager.record_folder_scan(
@@ -1332,7 +1332,7 @@ class PlayerService:
                     log_folder_scan_failure(
                         finished_folder,
                         errors=FOLDER_SCAN_FAILED,
-                        log_path=diagnostics_log_path(self._config_manager.data_dir),
+                        log_path=diagnostics_log_path(self._config_manager.state_dir),
                         fatal_error=message[1],
                     )
                     self._config_manager.record_folder_scan(
@@ -1376,7 +1376,7 @@ class PlayerService:
                         log_folder_scan_failure(
                             finished_folder,
                             errors=FOLDER_SCAN_FAILED,
-                            log_path=diagnostics_log_path(self._config_manager.data_dir),
+                            log_path=diagnostics_log_path(self._config_manager.state_dir),
                             fatal_error=self._scan_last_error,
                         )
                         self._config_manager.record_folder_scan(

@@ -1486,7 +1486,7 @@ def run() -> int:
     Gtk.Window.set_default_icon_name("tunes-player")
     config = ConfigManager()
     config.load()
-    configure_logging(config.data_dir)
+    configure_logging(config.state_dir, legacy_data_dir=config.data_dir)
     volume_controller = create_volume_controller(config.config)
     service = PlayerService(
         config=config,

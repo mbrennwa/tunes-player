@@ -40,7 +40,7 @@ To build or run from source, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Diagnostics
 
-Logs go to `~/.local/share/tunes-player/tunes-player.log`. Useful env flags:
+Logs go to `~/.local/state/tunes-player/tunes-player.log`. Useful env flags:
 
 | Variable | Effect |
 |----------|--------|

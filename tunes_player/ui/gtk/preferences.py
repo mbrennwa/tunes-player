@@ -54,7 +54,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._add_row.set_activatable_widget(add_button)
         self._folders_group.add(self._add_row)
 
-        self._diagnostics_log_path = diagnostics_log_path(service.config.data_dir)
+        self._diagnostics_log_path = diagnostics_log_path(service.config.state_dir)
         self._log_row = Adw.ActionRow(
             title="Log file",
             subtitle=str(self._diagnostics_log_path),

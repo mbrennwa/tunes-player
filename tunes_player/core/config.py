@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
-from platformdirs import user_config_dir, user_data_dir
+from platformdirs import user_config_dir, user_data_dir, user_state_dir
 
 from tunes_player.core.home import (
     NEW_MUSIC_LOCAL_WITHIN_DAYS_DEFAULT,
@@ -145,6 +145,11 @@ class ConfigManager:
     @property
     def data_dir(self) -> Path:
         return Path(user_data_dir(APP_NAME))
+
+    @property
+    def state_dir(self) -> Path:
+        """XDG state directory for runtime logs and similar non-portable state (#76)."""
+        return Path(user_state_dir(APP_NAME))
 
     @property
     def database_path(self) -> Path:
