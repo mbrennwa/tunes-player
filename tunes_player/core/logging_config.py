@@ -5,11 +5,14 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 _LOG = logging.getLogger(__name__)
 _APP_LOGGER = "tunes_player"
 LOG_FILE_NAME = "tunes-player.log"
+LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MiB
+LOG_BACKUP_COUNT = 3
 
 
 def diagnostics_log_path(data_dir: Path) -> Path:
@@ -34,7 +37,12 @@ def configure_logging(data_dir: Path) -> Path:
     app_logger.handlers.clear()
     app_logger.propagate = False
 
-    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler = RotatingFileHandler(
+        log_path,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
     file_handler.setLevel(level)
     file_handler.setFormatter(formatter)
     app_logger.addHandler(file_handler)

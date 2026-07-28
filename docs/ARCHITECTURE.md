@@ -139,8 +139,8 @@ will work for Qt signals later).
   `playback_error`; the GTK shell shows an `Adw.Toast` (see `ui/gtk/errors.py`).
 - Diagnostics use the stdlib `logging` package (`tunes_player.core.logging_config`),
   configured at app startup. Log file: `{user_data_dir}/tunes-player.log` (typically
-  `~/.local/share/tunes-player/tunes-player.log`). Override verbosity with
-  `TUNES_LOG_LEVEL=DEBUG`.
+  `~/.local/share/tunes-player/tunes-player.log`), size-rotated at 5 MiB with 3
+  backups (~20 MiB worst case; #72). Override verbosity with `TUNES_LOG_LEVEL=DEBUG`.
 - Optional stderr mirroring: `TUNES_LOG_STDERR=1` (otherwise stderr is WARNING+).
 - Optional position poll spam: `TUNES_POSITION_POLL_LOG=1`.
 - Playback health monitor (#67): enabled by default. A daemon thread
