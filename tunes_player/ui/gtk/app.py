@@ -218,6 +218,8 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _build_shell(self) -> None:
         self._header = Adw.HeaderBar()
+        # GNOME defaults to ":close"; always offer minimize/maximize on the end.
+        self._header.set_decoration_layout(":minimize,maximize,close")
         self._toolbar.add_top_bar(self._header)
 
         self._window_title = Adw.WindowTitle(title=_APP_WINDOW_TITLE, subtitle="")
