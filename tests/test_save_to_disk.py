@@ -74,6 +74,28 @@ class TestSaveToDiskHelpers(unittest.TestCase):
             ".flac",
         )
         self.assertEqual(infer_extension("https://x/a.mp3", None), ".mp3")
+        mp3_meta = FileMetadata(
+            path="",
+            codec="mp3",
+            duration_sec=1.0,
+            sample_rate=None,
+            bit_depth=None,
+            channels=2,
+        )
+        aac_meta = FileMetadata(
+            path="",
+            codec="aac",
+            duration_sec=1.0,
+            sample_rate=None,
+            bit_depth=None,
+            channels=2,
+        )
+        self.assertEqual(infer_extension("https://cdn.example/opaque", mp3_meta), ".mp3")
+        self.assertEqual(infer_extension("https://cdn.example/opaque", aac_meta), ".m4a")
+        self.assertEqual(
+            infer_extension("file:///tmp/x.mpd", aac_meta, for_mpd=True),
+            ".m4a",
+        )
 
     def test_is_mpd_uri(self) -> None:
         self.assertTrue(is_mpd_uri("file:///tmp/tidal_1.mpd"))

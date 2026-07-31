@@ -66,10 +66,16 @@ def _qobuz_stream_acoustic_tier(stream: dict[str, Any]) -> str:
     if not stream.get("url"):
         return QUALITY_FILTER_COMPRESSED
     rate_hz = _normalize_sample_rate_hz(stream.get("sampling_rate"))
+    # format_id 5 is MP3 320; Qobuz may still report 16/44 on that payload.
+    try:
+        format_id = int(stream["format_id"]) if stream.get("format_id") is not None else None
+    except (TypeError, ValueError):
+        format_id = None
+    lossless = format_id != 5
     return acoustic_tier_from_stream(
         bit_depth=stream.get("bit_depth"),
         sample_rate_hz=rate_hz,
-        lossless=True,
+        lossless=lossless,
     )
 
 
@@ -503,6 +509,7 @@ class QobuzClient:
         playback_preference: object | None = None,
     ) -> dict[str, Any]:
         from tunes_player.core.release_quality import (
+            QUALITY_FILTER_CD,
             QUALITY_FILTER_HI_RES,
             PlaybackPreference,
             playback_preference_from_shell,
@@ -522,30 +529,39 @@ class QobuzClient:
             candidates = [27]
 
         minimum_tier = _qobuz_minimum_acoustic_tier(preference)
-        last_stream: dict[str, Any] | None = None
-        for index, format_id in enumerate(candidates):
+        best_stream: dict[str, Any] | None = None
+        best_rank = -1
+        for format_id in candidates:
+            # Already have lossless CD+; skip MP3 last-resort when seeking higher.
+            if (
+                format_id == 5
+                and best_rank >= _ACOUSTIC_TIER_RANK.get(QUALITY_FILTER_CD, 1)
+            ):
+                break
             stream = self._request_file_url(track_id, format_id=format_id)
-            last_stream = stream
             if not stream.get("url"):
                 continue
             acoustic_tier = _qobuz_stream_acoustic_tier(stream)
-            is_last = index + 1 >= len(candidates)
-            if _acoustic_tier_meets_minimum(acoustic_tier, minimum_tier) or is_last:
-                if (
-                    minimum_tier == QUALITY_FILTER_HI_RES
-                    and acoustic_tier != QUALITY_FILTER_HI_RES
-                    and is_last
-                ):
-                    log.warning(
-                        "Qobuz track %s: hi-res target but stream resolved to %s "
-                        "(format_id=%s)",
-                        track_id,
-                        acoustic_tier,
-                        format_id,
-                    )
+            rank = _ACOUSTIC_TIER_RANK.get(acoustic_tier, 0)
+            if rank > best_rank:
+                best_stream = stream
+                best_rank = rank
+            if _acoustic_tier_meets_minimum(acoustic_tier, minimum_tier):
                 return stream
-        if last_stream is not None:
-            return last_stream
+        if best_stream is not None:
+            best_tier = _qobuz_stream_acoustic_tier(best_stream)
+            if (
+                minimum_tier == QUALITY_FILTER_HI_RES
+                and best_tier != QUALITY_FILTER_HI_RES
+            ):
+                log.warning(
+                    "Qobuz track %s: hi-res target but stream resolved to %s "
+                    "(format_id=%s)",
+                    track_id,
+                    best_tier,
+                    best_stream.get("format_id"),
+                )
+            return best_stream
         return self._request_file_url(track_id, format_id=candidates[-1])
 
     def _request_file_url(self, track_id: str, *, format_id: int) -> dict[str, Any]:
@@ -563,7 +579,11 @@ class QobuzClient:
             "request_ts": str(request_ts),
             "request_sig": request_sig,
         }
-        return self._api_get("track/getFileUrl", params)
+        data = self._api_get("track/getFileUrl", params)
+        stamped = dict(data)
+        # API body may omit format_id; stamp the negotiated request tier for save-to-disk.
+        stamped["format_id"] = format_id
+        return stamped
 
     def _fetch_album_summary(self, album_id: str) -> dict[str, Any] | None:
         data = self._api_get(
