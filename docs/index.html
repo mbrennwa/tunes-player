@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Tunes — music from your files and streaming</title>
-  <meta name="description" content="Tunes is a free and open-source music app for Linux: search, discover, and play from your own files and streaming subscriptions (Qobuz, TIDAL)." />
+  <meta name="description" content="Tunes is a music app to search, discover, and play music from your own files and streaming subscriptions (Qobuz, TIDAL). It is free and open source, built for Linux with a native GNOME look." />
   <link rel="icon" href="assets/tunes-player.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -83,24 +83,9 @@
 
     .hero-copy {
       margin-top: clamp(1.25rem, 3vw, 2rem);
-      max-width: 36rem;
+      max-width: 40rem;
       opacity: 0;
       animation: rise 0.85s ease 0.18s forwards;
-    }
-
-    .hero-copy h1 {
-      font-family: var(--font);
-      font-weight: 600;
-      font-size: clamp(1.35rem, 2.8vw, 1.85rem);
-      letter-spacing: -0.01em;
-      line-height: 1.25;
-      margin-bottom: 0.65rem;
-    }
-
-    .hero-copy p {
-      color: var(--ink-muted);
-      font-size: clamp(1.05rem, 2vw, 1.2rem);
-      max-width: 32rem;
     }
 
     .cta-row {
@@ -194,11 +179,11 @@
       margin-bottom: 0.5rem;
     }
 
-    section > .wrap > .lede {
-      color: var(--ink-muted);
-      font-size: 1.1rem;
-      max-width: 38rem;
-      margin-bottom: 1.75rem;
+    .intro {
+      color: var(--ink);
+      font-size: clamp(1.05rem, 2vw, 1.2rem);
+      max-width: 40rem;
+      margin-bottom: 1.25rem;
     }
 
     .feature-list {
@@ -227,43 +212,17 @@
       box-shadow: 0 0 0 4px var(--accent-soft);
     }
 
-    .install-box {
-      margin-top: 0.25rem;
-      padding: 1.25rem 1.35rem;
-      background: var(--bg-2);
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      max-width: 42rem;
+    section .feature-list {
+      margin-top: 1.25rem;
     }
 
-    .install-box p { margin-bottom: 0.85rem; color: var(--ink-muted); }
-    .install-box p:last-child { margin-bottom: 0; }
-
-    pre {
-      background: #0a0e14;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 0.95rem 1.1rem;
-      overflow-x: auto;
-      font-size: 0.95rem;
-      line-height: 1.45;
-      color: #c9d7ea;
-      margin: 0.85rem 0 1rem;
-    }
-
-    .note {
-      font-size: 0.98rem;
-      color: var(--ink-muted);
-      max-width: 42rem;
-    }
-
-    .disclaimer {
+    .license-copy {
       color: var(--ink-muted);
       font-size: 0.98rem;
       max-width: 42rem;
     }
 
-    .disclaimer p + p { margin-top: 0.85rem; }
+    .license-copy p + p { margin-top: 0.85rem; }
 
     footer {
       border-top: 1px solid var(--line);
@@ -320,8 +279,13 @@
       </a>
 
       <div class="hero-copy">
-        <h1>One place for your music</h1>
-        <p>Search, discover, and play from your own files and streaming subscriptions — free and open source for Linux, with a native GNOME look.</p>
+        <p class="intro"><strong>Tunes</strong> is a music app to search, discover, and play music from your own files and streaming subscriptions (Qobuz, TIDAL). It is free and open source, built for Linux with a native GNOME look.</p>
+        <ul class="feature-list">
+          <li><strong>One place for your music</strong> — local library and streaming services in the same app</li>
+          <li><strong>Browse and discover</strong> — search, new releases, and suggestions without switching apps</li>
+          <li><strong>Audiophile-friendly local playback</strong> — bit-perfect listening when you want it</li>
+          <li><strong>Simple and native</strong> — a straightforward desktop app, not a heavy media suite</li>
+        </ul>
       </div>
 
       <div class="cta-row">
@@ -344,7 +308,6 @@
     <section id="discover" aria-labelledby="discover-heading">
       <div class="wrap">
         <h2 id="discover-heading">Discover and browse</h2>
-        <p class="lede">Local library and streaming catalogs in the same app — without switching tools.</p>
         <ul class="feature-list">
           <li>One search across your library and signed-in streaming catalogs</li>
           <li><strong>New Releases</strong> and <strong>Suggest Music</strong> for discovery</li>
@@ -357,56 +320,21 @@
     <section id="playback" aria-labelledby="playback-heading">
       <div class="wrap">
         <h2 id="playback-heading">Playback and audio quality</h2>
-        <p class="lede">Straightforward controls, with audiophile-friendly local playback when you want it.</p>
         <ul class="feature-list">
           <li>Play, pause, skip, and manage a queue from the Now Playing bar</li>
           <li><strong>Bit-perfect playback</strong> — Tunes passes the original music data from the source to the playback device</li>
-          <li>Hardware volume on the sound device where possible, software volume as a fallback</li>
-          <li>The app shows honestly whether playback is bit-perfect or not</li>
+          <li>Hardware volume on the <strong>sound device</strong> where possible, software volume control inside the app as a fallback</li>
+          <li>The app <strong>shows honestly</strong> whether playback is bit-perfect or not</li>
         </ul>
       </div>
     </section>
 
-    <section id="install" aria-labelledby="install-heading">
+    <section id="license" aria-labelledby="license-heading">
       <div class="wrap">
-        <h2 id="install-heading">Install</h2>
-        <p class="lede">On Debian 12+, Ubuntu 24.04+, or similar DEB-based distros.</p>
-        <div class="install-box">
-          <p>Download the latest <code>tunes-player_*.deb</code> from
-            <a href="https://github.com/mbrennwa/tunes-player/releases">GitHub Releases</a>, then:</p>
-          <pre><code>sudo apt install ./path/to/tunes-player_*.deb</code></pre>
-          <p><code>apt</code> installs dependencies automatically. After install, <strong>Tunes</strong> appears in the application menu.</p>
-        </div>
-        <p class="note" style="margin-top: 1.25rem;">
-          Add music folders in <strong>Settings → Sources</strong>, and sign in to TIDAL or Qobuz to enable streaming.
-          For Qobuz, enter an App ID and App Secret in Settings, then sign in with your account.
-          Qobuz did not provide these to the Tunes project, but
-          <code>ID=942852567</code> and <code>secret=761730d3f95e4af09ac63b9a37ccc96a</code>
-          as used by other open-source tools works fine.
-        </p>
-        <p class="note" style="margin-top: 0.85rem;">
-          To build or run from source, see
-          <a href="https://github.com/mbrennwa/tunes-player/blob/main/docs/ARCHITECTURE.md">docs/ARCHITECTURE.md</a>.
-        </p>
-      </div>
-    </section>
-
-    <section id="disclaimer" aria-labelledby="disclaimer-heading">
-      <div class="wrap">
-        <h2 id="disclaimer-heading">Streaming disclaimer</h2>
-        <div class="disclaimer">
-          <p>
-            Tunes is <strong>not affiliated with Qobuz, TIDAL, or any other streaming provider</strong>.
-            Streaming requires your own paid subscriptions where applicable. Features can break when providers
-            change authentication or terms. Use at your own responsibility and in compliance with each service's
-            terms of use.
-          </p>
-          <p>
-            <strong>Save to disk</strong> uses the same streaming endpoints as playback (not an official
-            download/purchase API). Saving streams may conflict with a provider's terms; you remain responsible
-            for lawful use. Some TIDAL tracks are delivered as DASH/MPD and require <strong>ffmpeg</strong> on
-            your <code>PATH</code> to remux into a single file.
-          </p>
+        <h2 id="license-heading">License</h2>
+        <div class="license-copy">
+          <p>GPL-3.0-or-later — see <a href="https://github.com/mbrennwa/tunes-player/blob/main/LICENSE">LICENSE</a>.</p>
+          <p>This project was developed with substantial assistance from AI coding tools. The code was reviewed through iterative development, discussion, testing, and acceptance by the project maintainer. A targeted search for third-party code did not identify any license incompatibilities.</p>
         </div>
       </div>
     </section>
@@ -414,7 +342,6 @@
 
   <footer>
     <div class="wrap">
-      <p>GPL-3.0-or-later — see <a href="https://github.com/mbrennwa/tunes-player/blob/main/LICENSE">LICENSE</a>.</p>
       <p><a href="https://github.com/mbrennwa/tunes-player">mbrennwa/tunes-player</a></p>
     </div>
   </footer>
