@@ -7,12 +7,11 @@ from pathlib import Path
 
 import gi
 
-gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gio", "2.0")
 
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.models import Source, Track
 from tunes_player.core.release_quality import playback_preference_for_tier
@@ -169,29 +168,31 @@ def begin_save_tracks(
             show_error_toast(toast_overlay, "No streaming tracks to save.")
         return
 
-    writable = _writable_music_folders(service)
-    if len(writable) == 1:
+    dest = resolved_download_folder(service)
+    if dest is not None:
         _start_save(
             service,
             tracks=list(streaming),
-            dest=writable[0],
+            dest=dest,
             toast_overlay=toast_overlay,
+            persist_folder=False,
         )
         return
-    if writable:
-        _choose_music_folder_and_start(
+    choose_download_folder(
+        parent_window=parent_window,
+        initial=suggested_download_folder(service),
+        on_chosen=lambda path: _start_save(
             service,
             tracks=list(streaming),
-            folders=writable,
+            dest=path,
             toast_overlay=toast_overlay,
-            parent_window=parent_window,
-        )
-        return
-    _choose_folder_via_file_dialog(
-        service,
-        tracks=list(streaming),
-        toast_overlay=toast_overlay,
-        parent_window=parent_window,
+            persist_folder=True,
+        ),
+        on_unwritable=lambda path: (
+            show_error_toast(toast_overlay, f"Folder is not writable: {path}")
+            if toast_overlay is not None
+            else None
+        ),
     )
 
 
@@ -228,90 +229,48 @@ def attach_download_toasts(overlay: object, service: PlayerService) -> None:
     service.subscribe(lambda event: GLib.idle_add(on_event, event))
 
 
-def _writable_music_folders(service: PlayerService) -> list[Path]:
-    """Configured music folders that exist and are writable, last-used first."""
-    folders: list[Path] = []
-    seen: set[str] = set()
-    last = service.config.config.last_save_folder
-    candidates: list[str] = []
-    if last:
-        candidates.append(last)
-    candidates.extend(service.config.config.music_folders)
-    configured = {
-        str(Path(item).expanduser().resolve())
-        for item in service.config.config.music_folders
-    }
-    for raw in candidates:
-        try:
-            path = Path(raw).expanduser().resolve()
-        except OSError:
-            continue
-        key = str(path)
-        if key in seen or key not in configured:
-            continue
-        seen.add(key)
-        if path.is_dir() and is_writable_dir(path):
-            folders.append(path)
-    return folders
+def resolved_download_folder(service: PlayerService) -> Path | None:
+    """Return the configured downloads folder when it exists and is writable."""
+    raw = service.config.config.download_folder
+    if not raw:
+        return None
+    try:
+        path = Path(raw).expanduser().resolve()
+    except OSError:
+        return None
+    if path.is_dir() and is_writable_dir(path):
+        return path
+    return None
 
 
-def _choose_music_folder_and_start(
-    service: PlayerService,
+def suggested_download_folder(service: PlayerService) -> Path:
+    """Initial folder for the picker: current setting if present, else ~/Tunes Downloads."""
+    raw = service.config.config.download_folder
+    if raw:
+        path = Path(raw).expanduser()
+        if path.is_dir():
+            return path
+        parent = path.parent
+        if parent.is_dir():
+            return parent
+    return Path.home() / "Tunes Downloads"
+
+
+def choose_download_folder(
     *,
-    tracks: list[Track],
-    folders: Sequence[Path],
-    toast_overlay: object | None,
     parent_window: Gtk.Window | None,
+    initial: Path,
+    on_chosen: Callable[[Path], None],
+    on_unwritable: Callable[[Path], None] | None = None,
 ) -> None:
-    dialog = Adw.AlertDialog(
-        heading="Save to disk",
-        body="Choose a music folder:",
-    )
-    dialog.add_response("cancel", "Cancel")
-    dialog.set_close_response("cancel")
-
-    list_box = Gtk.ListBox()
-    list_box.set_selection_mode(Gtk.SelectionMode.NONE)
-    list_box.add_css_class("boxed-list")
-    list_box.set_margin_top(6)
-
-    def _pick(path: Path) -> None:
-        dialog.force_close()
-        _start_save(
-            service,
-            tracks=tracks,
-            dest=path,
-            toast_overlay=toast_overlay,
-        )
-
-    for folder in folders:
-        row = Adw.ActionRow(
-            title=folder.name or str(folder),
-            subtitle=str(folder),
-        )
-        row.set_activatable(True)
-        row.add_prefix(Gtk.Image.new_from_icon_name("folder-symbolic"))
-        list_box.append(row)
-
-    list_box.connect(
-        "row-activated",
-        lambda _box, row: _pick(folders[row.get_index()]),
-    )
-    dialog.set_extra_child(list_box)
-    dialog.present(parent_window)
-
-
-def _choose_folder_via_file_dialog(
-    service: PlayerService,
-    *,
-    tracks: list[Track],
-    toast_overlay: object | None,
-    parent_window: Gtk.Window | None,
-) -> None:
-    dialog = Gtk.FileDialog(title="Save to folder")
-    initial = _initial_save_folder(service)
-    if initial is not None:
-        dialog.set_initial_folder(Gio.File.new_for_path(str(initial)))
+    """Open a folder picker (New Folder supported by the portal/file dialog)."""
+    dialog = Gtk.FileDialog(title="Choose downloads folder")
+    if initial.is_dir():
+        dialog.set_initial_folder(Gio.File.new_for_path(str(initial.resolve())))
+    else:
+        parent = initial if initial.is_dir() else initial.parent
+        if parent.is_dir():
+            dialog.set_initial_folder(Gio.File.new_for_path(str(parent.resolve())))
 
     def _on_selected(_dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
         try:
@@ -323,15 +282,10 @@ def _choose_folder_via_file_dialog(
             return
         dest = Path(path)
         if not is_writable_dir(dest):
-            if toast_overlay is not None:
-                show_error_toast(toast_overlay, f"Folder is not writable: {dest}")
+            if on_unwritable is not None:
+                on_unwritable(dest)
             return
-        _start_save(
-            service,
-            tracks=tracks,
-            dest=dest,
-            toast_overlay=toast_overlay,
-        )
+        on_chosen(dest)
 
     dialog.select_folder(parent_window, None, _on_selected)
 
@@ -342,27 +296,15 @@ def _start_save(
     tracks: list[Track],
     dest: Path,
     toast_overlay: object | None,
+    persist_folder: bool,
 ) -> None:
-    service.set_last_save_folder(str(dest))
+    if persist_folder:
+        service.set_download_folder(str(dest))
     try:
         service.start_save_to_disk(tracks=list(tracks), dest_dir=str(dest))
     except SaveToDiskError as exc:
         if toast_overlay is not None:
             show_error_toast(toast_overlay, str(exc))
-
-
-def _initial_save_folder(service: PlayerService) -> Path | None:
-    last = service.config.config.last_save_folder
-    if last:
-        path = Path(last).expanduser()
-        if path.is_dir():
-            return path
-    folders = service.config.config.music_folders
-    if folders:
-        path = Path(folders[0]).expanduser()
-        if path.is_dir():
-            return path
-    return None
 
 
 def _show_action_popover(

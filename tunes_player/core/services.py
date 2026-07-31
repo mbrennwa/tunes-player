@@ -2211,8 +2211,8 @@ class PlayerService:
         self._download_cancelled_on_shutdown = False
         return flag
 
-    def set_last_save_folder(self, folder: str | None) -> None:
-        self._config_manager.set_last_save_folder(folder)
+    def set_download_folder(self, folder: str | None) -> None:
+        self._config_manager.set_download_folder(folder)
 
     def cancel_save_to_disk(self) -> None:
         self._download_cancel.set()

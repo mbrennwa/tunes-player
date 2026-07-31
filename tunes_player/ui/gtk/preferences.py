@@ -20,6 +20,10 @@ from tunes_player.core.folder_scan_status import (
 )
 from tunes_player.core.logging_config import diagnostics_log_path
 from tunes_player.core.services import PlayerService
+from tunes_player.ui.gtk.save_to_disk_menu import (
+    choose_download_folder,
+    suggested_download_folder,
+)
 from tunes_player.ui.gtk.util import escape_markup, open_external_uri, read_clipboard_text
 
 _FOLDER_WATCH_LABEL = "Watch folder"
@@ -131,11 +135,21 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._new_music_days_adj.connect("value-changed", self._on_new_music_within_days_changed)
         application_group.add(self._new_music_days_row)
 
+        downloads_group = Adw.PreferencesGroup(title="Downloads")
+        self._download_folder_row = Adw.ActionRow(title="Downloads folder")
+        self._download_folder_btn = Gtk.Button(label="Choose…")
+        self._download_folder_btn.set_valign(Gtk.Align.CENTER)
+        self._download_folder_btn.connect("clicked", self._on_download_folder_clicked)
+        self._download_folder_row.add_suffix(self._download_folder_btn)
+        self._download_folder_row.set_activatable_widget(self._download_folder_btn)
+        downloads_group.add(self._download_folder_row)
+
         application_page = Adw.PreferencesPage(
             title="Application",
             icon_name="applications-system-symbolic",
         )
         application_page.add(application_group)
+        application_page.add(downloads_group)
         application_page.add(diagnostics_group)
 
         self._tidal_status_row = Adw.ActionRow(title="")
@@ -190,6 +204,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._updating_output_dropdown = False
         self._updating_volume_control = False
         self._reload_folders()
+        self._reload_download_folder()
         self._reload_tidal_status()
         self._reload_qobuz_status()
         service.subscribe(lambda event: GLib.idle_add(self._on_service_event, event))
@@ -205,6 +220,28 @@ class PreferencesWindow(Adw.PreferencesWindow):
     @staticmethod
     def _folder_key(folder: str) -> str:
         return str(Path(folder).expanduser().resolve())
+
+    def _reload_download_folder(self) -> None:
+        raw = self._service.config.config.download_folder
+        if raw:
+            self._download_folder_row.set_subtitle(escape_markup(raw))
+            self._download_folder_btn.set_label("Change…")
+        else:
+            self._download_folder_row.set_subtitle(
+                "Not set — chosen on first Save to disk"
+            )
+            self._download_folder_btn.set_label("Choose…")
+
+    def _on_download_folder_clicked(self, *_args: object) -> None:
+        choose_download_folder(
+            parent_window=self,
+            initial=suggested_download_folder(self._service),
+            on_chosen=self._on_download_folder_chosen,
+        )
+
+    def _on_download_folder_chosen(self, path: Path) -> None:
+        self._service.set_download_folder(str(path))
+        self._reload_download_folder()
 
     def _reload_folders(self) -> None:
         for row in self._dynamic_rows:

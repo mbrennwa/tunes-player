@@ -270,18 +270,21 @@ class TestSaveToDiskHelpers(unittest.TestCase):
 
 
 class TestSaveFolderConfig(unittest.TestCase):
-    def test_last_save_folder_roundtrip(self) -> None:
+    def test_download_folder_roundtrip(self) -> None:
         from tunes_player.core.config import ConfigManager
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
             manager = ConfigManager(path)
             manager.load()
-            manager.set_last_save_folder(str(Path(tmp) / "Music"))
+            manager.set_download_folder(str(Path(tmp) / "Tunes Downloads"))
             other = ConfigManager(path)
             other.load()
-            self.assertIsNotNone(other.config.last_save_folder)
-            self.assertTrue(other.config.last_save_folder.endswith("Music"))
+            self.assertIsNotNone(other.config.download_folder)
+            self.assertTrue(other.config.download_folder.endswith("Tunes Downloads"))
+            # Legacy last_save_folder is ignored (not migrated into download_folder).
+            raw = path.read_text(encoding="utf-8")
+            self.assertNotIn("last_save_folder", raw)
 
 
 class TestPlayerServiceSaveHook(unittest.TestCase):
@@ -304,79 +307,98 @@ class TestPlayerServiceSaveHook(unittest.TestCase):
             finally:
                 service.shutdown()
 
-    def test_incremental_scan_on_success(self) -> None:
+    def _run_fake_save(
+        self,
+        *,
+        music_folder: Path | None,
+        dest: Path,
+    ) -> list[tuple[str, list[str]]]:
         from tunes_player.core.backends.playable import PlayableSource
         from tunes_player.core.config import ConfigManager
         from tunes_player.core.services import PlayerService
 
+        root = dest.parent if music_folder is None else music_folder.parent
+        cfg_path = root / "config.json"
+        manager = ConfigManager(cfg_path)
+        manager.load()
+        if music_folder is not None:
+            manager.add_music_folder(str(music_folder))
+        service = PlayerService(config=manager)
+        scanned: list[tuple[str, list[str]]] = []
+
+        def _record_scan(*, folder: str, add_paths=None, remove_paths=None):
+            scanned.append((folder, list(add_paths or [])))
+
+        service.enqueue_incremental_scan = _record_scan  # type: ignore[method-assign]
+        track = _track()
+        source = PlayableSource(
+            uri="https://example.com/a.flac",
+            metadata=track,
+            stream_metadata=FileMetadata(
+                path="",
+                codec="flac",
+                duration_sec=1.0,
+                sample_rate=44100,
+                bit_depth=16,
+                channels=2,
+            ),
+        )
+
+        def fake_resolve(*_args, **_kwargs):
+            return source
+
+        with (
+            mock.patch(
+                "tunes_player.core.services.resolve_track",
+                side_effect=fake_resolve,
+            ),
+            mock.patch(
+                "tunes_player.core.services.download_https",
+                side_effect=lambda url, part, cancel_event=None: part.write_bytes(b"flac"),
+            ),
+            mock.patch(
+                "tunes_player.core.services.write_tags",
+            ),
+            mock.patch(
+                "tunes_player.core.services.fetch_cover_bytes",
+                return_value=None,
+            ),
+            mock.patch(
+                "tunes_player.core.services.download_cache_dir",
+                return_value=root / "download-cache",
+            ),
+            mock.patch(
+                "tunes_player.core.services.cleanup_download_cache",
+                return_value=0,
+            ),
+        ):
+            service.start_save_to_disk(tracks=[track], dest_dir=str(dest))
+            thread = service._download_thread
+            assert thread is not None
+            thread.join(timeout=10)
+        self.assertEqual(service.download_saved_count, 1)
+        service.shutdown()
+        return scanned
+
+    def test_incremental_scan_when_dest_is_music_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             music = root / "music"
             music.mkdir()
-            cfg_path = root / "config.json"
-            manager = ConfigManager(cfg_path)
-            manager.load()
-            manager.add_music_folder(str(music))
-            # Point data_dir via monkeypatch of property is hard; use real user data —
-            # instead patch download_cache_dir and cleanup.
-            service = PlayerService(config=manager)
-            scanned: list[tuple[str, list[str]]] = []
-
-            def _record_scan(*, folder: str, add_paths=None, remove_paths=None):
-                scanned.append((folder, list(add_paths or [])))
-
-            service.enqueue_incremental_scan = _record_scan  # type: ignore[method-assign]
-            track = _track()
-            source = PlayableSource(
-                uri="https://example.com/a.flac",
-                metadata=track,
-                stream_metadata=FileMetadata(
-                    path="",
-                    codec="flac",
-                    duration_sec=1.0,
-                    sample_rate=44100,
-                    bit_depth=16,
-                    channels=2,
-                ),
-            )
-
-            def fake_resolve(*_args, **_kwargs):
-                return source
-
-            with (
-                mock.patch(
-                    "tunes_player.core.services.resolve_track",
-                    side_effect=fake_resolve,
-                ),
-                mock.patch(
-                    "tunes_player.core.services.download_https",
-                    side_effect=lambda url, part, cancel_event=None: part.write_bytes(b"flac"),
-                ),
-                mock.patch(
-                    "tunes_player.core.services.write_tags",
-                ),
-                mock.patch(
-                    "tunes_player.core.services.fetch_cover_bytes",
-                    return_value=None,
-                ),
-                mock.patch(
-                    "tunes_player.core.services.download_cache_dir",
-                    return_value=root / "download-cache",
-                ),
-                mock.patch(
-                    "tunes_player.core.services.cleanup_download_cache",
-                    return_value=0,
-                ),
-            ):
-                service.start_save_to_disk(tracks=[track], dest_dir=str(music))
-                thread = service._download_thread
-                assert thread is not None
-                thread.join(timeout=10)
-            self.assertEqual(service.download_saved_count, 1)
+            scanned = self._run_fake_save(music_folder=music, dest=music)
             self.assertEqual(len(scanned), 1)
             self.assertEqual(scanned[0][0], str(music.resolve()))
             self.assertEqual(len(scanned[0][1]), 1)
-            service.shutdown()
+
+    def test_no_incremental_scan_outside_music_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            music = root / "music"
+            downloads = root / "downloads"
+            music.mkdir()
+            downloads.mkdir()
+            scanned = self._run_fake_save(music_folder=music, dest=downloads)
+            self.assertEqual(scanned, [])
 
 
 if __name__ == "__main__":
