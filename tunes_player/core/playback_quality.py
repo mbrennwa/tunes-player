@@ -154,11 +154,20 @@ def qobuz_format_label_from_bit_depth_sample_rate(
     return f"{depth}-bit / {_format_sample_rate_hz(rate_hz)}"
 
 
+_QOBUZ_FORMAT_CODECS: dict[int, str] = {
+    5: "mp3",
+    6: "flac",
+    7: "flac",
+    27: "flac",
+}
+
+
 def stream_file_metadata(
     *,
     bit_depth: int | float | str | None = None,
     sample_rate_hz: int | float | str | None = None,
     channels: int | None = 2,
+    codec: str | None = None,
 ) -> FileMetadata | None:
     """Build output-profile metadata from a streaming API payload."""
     try:
@@ -166,11 +175,15 @@ def stream_file_metadata(
     except (TypeError, ValueError):
         depth = None
     rate_hz = _normalize_qobuz_sample_rate_hz(sample_rate_hz)
-    if depth is None and rate_hz is None:
+    codec_key = (codec or "").strip().casefold() or None
+    if depth is None and rate_hz is None and codec_key is None:
         return None
+    if codec_key is None:
+        # Depth/rate without an explicit codec imply a lossless FLAC profile.
+        codec_key = "flac"
     return FileMetadata(
         path="",
-        codec="flac",
+        codec=codec_key,
         duration_sec=None,
         sample_rate=rate_hz,
         bit_depth=depth,
@@ -179,16 +192,33 @@ def stream_file_metadata(
 
 
 def qobuz_stream_file_metadata(stream: dict) -> FileMetadata | None:
+    codec: str | None = None
+    raw_format = stream.get("format_id")
+    if raw_format is not None:
+        try:
+            format_id = int(raw_format)
+        except (TypeError, ValueError):
+            format_id = None
+        if format_id is not None:
+            codec = _QOBUZ_FORMAT_CODECS.get(format_id)
     return stream_file_metadata(
         bit_depth=stream.get("bit_depth"),
         sample_rate_hz=stream.get("sampling_rate"),
+        codec=codec,
     )
 
 
 def tidal_stream_file_metadata(payload: dict) -> FileMetadata | None:
+    quality = _normalize_tidal_quality_key(payload.get("audioQuality"))
+    codec: str | None = None
+    if quality in _LOSSLESS_TIDAL_QUALITIES:
+        codec = "flac"
+    elif quality in {"LOW", "HIGH"}:
+        codec = "aac"
     return stream_file_metadata(
         bit_depth=payload.get("bitDepth"),
         sample_rate_hz=payload.get("sampleRate"),
+        codec=codec,
     )
 
 

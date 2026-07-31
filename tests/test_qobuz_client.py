@@ -298,11 +298,13 @@ class TestQobuzGetFileUrlNegotiation(unittest.TestCase):
                     "url": "https://stream.example/44",
                     "bit_depth": 16,
                     "sampling_rate": 44.1,
+                    "format_id": format_id,
                 }
             return {
                 "url": "https://stream.example/96",
                 "bit_depth": 24,
                 "sampling_rate": 96,
+                "format_id": format_id,
             }
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -318,6 +320,71 @@ class TestQobuzGetFileUrlNegotiation(unittest.TestCase):
         self.assertEqual(calls, [27, 7])
         self.assertEqual(stream["sampling_rate"], 96)
         self.assertEqual(stream["bit_depth"], 24)
+        self.assertEqual(stream["format_id"], 7)
+
+    def test_hi_res_preference_keeps_cd_flac_not_mp3(self) -> None:
+        """CD-only catalog must not fall through to format_id 5 under hi-res preference."""
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        preference = playback_preference_from_shell(frozenset())
+        calls: list[int] = []
+
+        def fake_request(track_id: str, *, format_id: int) -> dict:
+            calls.append(format_id)
+            if format_id == 5:
+                return {
+                    "url": "https://stream.example/mp3",
+                    "bit_depth": 16,
+                    "sampling_rate": 44.1,
+                    "format_id": format_id,
+                }
+            return {
+                "url": f"https://stream.example/flac-{format_id}",
+                "bit_depth": 16,
+                "sampling_rate": 44.1,
+                "format_id": format_id,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "qobuz.json"
+            client = QobuzClient(session, app_id="1", app_secret="secret")
+            client._user_auth_token = "token"  # noqa: SLF001
+            with patch.object(client, "_request_file_url", side_effect=fake_request):
+                stream = client._get_file_url(  # noqa: SLF001
+                    "12345",
+                    playback_preference=preference,
+                )
+
+        self.assertNotEqual(stream["format_id"], 5)
+        self.assertEqual(stream["format_id"], 27)
+        self.assertTrue(str(stream["url"]).endswith("/flac-27"))
+        # MP3 candidate skipped once CD FLAC is known.
+        self.assertEqual(calls, [27, 7, 6])
+
+    def test_request_file_url_stamps_format_id(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "qobuz.json"
+            client = QobuzClient(session, app_id="1", app_secret="secret")
+            client._user_auth_token = "token"  # noqa: SLF001
+            with patch.object(
+                client,
+                "_api_get",
+                return_value={
+                    "url": "https://stream.example/mp3",
+                    "mime_type": "audio/mpeg",
+                },
+            ) as api_get:
+                stream = client._request_file_url("99", format_id=5)  # noqa: SLF001
+
+        api_get.assert_called_once()
+        self.assertEqual(stream["url"], "https://stream.example/mp3")
+        self.assertEqual(stream["format_id"], 5)
 
 
 class TestUserFacingApiError(unittest.TestCase):

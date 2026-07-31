@@ -188,6 +188,26 @@ class PlaybackQualityTests(unittest.TestCase):
         assert meta is not None
         self.assertEqual(meta.sample_rate, 44100)
         self.assertEqual(meta.bit_depth, 24)
+        self.assertEqual(meta.codec, "flac")
+
+    def test_qobuz_stream_file_metadata_mp3_format_id(self) -> None:
+        meta = qobuz_stream_file_metadata({"format_id": 5, "url": "https://x/a"})
+        assert meta is not None
+        self.assertEqual(meta.codec, "mp3")
+        self.assertIsNone(meta.sample_rate)
+        self.assertIsNone(meta.bit_depth)
+
+    def test_qobuz_stream_file_metadata_flac_format_ids(self) -> None:
+        for format_id in (6, 7, 27):
+            meta = qobuz_stream_file_metadata(
+                {
+                    "format_id": format_id,
+                    "bit_depth": 16,
+                    "sampling_rate": 44.1,
+                }
+            )
+            assert meta is not None
+            self.assertEqual(meta.codec, "flac", format_id)
 
     def test_tidal_stream_file_metadata_uses_hz(self) -> None:
         meta = tidal_stream_file_metadata(
@@ -196,6 +216,18 @@ class PlaybackQualityTests(unittest.TestCase):
         assert meta is not None
         self.assertEqual(meta.sample_rate, 44100)
         self.assertEqual(meta.bit_depth, 16)
+        self.assertEqual(meta.codec, "flac")
+
+    def test_tidal_stream_file_metadata_lossy_without_depth(self) -> None:
+        for quality in ("HIGH", "LOW", "AUDIOQUALITY.HIGH"):
+            meta = tidal_stream_file_metadata({"audioQuality": quality})
+            assert meta is not None
+            self.assertEqual(meta.codec, "aac", quality)
+
+    def test_stream_file_metadata_codec_only(self) -> None:
+        meta = stream_file_metadata(codec="mp3")
+        assert meta is not None
+        self.assertEqual(meta.codec, "mp3")
 
     def test_stream_file_metadata_returns_none_without_fields(self) -> None:
         self.assertIsNone(stream_file_metadata())
