@@ -254,10 +254,9 @@ lyrics, streaming source badges in browse views.
 
 | Page | Contents |
 |------|----------|
-| **Application** | New Releases cutoff (days) — local, TIDAL, and Qobuz new-release selection |
+| **Application** | New Releases cutoff (days); **Downloads folder** for Save to disk (not a library Source unless the user adds it under Local files); Diagnostics log path |
 | **Sources** | **Local files:** music folders, scan library. **Streaming:** TIDAL sign-in/out (OAuth via browser); Qobuz App ID/Secret, save credentials, email/password sign-in/out |
 | **Audio** | Output device dropdown (PipeWire/Pulse sinks, bit-perfect potential labels); allow software-volume fallback when no sink control |
-| **Diagnostics** | Log file path (copy button) |
 
 **Unifying principle:** Local files and streaming services are both **sources** of music.
 The **Sources** page groups local folders and streaming accounts; credentials and session
@@ -602,9 +601,14 @@ README includes a user-facing [disclaimer](../README.md#streaming-disclaimer).
 
 **Save to disk** (right-click release/track → Save to disk…) resolves the same stream
 URLs used for playback, stages bytes under `{data_dir}/download-cache/`, tags the file,
-then atomically renames into the chosen folder. Paths under a configured music folder
-are indexed via **`enqueue_incremental_scan`** (not a full-library rescan). TIDAL
-DASH/MPD streams are remuxed with **ffmpeg** (`-c copy`). See issue #68.
+then atomically renames into the configured **Downloads folder** (`download_folder` in
+config / Settings → Application). That folder is **not** a music Source by default; Tunes
+does not move files into other library roots. Paths under a configured music folder
+(e.g. if the user later adds the downloads folder under Sources) are indexed via
+**`enqueue_incremental_scan`** (not a full-library rescan). Enabling **Watch** on that
+Source can surface tracks as each file finishes, including incomplete albums. First use
+(or an unset/unwritable folder) opens a folder picker and persists the choice. TIDAL
+DASH/MPD streams are remuxed with **ffmpeg**. See issues #68 and #81.
 
 **TIDAL** and **Qobuz** backends are implemented in `core/backends/` with OAuth or
 account login, federated search, stream URL resolution at play time, and New Releases /
