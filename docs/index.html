@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tunes — music from your files and streaming</title>
+  <meta name="description" content="Tunes is a free and open-source music app for Linux: search, discover, and play from your own files and streaming subscriptions (Qobuz, TIDAL)." />
+  <link rel="icon" href="assets/tunes-player.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:ital,wght@0,400;0,600;0,700;1,400&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg-0: #0e1218;
+      --bg-1: #151b24;
+      --bg-2: #1c2430;
+      --ink: #e8eef6;
+      --ink-muted: #9aa8ba;
+      --accent: #3d8bfd;
+      --accent-deep: #1c71d8;
+      --accent-soft: rgba(61, 139, 253, 0.18);
+      --line: rgba(232, 238, 246, 0.12);
+      --radius: 14px;
+      --font: "Source Sans 3", system-ui, sans-serif;
+      --max: 68rem;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: var(--font);
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 700px at 78% -10%, rgba(28, 113, 216, 0.28), transparent 55%),
+        radial-gradient(900px 600px at -10% 20%, rgba(234, 98, 234, 0.12), transparent 50%),
+        linear-gradient(180deg, var(--bg-0) 0%, var(--bg-1) 45%, var(--bg-0) 100%);
+      background-attachment: fixed;
+      line-height: 1.55;
+      min-height: 100vh;
+    }
+
+    a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 0.18em; }
+    a:hover { color: #7eb6ff; }
+
+    .wrap {
+      width: min(100% - 2.5rem, var(--max));
+      margin-inline: auto;
+    }
+
+    /* —— Hero —— */
+    .hero {
+      min-height: 100svh;
+      display: grid;
+      align-content: start;
+      padding-top: clamp(1.5rem, 4vw, 2.5rem);
+      padding-bottom: 2rem;
+      overflow: clip;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.75rem;
+      font-family: var(--font);
+      font-weight: 700;
+      font-size: clamp(2.4rem, 6vw, 3.75rem);
+      letter-spacing: -0.02em;
+      line-height: 1;
+      color: var(--ink);
+      text-decoration: none;
+      opacity: 0;
+      animation: rise 0.8s ease 0.05s forwards;
+    }
+
+    .brand img {
+      width: clamp(2.6rem, 6vw, 3.5rem);
+      height: auto;
+      border-radius: 22%;
+      box-shadow: 0 8px 28px rgba(28, 113, 216, 0.35);
+    }
+
+    .hero-copy {
+      margin-top: clamp(1.25rem, 3vw, 2rem);
+      max-width: 36rem;
+      opacity: 0;
+      animation: rise 0.85s ease 0.18s forwards;
+    }
+
+    .hero-copy h1 {
+      font-family: var(--font);
+      font-weight: 600;
+      font-size: clamp(1.35rem, 2.8vw, 1.85rem);
+      letter-spacing: -0.01em;
+      line-height: 1.25;
+      margin-bottom: 0.65rem;
+    }
+
+    .hero-copy p {
+      color: var(--ink-muted);
+      font-size: clamp(1.05rem, 2vw, 1.2rem);
+      max-width: 32rem;
+    }
+
+    .cta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      margin-top: 1.5rem;
+      opacity: 0;
+      animation: rise 0.85s ease 0.32s forwards;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.45rem;
+      font-family: var(--font);
+      font-weight: 600;
+      font-size: 1rem;
+      padding: 0.7rem 1.2rem;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      text-decoration: none;
+      transition: transform 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+    }
+
+    .btn:hover { transform: translateY(-1px); }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+      color: #fff;
+      box-shadow: 0 10px 28px rgba(28, 113, 216, 0.35);
+    }
+
+    .btn-primary:hover { color: #fff; }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--ink);
+      border-color: var(--line);
+    }
+
+    .btn-ghost:hover {
+      border-color: rgba(232, 238, 246, 0.28);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--ink);
+    }
+
+    .hero-visual {
+      margin-top: clamp(1.75rem, 4vw, 2.75rem);
+      position: relative;
+      opacity: 0;
+      animation: rise-soft 1s ease 0.4s forwards;
+    }
+
+    .hero-visual::before {
+      content: "";
+      position: absolute;
+      inset: 12% -8% auto;
+      height: 70%;
+      background: radial-gradient(ellipse at center, rgba(61, 139, 253, 0.35), transparent 70%);
+      filter: blur(20px);
+      z-index: 0;
+      pointer-events: none;
+      animation: pulse 6s ease-in-out infinite;
+    }
+
+    .hero-visual img {
+      position: relative;
+      z-index: 1;
+      display: block;
+      width: 100%;
+      height: auto;
+      border-radius: var(--radius) var(--radius) 0 0;
+      border: 1px solid var(--line);
+      border-bottom: none;
+      box-shadow: 0 30px 80px rgba(0, 0, 0, 0.45);
+    }
+
+    /* —— Sections —— */
+    section {
+      padding: clamp(3rem, 8vw, 5.5rem) 0;
+      border-top: 1px solid var(--line);
+    }
+
+    section h2 {
+      font-family: var(--font);
+      font-weight: 700;
+      font-size: clamp(1.5rem, 3vw, 2rem);
+      letter-spacing: -0.01em;
+      margin-bottom: 0.5rem;
+    }
+
+    section > .wrap > .lede {
+      color: var(--ink-muted);
+      font-size: 1.1rem;
+      max-width: 38rem;
+      margin-bottom: 1.75rem;
+    }
+
+    .feature-list {
+      list-style: none;
+      display: grid;
+      gap: 0.85rem;
+      max-width: 40rem;
+    }
+
+    .feature-list li {
+      position: relative;
+      padding-left: 1.35rem;
+      color: var(--ink);
+      font-size: 1.05rem;
+    }
+
+    .feature-list li::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0.55em;
+      width: 0.45rem;
+      height: 0.45rem;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 0 4px var(--accent-soft);
+    }
+
+    .install-box {
+      margin-top: 0.25rem;
+      padding: 1.25rem 1.35rem;
+      background: var(--bg-2);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      max-width: 42rem;
+    }
+
+    .install-box p { margin-bottom: 0.85rem; color: var(--ink-muted); }
+    .install-box p:last-child { margin-bottom: 0; }
+
+    pre {
+      background: #0a0e14;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 0.95rem 1.1rem;
+      overflow-x: auto;
+      font-size: 0.95rem;
+      line-height: 1.45;
+      color: #c9d7ea;
+      margin: 0.85rem 0 1rem;
+    }
+
+    .note {
+      font-size: 0.98rem;
+      color: var(--ink-muted);
+      max-width: 42rem;
+    }
+
+    .disclaimer {
+      color: var(--ink-muted);
+      font-size: 0.98rem;
+      max-width: 42rem;
+    }
+
+    .disclaimer p + p { margin-top: 0.85rem; }
+
+    footer {
+      border-top: 1px solid var(--line);
+      padding: 2rem 0 2.75rem;
+      color: var(--ink-muted);
+      font-size: 0.95rem;
+    }
+
+    footer .wrap {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem 1.5rem;
+      justify-content: space-between;
+      align-items: baseline;
+    }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(18px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes rise-soft {
+      from { opacity: 0; transform: translateY(28px) scale(0.985); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 0.55; transform: scale(1); }
+      50% { opacity: 0.9; transform: scale(1.04); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .brand, .hero-copy, .cta-row, .hero-visual,
+      .hero-visual::before {
+        animation: none !important;
+        opacity: 1 !important;
+        transform: none !important;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .wrap { width: min(100% - 1.5rem, var(--max)); }
+      .btn { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="wrap">
+      <a class="brand" href="./">
+        <img src="assets/tunes-player.svg" width="56" height="56" alt="" />
+        Tunes
+      </a>
+
+      <div class="hero-copy">
+        <h1>One place for your music</h1>
+        <p>Search, discover, and play from your own files and streaming subscriptions — free and open source for Linux, with a native GNOME look.</p>
+      </div>
+
+      <div class="cta-row">
+        <a class="btn btn-primary" href="https://github.com/mbrennwa/tunes-player/releases">Download .deb</a>
+        <a class="btn btn-ghost" href="https://github.com/mbrennwa/tunes-player">View on GitHub</a>
+      </div>
+
+      <div class="hero-visual">
+        <img
+          src="assets/tunes-player.png"
+          width="1920"
+          height="1080"
+          alt="Tunes Player showing a grid of album covers with search, source filters, and playback controls"
+        />
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section id="discover" aria-labelledby="discover-heading">
+      <div class="wrap">
+        <h2 id="discover-heading">Discover and browse</h2>
+        <p class="lede">Local library and streaming catalogs in the same app — without switching tools.</p>
+        <ul class="feature-list">
+          <li>One search across your library and signed-in streaming catalogs</li>
+          <li><strong>New Releases</strong> and <strong>Suggest Music</strong> for discovery</li>
+          <li>Browse by release — grid view and detail pages with artwork</li>
+          <li>Filter and sort the current view</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="playback" aria-labelledby="playback-heading">
+      <div class="wrap">
+        <h2 id="playback-heading">Playback and audio quality</h2>
+        <p class="lede">Straightforward controls, with audiophile-friendly local playback when you want it.</p>
+        <ul class="feature-list">
+          <li>Play, pause, skip, and manage a queue from the Now Playing bar</li>
+          <li><strong>Bit-perfect playback</strong> — Tunes passes the original music data from the source to the playback device</li>
+          <li>Hardware volume on the sound device where possible, software volume as a fallback</li>
+          <li>The app shows honestly whether playback is bit-perfect or not</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="install" aria-labelledby="install-heading">
+      <div class="wrap">
+        <h2 id="install-heading">Install</h2>
+        <p class="lede">On Debian 12+, Ubuntu 24.04+, or similar DEB-based distros.</p>
+        <div class="install-box">
+          <p>Download the latest <code>tunes-player_*.deb</code> from
+            <a href="https://github.com/mbrennwa/tunes-player/releases">GitHub Releases</a>, then:</p>
+          <pre><code>sudo apt install ./path/to/tunes-player_*.deb</code></pre>
+          <p><code>apt</code> installs dependencies automatically. After install, <strong>Tunes</strong> appears in the application menu.</p>
+        </div>
+        <p class="note" style="margin-top: 1.25rem;">
+          Add music folders in <strong>Settings → Sources</strong>, and sign in to TIDAL or Qobuz to enable streaming.
+          For Qobuz, enter an App ID and App Secret in Settings, then sign in with your account.
+          Qobuz did not provide these to the Tunes project, but
+          <code>ID=942852567</code> and <code>secret=761730d3f95e4af09ac63b9a37ccc96a</code>
+          as used by other open-source tools works fine.
+        </p>
+        <p class="note" style="margin-top: 0.85rem;">
+          To build or run from source, see
+          <a href="https://github.com/mbrennwa/tunes-player/blob/main/docs/ARCHITECTURE.md">docs/ARCHITECTURE.md</a>.
+        </p>
+      </div>
+    </section>
+
+    <section id="disclaimer" aria-labelledby="disclaimer-heading">
+      <div class="wrap">
+        <h2 id="disclaimer-heading">Streaming disclaimer</h2>
+        <div class="disclaimer">
+          <p>
+            Tunes is <strong>not affiliated with Qobuz, TIDAL, or any other streaming provider</strong>.
+            Streaming requires your own paid subscriptions where applicable. Features can break when providers
+            change authentication or terms. Use at your own responsibility and in compliance with each service's
+            terms of use.
+          </p>
+          <p>
+            <strong>Save to disk</strong> uses the same streaming endpoints as playback (not an official
+            download/purchase API). Saving streams may conflict with a provider's terms; you remain responsible
+            for lawful use. Some TIDAL tracks are delivered as DASH/MPD and require <strong>ffmpeg</strong> on
+            your <code>PATH</code> to remux into a single file.
+          </p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <p>GPL-3.0-or-later — see <a href="https://github.com/mbrennwa/tunes-player/blob/main/LICENSE">LICENSE</a>.</p>
+      <p><a href="https://github.com/mbrennwa/tunes-player">mbrennwa/tunes-player</a></p>
+    </div>
+  </footer>
+</body>
+</html>
