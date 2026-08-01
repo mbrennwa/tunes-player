@@ -620,8 +620,8 @@ and start when the active job finishes (or is cancelled).
 
 **Downloads menu (#83):** a header button left of Settings opens a Firefox-style popover
 listing **Ongoing** (active job + progress/cancel), **Upcoming** (queued jobs, removable),
-and **Completed** (in-session history of finished/failed jobs, cleared on quit). Toasts
-remain as secondary feedback.
+and **Completed** (in-session history of finished/failed jobs, cleared on quit). Routine
+status is only in that menu; toasts are reserved for Save-to-disk **errors**.
 
 **Already on disk (#68):** before starting a job, if the release appears in the local
 library (`ids.release_id` / casefold search) or files already exist under the Downloads
