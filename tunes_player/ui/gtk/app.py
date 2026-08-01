@@ -44,6 +44,7 @@ from tunes_player.core.shell_state import (
 from tunes_player.platform.linux.audio import create_volume_controller
 from tunes_player.ui.gtk.art import ArtLoader
 from tunes_player.ui.gtk.errors import attach_error_toasts, show_error_toast
+from tunes_player.ui.gtk.downloads_menu import attach_downloads_menu
 from tunes_player.ui.gtk.save_to_disk_menu import attach_download_toasts
 from tunes_player.ui.gtk.now_playing import NowPlayingBar, attach_media_keys
 from tunes_player.ui.gtk.preferences import PreferencesWindow
@@ -234,10 +235,13 @@ class TunesWindow(Adw.ApplicationWindow):
         self._back_btn.connect("clicked", self._on_nav_back)
         self._header.pack_start(self._back_btn)
 
+        # pack_end places the first child rightmost; pack settings first so downloads
+        # sits immediately left of it.
         settings_btn = Gtk.Button(icon_name="emblem-system-symbolic")
         settings_btn.set_tooltip_text("Settings")
         settings_btn.connect("clicked", self._open_preferences)
         self._header.pack_end(settings_btn)
+        self._downloads_menu = attach_downloads_menu(self._header, self._service)
 
         shell_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         shell_column.set_vexpand(True)

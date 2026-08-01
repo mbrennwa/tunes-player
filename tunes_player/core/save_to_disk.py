@@ -70,6 +70,67 @@ class ExistingLocalMatch:
     label: str
 
 
+@dataclass(frozen=True, slots=True)
+class PendingDownloadJob:
+    """In-memory queued Save-to-disk job (not persisted across quit)."""
+
+    job_id: str
+    dest_dir: str
+    track_ids: tuple[str, ...]
+    tracks: tuple[Track, ...]
+    label: str
+    enqueued_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedDownload:
+    """In-session finished download (cleared on app quit)."""
+
+    job_id: str
+    label: str
+    track_count: int
+    dest_dir: str
+    finished_ok: bool
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DownloadJobInfo:
+    """UI-facing row for the downloads menu."""
+
+    job_id: str
+    label: str
+    track_count: int
+    dest_dir: str
+    status: str  # "active" | "pending" | "completed" | "failed"
+    progress: tuple[int, int, str] | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DownloadJobsSnapshot:
+    active: DownloadJobInfo | None
+    pending: tuple[DownloadJobInfo, ...]
+    completed: tuple[DownloadJobInfo, ...]
+
+
+def download_job_label(tracks: Sequence[Track]) -> str:
+    """Human-readable label for a save job (album or track)."""
+    known = [t for t in tracks if t is not None]
+    if not known:
+        return "Download"
+    releases = {t.release_title for t in known if t.release_title}
+    if len(releases) == 1:
+        release = next(iter(releases))
+        artists = {t.artist_name for t in known if t.artist_name}
+        if len(artists) == 1:
+            return f"{next(iter(artists))} – {release}"
+        return str(release)
+    if len(known) == 1:
+        return known[0].title
+    return f"{len(known)} tracks"
+
+
 @dataclass
 class DownloadJobManifest:
     version: int
@@ -313,6 +374,28 @@ def build_track_path(
     else:
         filename = f"{number:02d} - {title}{suffix}"
     return Path(dest_root) / artist / album / filename
+
+
+def album_folder_for_save(
+    dest_root: Path | str,
+    *,
+    tracks: Sequence[Track] = (),
+    saved_paths: Sequence[Path] = (),
+) -> Path:
+    """Directory containing the album files (``Artist/Album``), not the Downloads root."""
+    for path in saved_paths:
+        parent = Path(path).parent
+        try:
+            if parent.is_dir():
+                return parent.resolve()
+        except OSError:
+            return parent
+    for track in tracks:
+        if track is None:
+            continue
+        # Extension is irrelevant; we only need Artist/Album.
+        return build_track_path(Path(dest_root), track, ".flac").parent
+    return Path(dest_root)
 
 
 def destination_file_exists(

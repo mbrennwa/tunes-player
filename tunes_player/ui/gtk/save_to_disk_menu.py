@@ -26,6 +26,7 @@ from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.errors import show_error_toast, show_toast
 from tunes_player.ui.gtk.release_label_menu import ReleaseLabelEditor
 
+_PROGRESS_TOAST_TIMEOUT_SEC = 5
 STREAMING_SOURCES = frozenset({Source.TIDAL, Source.QOBUZ})
 
 
@@ -163,10 +164,6 @@ def begin_save_tracks(
     toast_overlay: object | None,
     parent_window: Gtk.Window | None,
 ) -> None:
-    if service.is_saving_to_disk():
-        if toast_overlay is not None:
-            show_error_toast(toast_overlay, "A download is already in progress.")
-        return
     streaming = [t for t in tracks if is_streaming_source(t.source)]
     if not streaming:
         if toast_overlay is not None:
@@ -204,34 +201,79 @@ def begin_save_tracks(
 
 
 def attach_download_toasts(overlay: object, service: PlayerService) -> None:
-    """Show save-to-disk progress and results on an Adw.ToastOverlay."""
+    """Show save-to-disk progress and results on an Adw.ToastOverlay.
+
+    Progress uses a single reusable toast so Cancel does not leave a queue of
+    ``Saving N/M`` toasts still popping up.
+    """
+    progress_toast: Adw.Toast | None = None
+
+    def _clear_progress_toast() -> None:
+        nonlocal progress_toast
+        if progress_toast is not None:
+            progress_toast.dismiss()
+            progress_toast = None
+
+    def _on_progress_dismissed(toast: Adw.Toast) -> None:
+        nonlocal progress_toast
+        if progress_toast is toast:
+            progress_toast = None
+
+    def _show_progress(message: str) -> None:
+        nonlocal progress_toast
+        if progress_toast is not None:
+            progress_toast.set_title(message)
+            return
+        toast = Adw.Toast.new(message)
+        toast.set_timeout(0)  # stay until replaced, finished, or cancelled
+        toast.connect("dismissed", _on_progress_dismissed)
+        progress_toast = toast
+        overlay.add_toast(toast)  # type: ignore[union-attr]
+
+    def _show_final(message: str, *, error: bool = False) -> None:
+        _clear_progress_toast()
+        if error:
+            show_error_toast(overlay, message)  # type: ignore[arg-type]
+        else:
+            toast = Adw.Toast.new(message)
+            toast.set_timeout(_PROGRESS_TOAST_TIMEOUT_SEC)
+            try:
+                toast.set_priority(Adw.ToastPriority.HIGH)
+            except (AttributeError, TypeError):
+                pass
+            overlay.add_toast(toast)  # type: ignore[union-attr]
 
     def on_event(event: str) -> bool:
         if event == "download_resumed":
-            show_toast(overlay, "Resuming download…")
+            _show_progress("Resuming download…")
         elif event == "download_started":
-            show_toast(overlay, "Saving to disk…")
+            _show_progress("Saving to disk…")
+        elif event == "download_queued":
+            show_toast(overlay, "Download queued")  # type: ignore[arg-type]
         elif event == "download_progress":
+            if service.is_save_to_disk_cancel_requested():
+                _clear_progress_toast()
+                return False
             progress = service.download_progress
-            if progress is not None:
-                current, total, title = progress
-                show_toast(overlay, f"Saving {current}/{total}: {title}")
+            if progress is None:
+                return False
+            current, total, title = progress
+            _show_progress(f"Saving {current}/{total}: {title}")
+        elif event == "download_cancelling":
+            _clear_progress_toast()
         elif event == "download_finished":
             count = service.download_saved_count
             err = service.download_last_error
             if err:
-                show_error_toast(overlay, err)
+                _show_final(err, error=True)
             else:
-                show_toast(
-                    overlay,
-                    f"Saved {count} track{'s' if count != 1 else ''}.",
-                )
+                _show_final(f"Saved {count} track{'s' if count != 1 else ''}.")
         elif event == "download_cancelled":
-            show_toast(overlay, "Download cancelled")
+            _show_final("Download cancelled")
         elif event == "download_error":
-            show_error_toast(
-                overlay,
+            _show_final(
                 service.download_last_error or "Save to disk failed.",
+                error=True,
             )
         return False
 

@@ -10,6 +10,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
@@ -47,8 +48,12 @@ from tunes_player.core.save_to_disk import (
     STATUS_FAILED,
     STATUS_INTERRUPTED,
     STATUS_RUNNING,
+    CompletedDownload,
+    DownloadJobInfo,
     DownloadJobManifest,
+    DownloadJobsSnapshot,
     ExistingLocalMatch,
+    PendingDownloadJob,
     SaveCancelled,
     SaveToDiskError,
     StagedTrack,
@@ -58,6 +63,8 @@ from tunes_player.core.save_to_disk import (
     discard_download_job,
     download_cache_dir,
     download_https,
+    download_job_label,
+    album_folder_for_save,
     fetch_cover_bytes,
     find_existing_local_match,
     find_staged_file,
@@ -286,6 +293,10 @@ class PlayerService:
         self._download_persist_on_cancel = False
         self._download_active_job_dir: Path | None = None
         self._download_active_manifest: DownloadJobManifest | None = None
+        self._download_active_label: str = ""
+        self._download_pending: deque[PendingDownloadJob] = deque()
+        self._download_completed: deque[CompletedDownload] = deque(maxlen=20)
+        self._download_skip_drain = False
         self._playback_position_stalled = False
         self._soft_stall_message: str | None = None
         self._direct_alsa_soft_stall_attempts = 0
@@ -2207,6 +2218,15 @@ class PlayerService:
         thread = self._download_thread
         return thread is not None and thread.is_alive()
 
+    def is_save_to_disk_cancel_requested(self) -> bool:
+        """True after the user cancels the active job, until the worker exits."""
+        return self._download_cancel.is_set()
+
+    def has_download_activity(self) -> bool:
+        """True when a job is running or queued."""
+        with self._download_lock:
+            return self.is_saving_to_disk() or bool(self._download_pending)
+
     @property
     def download_progress(self) -> tuple[int, int, str] | None:
         return self._download_progress
@@ -2222,13 +2242,78 @@ class PlayerService:
     def set_download_folder(self, folder: str | None) -> None:
         self._config_manager.set_download_folder(folder)
 
-    def cancel_save_to_disk(self) -> None:
-        """Cancel the in-session download and discard staging (not resumable)."""
-        self._download_persist_on_cancel = False
-        self._download_cancel.set()
+    def download_jobs(self) -> DownloadJobsSnapshot:
+        """Snapshot of active, queued, and in-session completed downloads."""
+        with self._download_lock:
+            active: DownloadJobInfo | None = None
+            manifest = self._download_active_manifest
+            if self.is_saving_to_disk() and manifest is not None:
+                active = DownloadJobInfo(
+                    job_id=manifest.job_id,
+                    label=self._download_active_label or download_job_label(
+                        [deserialize_track(t) for t in manifest.tracks if isinstance(t, dict)]
+                    ),
+                    track_count=len(manifest.track_ids),
+                    dest_dir=manifest.dest_dir,
+                    status="active",
+                    progress=self._download_progress,
+                )
+            pending = tuple(
+                DownloadJobInfo(
+                    job_id=job.job_id,
+                    label=job.label,
+                    track_count=len(job.track_ids),
+                    dest_dir=job.dest_dir,
+                    status="pending",
+                )
+                for job in self._download_pending
+            )
+            completed = tuple(
+                DownloadJobInfo(
+                    job_id=item.job_id,
+                    label=item.label,
+                    track_count=item.track_count,
+                    dest_dir=item.dest_dir,
+                    status="completed" if item.finished_ok else "failed",
+                    error=item.error,
+                )
+                for item in self._download_completed
+            )
+            return DownloadJobsSnapshot(
+                active=active,
+                pending=pending,
+                completed=completed,
+            )
+
+    def cancel_save_to_disk(self, job_id: str | None = None) -> None:
+        """Cancel the active job (discard staging) or remove a queued job by id."""
+        with self._download_lock:
+            if job_id is not None:
+                for index, job in enumerate(self._download_pending):
+                    if job.job_id == job_id:
+                        del self._download_pending[index]
+                        self._emit("download_queued")
+                        return
+                manifest = self._download_active_manifest
+                if (
+                    manifest is None
+                    or manifest.job_id != job_id
+                    or not self.is_saving_to_disk()
+                ):
+                    return
+            self._download_persist_on_cancel = False
+            self._download_cancel.set()
+            self._download_progress = None
+            self._emit("download_cancelling")
 
     def pause_save_to_disk_for_quit(self) -> None:
-        """Stop the active download and persist it for resume on next start."""
+        """Stop the active download and persist it for resume on next start.
+
+        In-memory queued jobs are dropped (not persisted across quit).
+        """
+        with self._download_lock:
+            self._download_pending.clear()
+            self._download_skip_drain = True
         if not self.is_saving_to_disk():
             self._mark_active_download_interrupted()
             return
@@ -2274,39 +2359,54 @@ class PlayerService:
         tracks: list[Track] | None = None,
         dest_dir: str,
     ) -> None:
-        """Queue a save job for streaming tracks into dest_dir (up to 2 concurrent)."""
+        """Start or enqueue a save job for streaming tracks into dest_dir."""
         track_list = list(tracks or [])
         ids = [t.id for t in track_list] if track_list else [tid for tid in (track_ids or []) if tid]
         if not ids:
             raise SaveToDiskError("No tracks to save.")
         by_id = {t.id: t for t in track_list}
+        ordered_tracks = tuple(
+            by_id[tid]
+            if tid in by_id
+            else Track(
+                id=tid,
+                title=tid,
+                artist_name="Unknown Artist",
+                release_title=None,
+                source=Source.TIDAL
+                if tid.startswith("tidal:")
+                else Source.QOBUZ
+                if tid.startswith("qobuz:")
+                else Source.LOCAL,
+            )
+            for tid in ids
+        )
         dest = Path(dest_dir).expanduser()
         if not is_writable_dir(dest):
             raise SaveToDiskError(f"Folder is not writable: {dest}")
+        job = PendingDownloadJob(
+            job_id=uuid.uuid4().hex,
+            dest_dir=str(dest.resolve()),
+            track_ids=tuple(ids),
+            tracks=ordered_tracks,
+            label=download_job_label(ordered_tracks),
+            enqueued_at=time.time(),
+        )
         with self._download_lock:
             if self.is_saving_to_disk():
-                raise SaveToDiskError("A download is already in progress.")
-            self._download_cancel = threading.Event()
-            self._download_progress = None
-            self._download_last_error = None
-            self._download_saved_count = 0
-            self._download_persist_on_cancel = False
-            thread = threading.Thread(
-                target=self._run_save_to_disk_job,
-                args=(
-                    list(ids),
-                    str(dest.resolve()),
-                    by_id,
-                    None,
-                    None,
-                    [],
-                    False,
-                ),
-                name="tunes-save-to-disk",
-                daemon=True,
+                self._download_pending.append(job)
+                self._emit("download_queued")
+                return
+            self._begin_download_job_locked(
+                track_ids=list(job.track_ids),
+                dest_dir=job.dest_dir,
+                tracks_by_id={t.id: t for t in job.tracks},
+                job_id=job.job_id,
+                existing_job_dir=None,
+                completed_indices=[],
+                resumed=False,
+                label=job.label,
             )
-            self._download_thread = thread
-            thread.start()
         self._emit("download_started")
 
     def resume_interrupted_save_to_disk(self) -> bool:
@@ -2346,32 +2446,105 @@ class PlayerService:
                 ),
             )
         completed = sorted({int(i) for i in manifest.completed_indices if int(i) > 0})
+        label = download_job_label(
+            [by_id[tid] for tid in manifest.track_ids if tid in by_id]
+        )
         with self._download_lock:
             if self.is_saving_to_disk():
                 return False
-            self._download_cancel = threading.Event()
-            self._download_progress = None
-            self._download_last_error = None
-            self._download_saved_count = 0
-            self._download_persist_on_cancel = False
-            thread = threading.Thread(
-                target=self._run_save_to_disk_job,
-                args=(
-                    list(manifest.track_ids),
-                    str(Path(manifest.dest_dir).resolve()),
-                    by_id,
-                    manifest.job_id,
-                    job_dir,
-                    completed,
-                    True,
-                ),
-                name="tunes-save-to-disk",
-                daemon=True,
+            self._begin_download_job_locked(
+                track_ids=list(manifest.track_ids),
+                dest_dir=str(Path(manifest.dest_dir).resolve()),
+                tracks_by_id=by_id,
+                job_id=manifest.job_id,
+                existing_job_dir=job_dir,
+                completed_indices=completed,
+                resumed=True,
+                label=label,
             )
-            self._download_thread = thread
-            thread.start()
         self._emit("download_resumed")
         return True
+
+    def _begin_download_job_locked(
+        self,
+        *,
+        track_ids: list[str],
+        dest_dir: str,
+        tracks_by_id: dict[str, Track],
+        job_id: str | None,
+        existing_job_dir: Path | None,
+        completed_indices: list[int],
+        resumed: bool,
+        label: str,
+    ) -> None:
+        """Start the download worker. Caller must hold ``_download_lock``."""
+        self._download_cancel = threading.Event()
+        self._download_progress = None
+        self._download_last_error = None
+        self._download_saved_count = 0
+        self._download_persist_on_cancel = False
+        self._download_skip_drain = False
+        self._download_active_label = label
+        thread = threading.Thread(
+            target=self._run_save_to_disk_job,
+            args=(
+                list(track_ids),
+                dest_dir,
+                tracks_by_id,
+                job_id,
+                existing_job_dir,
+                completed_indices,
+                resumed,
+            ),
+            name="tunes-save-to-disk",
+            daemon=True,
+        )
+        self._download_thread = thread
+        thread.start()
+
+    def _record_completed_download(
+        self,
+        *,
+        job_id: str,
+        label: str,
+        track_count: int,
+        dest_dir: str,
+        finished_ok: bool,
+        error: str | None = None,
+    ) -> None:
+        with self._download_lock:
+            self._download_completed.appendleft(
+                CompletedDownload(
+                    job_id=job_id,
+                    label=label,
+                    track_count=track_count,
+                    dest_dir=dest_dir,
+                    finished_ok=finished_ok,
+                    error=error,
+                )
+            )
+
+    def _drain_download_queue(self) -> None:
+        """Start the next queued job if idle. Must not be called while holding the lock."""
+        with self._download_lock:
+            if self._download_skip_drain:
+                return
+            if self.is_saving_to_disk():
+                return
+            if not self._download_pending:
+                return
+            job = self._download_pending.popleft()
+            self._begin_download_job_locked(
+                track_ids=list(job.track_ids),
+                dest_dir=job.dest_dir,
+                tracks_by_id={t.id: t for t in job.tracks},
+                job_id=job.job_id,
+                existing_job_dir=None,
+                completed_indices=[],
+                resumed=False,
+                label=job.label,
+            )
+        self._emit("download_started")
 
     def _run_save_to_disk_job(
         self,
@@ -2471,6 +2644,10 @@ class PlayerService:
                             cancelled = True
                         return
                     active_labels[index] = label
+                    if self._download_cancel.is_set():
+                        cancelled = True
+                        active_labels.pop(index, None)
+                        return
                     progress_index = len(completed) + 1
                     self._download_progress = (progress_index, total, label)
                     self._emit("download_progress")
@@ -2529,6 +2706,9 @@ class PlayerService:
                             staged_item.dest_path,
                         )
                         saved_paths.append(final)
+                    # Do not publish progress after the user cancelled.
+                    if self._download_cancel.is_set():
+                        return
                     if active_labels:
                         next_label = next(iter(active_labels.values()))
                         self._download_progress = (
@@ -2556,6 +2736,14 @@ class PlayerService:
             persist = cancelled and self._download_persist_on_cancel
             # Errors win over sibling-stop cancel (album-atomic failure sets cancel
             # so the other worker aborts). Quit-persist still wins when no errors.
+            job_label = self._download_active_label or download_job_label(known_tracks)
+            open_folder = str(
+                album_folder_for_save(
+                    dest_dir,
+                    tracks=known_tracks,
+                    saved_paths=saved_paths,
+                )
+            )
             if cancelled and persist and not errors:
                 manifest.status = STATUS_INTERRUPTED
                 manifest.completed_indices = sorted(completed)
@@ -2574,6 +2762,14 @@ class PlayerService:
                     if saved_paths:
                         self._enqueue_saved_paths_scan(saved_paths)
                     discard_download_job(job_dir)
+                self._record_completed_download(
+                    job_id=resolved_job_id,
+                    label=job_label,
+                    track_count=len(track_ids),
+                    dest_dir=open_folder,
+                    finished_ok=False,
+                    error=errors[0],
+                )
                 self._emit("download_error")
             elif cancelled:
                 self._download_saved_count = len(saved_paths)
@@ -2588,6 +2784,20 @@ class PlayerService:
                 manifest.status = STATUS_COMPLETED
                 save_job_manifest(job_dir, manifest)
                 discard_download_job(job_dir)
+                open_folder = str(
+                    album_folder_for_save(
+                        dest_dir,
+                        tracks=known_tracks,
+                        saved_paths=saved_paths,
+                    )
+                )
+                self._record_completed_download(
+                    job_id=resolved_job_id,
+                    label=job_label,
+                    track_count=len(track_ids),
+                    dest_dir=open_folder,
+                    finished_ok=True,
+                )
                 self._emit("download_finished")
         finally:
             self._download_progress = None
@@ -2607,7 +2817,9 @@ class PlayerService:
                 else:
                     self._download_active_job_dir = None
                     self._download_active_manifest = None
-            self._download_persist_on_cancel = False
+                self._download_persist_on_cancel = False
+            # Drain next queued job unless quitting (skip_drain) or still busy.
+            self._drain_download_queue()
 
     def _dest_path_for_staged(
         self,

@@ -615,6 +615,13 @@ format allowed by the current shell quality filter (same `PlaybackPreference` ce
 playback).
 
 **Concurrency (#68):** at most **two** tracks download simultaneously within a job.
+Only **one job** runs at a time; further Save-to-disk actions are **queued in memory**
+and start when the active job finishes (or is cancelled).
+
+**Downloads menu (#83):** a header button left of Settings opens a Firefox-style popover
+listing **Ongoing** (active job + progress/cancel), **Upcoming** (queued jobs, removable),
+and **Completed** (in-session history of finished/failed jobs, cleared on quit). Toasts
+remain as secondary feedback.
 
 **Already on disk (#68):** before starting a job, if the release appears in the local
 library (`ids.release_id` / casefold search) or files already exist under the Downloads
@@ -625,11 +632,12 @@ anyway proceeds and still uses `unique_destination` (no overwrite).
 
 **Quit / resume (Firefox-like, #70):** closing or quitting while a job is active shows a
 Stay / Quit confirm. Quit stops the transfer and persists a `manifest.json` in the job
-dir (track ids, destination, completed indices). The next app start auto-resumes
-interrupted jobs (job-level: skip fully staged tracks; re-fetch the in-flight track).
+dir (track ids, destination, completed indices). **Queued (upcoming) jobs are dropped**
+on quit — they are not persisted. The next app start auto-resumes interrupted disk jobs
+(job-level: skip fully staged tracks; re-fetch the in-flight track).
 **Multi-track jobs** promote into Downloads only when every track stages successfully
 (album-atomic); partial albums are not left in the downloads tree. Single-track jobs
-promote immediately on success. See issues #68, #70, and #81.
+promote immediately on success. See issues #68, #70, #81, and #83.
 
 **TIDAL** and **Qobuz** backends are implemented in `core/backends/` with OAuth or
 account login, federated search, stream URL resolution at play time, and New Releases /
