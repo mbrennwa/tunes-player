@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -19,10 +20,12 @@ from tunes_player.core.save_to_disk import (
     ExistingLocalMatch,
     SaveCancelled,
     SaveToDiskError,
+    album_folder_for_save,
     build_track_path,
     cleanup_download_cache,
     destination_file_exists,
     download_https,
+    download_job_label,
     find_existing_local_match,
     infer_extension,
     is_mpd_uri,
@@ -905,6 +908,259 @@ class TestPlayerServiceSaveHook(unittest.TestCase):
                 self.assertEqual(len(jobs), 1)
                 self.assertEqual(jobs[0][1].status, STATUS_INTERRUPTED)
                 self.assertEqual(list(dest.rglob("*.flac")), [])
+
+    def test_download_job_label(self) -> None:
+        self.assertEqual(
+            download_job_label(
+                [
+                    _track(id="tidal:1", title="One", release_title="Album"),
+                    _track(id="tidal:2", title="Two", release_title="Album"),
+                ]
+            ),
+            "Artist – Album",
+        )
+        self.assertEqual(
+            download_job_label([_track(title="Solo", release_title=None)]),
+            "Solo",
+        )
+
+    def test_album_folder_for_save(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            track = _track(artist_name="Artist", release_title="Album")
+            file_path = build_track_path(root, track, ".flac")
+            file_path.parent.mkdir(parents=True)
+            file_path.write_bytes(b"x")
+            self.assertEqual(
+                album_folder_for_save(root, saved_paths=[file_path]),
+                file_path.parent.resolve(),
+            )
+            self.assertEqual(
+                album_folder_for_save(root, tracks=[track]),
+                root / "Artist" / "Album",
+            )
+
+    def test_second_job_queues_then_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "downloads"
+            dest.mkdir()
+            service, _cache = self._make_service(root, dest=dest)
+            first_started = threading.Event()
+            release_first = threading.Event()
+            second_started = threading.Event()
+            download_count = 0
+            count_lock = threading.Lock()
+
+            def gated_download(url, part, cancel_event=None):
+                nonlocal download_count
+                with count_lock:
+                    download_count += 1
+                    n = download_count
+                if n == 1:
+                    first_started.set()
+                    while not release_first.is_set():
+                        if cancel_event is not None and cancel_event.is_set():
+                            raise SaveCancelled()
+                        release_first.wait(0.05)
+                else:
+                    second_started.set()
+                if cancel_event is not None and cancel_event.is_set():
+                    raise SaveCancelled()
+                part.write_bytes(b"flac")
+
+            with mock.patch(
+                "tunes_player.core.services.download_https",
+                side_effect=gated_download,
+            ):
+                try:
+                    service.start_save_to_disk(
+                        tracks=[
+                            _track(
+                                id="tidal:1",
+                                title="A1",
+                                release_title="Album A",
+                                track_number=1,
+                            )
+                        ],
+                        dest_dir=str(dest),
+                    )
+                    self.assertTrue(first_started.wait(timeout=5))
+                    service.start_save_to_disk(
+                        tracks=[
+                            _track(
+                                id="tidal:2",
+                                title="B1",
+                                release_title="Album B",
+                                track_number=1,
+                            )
+                        ],
+                        dest_dir=str(dest),
+                    )
+                    snap = service.download_jobs()
+                    self.assertIsNotNone(snap.active)
+                    self.assertEqual(len(snap.pending), 1)
+                    self.assertEqual(snap.pending[0].label, "Artist – Album B")
+                    self.assertTrue(service.has_download_activity())
+                    release_first.set()
+                    self.assertTrue(second_started.wait(timeout=5))
+                    deadline = time.monotonic() + 10
+                    while service.is_saving_to_disk() and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    snap = service.download_jobs()
+                    self.assertIsNone(snap.active)
+                    self.assertEqual(snap.pending, ())
+                    self.assertEqual(len(snap.completed), 2)
+                    self.assertEqual(
+                        {c.label for c in snap.completed},
+                        {"Artist – Album A", "Artist – Album B"},
+                    )
+                    self.assertTrue(all(c.status == "completed" for c in snap.completed))
+                    finals = list(dest.rglob("*.flac"))
+                    self.assertEqual(len(finals), 2)
+                finally:
+                    release_first.set()
+                    service.shutdown()
+
+    def test_cancel_pending_does_not_stop_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "downloads"
+            dest.mkdir()
+            service, _cache = self._make_service(root, dest=dest)
+            first_started = threading.Event()
+            release_first = threading.Event()
+
+            def gated_download(url, part, cancel_event=None):
+                first_started.set()
+                while not release_first.is_set():
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise SaveCancelled()
+                    release_first.wait(0.05)
+                if cancel_event is not None and cancel_event.is_set():
+                    raise SaveCancelled()
+                part.write_bytes(b"flac")
+
+            with mock.patch(
+                "tunes_player.core.services.download_https",
+                side_effect=gated_download,
+            ):
+                try:
+                    service.start_save_to_disk(
+                        tracks=[_track(id="tidal:1", title="A1", release_title="A")],
+                        dest_dir=str(dest),
+                    )
+                    self.assertTrue(first_started.wait(timeout=5))
+                    service.start_save_to_disk(
+                        tracks=[_track(id="tidal:2", title="B1", release_title="B")],
+                        dest_dir=str(dest),
+                    )
+                    pending_id = service.download_jobs().pending[0].job_id
+                    service.cancel_save_to_disk(pending_id)
+                    snap = service.download_jobs()
+                    self.assertEqual(snap.pending, ())
+                    self.assertIsNotNone(snap.active)
+                    release_first.set()
+                    thread = service._download_thread
+                    assert thread is not None
+                    thread.join(timeout=10)
+                    self.assertEqual(service.download_saved_count, 1)
+                    self.assertEqual(len(list(dest.rglob("*.flac"))), 1)
+                finally:
+                    release_first.set()
+                    service.shutdown()
+
+    def test_cancel_active_starts_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "downloads"
+            dest.mkdir()
+            service, _cache = self._make_service(root, dest=dest)
+            first_started = threading.Event()
+            second_started = threading.Event()
+            seen: list[str] = []
+
+            def gated_download(url, part, cancel_event=None):
+                seen.append(Path(part).name)
+                if not first_started.is_set():
+                    first_started.set()
+                    while cancel_event is None or not cancel_event.is_set():
+                        first_started.wait(0.05)
+                    raise SaveCancelled()
+                second_started.set()
+                part.write_bytes(b"flac")
+
+            with mock.patch(
+                "tunes_player.core.services.download_https",
+                side_effect=gated_download,
+            ):
+                try:
+                    service.start_save_to_disk(
+                        tracks=[_track(id="tidal:1", title="A1", release_title="A")],
+                        dest_dir=str(dest),
+                    )
+                    self.assertTrue(first_started.wait(timeout=5))
+                    service.start_save_to_disk(
+                        tracks=[_track(id="tidal:2", title="B1", release_title="B")],
+                        dest_dir=str(dest),
+                    )
+                    active_id = service.download_jobs().active.job_id  # type: ignore[union-attr]
+                    service.cancel_save_to_disk(active_id)
+                    self.assertTrue(second_started.wait(timeout=5))
+                    deadline = time.monotonic() + 10
+                    while service.is_saving_to_disk() and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    snap = service.download_jobs()
+                    self.assertIsNone(snap.active)
+                    self.assertEqual(len(snap.completed), 1)
+                    self.assertEqual(snap.completed[0].label, "Artist – B")
+                    self.assertEqual(len(list(dest.rglob("*.flac"))), 1)
+                finally:
+                    service.shutdown()
+
+    def test_quit_clears_pending_and_persists_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "downloads"
+            dest.mkdir()
+            service, cache = self._make_service(root, dest=dest)
+            first_started = threading.Event()
+
+            def slow_download(url, part, cancel_event=None):
+                first_started.set()
+                while cancel_event is None or not cancel_event.is_set():
+                    first_started.wait(0.05)
+                raise SaveCancelled()
+
+            with mock.patch(
+                "tunes_player.core.services.download_https",
+                side_effect=slow_download,
+            ):
+                try:
+                    service.start_save_to_disk(
+                        tracks=[
+                            _track(id="tidal:1", title="A1", release_title="A"),
+                            _track(id="tidal:3", title="A2", release_title="A", track_number=2),
+                        ],
+                        dest_dir=str(dest),
+                    )
+                    self.assertTrue(first_started.wait(timeout=5))
+                    service.start_save_to_disk(
+                        tracks=[_track(id="tidal:2", title="B1", release_title="B")],
+                        dest_dir=str(dest),
+                    )
+                    self.assertEqual(len(service.download_jobs().pending), 1)
+                    service.pause_save_to_disk_for_quit()
+                    snap = service.download_jobs()
+                    self.assertEqual(snap.pending, ())
+                    self.assertFalse(service.is_saving_to_disk())
+                    jobs = list_interrupted_jobs(root)
+                    self.assertEqual(len(jobs), 1)
+                    self.assertEqual(jobs[0][1].status, STATUS_INTERRUPTED)
+                    self.assertTrue(cache.is_dir())
+                    self.assertEqual(list(dest.rglob("*.flac")), [])
+                finally:
+                    service.shutdown()
 
 
 if __name__ == "__main__":
