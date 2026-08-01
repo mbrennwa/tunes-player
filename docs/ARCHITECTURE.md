@@ -600,15 +600,22 @@ subscriptions** where required. Features can break when providers change auth or
 README includes a user-facing [disclaimer](../README.md#streaming-disclaimer).
 
 **Save to disk** (right-click release/track → Save to disk…) resolves the same stream
-URLs used for playback, stages bytes under `{data_dir}/download-cache/`, tags the file,
-then atomically renames into the configured **Downloads folder** (`download_folder` in
-config / Settings → Application). That folder is **not** a music Source by default; Tunes
-does not move files into other library roots. Paths under a configured music folder
-(e.g. if the user later adds the downloads folder under Sources) are indexed via
-**`enqueue_incremental_scan`** (not a full-library rescan). Enabling **Watch** on that
-Source can surface tracks as each file finishes, including incomplete albums. First use
-(or an unset/unwritable folder) opens a folder picker and persists the choice. TIDAL
-DASH/MPD streams are remuxed with **ffmpeg**. See issues #68 and #81.
+URLs used for playback, stages bytes under `{data_dir}/download-cache/{job_id}/` as
+`NNNN.ext.tunes-partial`, tags the file, then atomically renames into the configured
+**Downloads folder** (`download_folder` in config / Settings → Application). That folder
+is **not** a music Source by default; Tunes does not move files into other library roots.
+Paths under a configured music folder (e.g. if the user later adds the downloads folder
+under Sources) are indexed via **`enqueue_incremental_scan`** (not a full-library rescan).
+First use (or an unset/unwritable folder) opens a folder picker and persists the choice.
+TIDAL DASH/MPD streams are remuxed with **ffmpeg**.
+
+**Quit / resume (Firefox-like, #70):** closing or quitting while a job is active shows a
+Stay / Quit confirm. Quit stops the transfer and persists a `manifest.json` in the job
+dir (track ids, destination, completed indices). The next app start auto-resumes
+interrupted jobs (job-level: skip fully staged tracks; re-fetch the in-flight track).
+**Multi-track jobs** promote into Downloads only when every track stages successfully
+(album-atomic); partial albums are not left in the downloads tree. Single-track jobs
+promote immediately on success. See issues #68, #70, and #81.
 
 **TIDAL** and **Qobuz** backends are implemented in `core/backends/` with OAuth or
 account login, federated search, stream URL resolution at play time, and New Releases /

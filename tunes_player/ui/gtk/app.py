@@ -43,7 +43,7 @@ from tunes_player.core.shell_state import (
 )
 from tunes_player.platform.linux.audio import create_volume_controller
 from tunes_player.ui.gtk.art import ArtLoader
-from tunes_player.ui.gtk.errors import attach_error_toasts, show_error_toast, show_toast
+from tunes_player.ui.gtk.errors import attach_error_toasts, show_error_toast
 from tunes_player.ui.gtk.save_to_disk_menu import attach_download_toasts
 from tunes_player.ui.gtk.now_playing import NowPlayingBar, attach_media_keys
 from tunes_player.ui.gtk.preferences import PreferencesWindow
@@ -860,6 +860,11 @@ class TunesWindow(Adw.ApplicationWindow):
             GLib.source_remove(self._persist_timeout_id)
             self._persist_timeout_id = 0
         self._service.config.set_shell_state(self._shell_state_for_persist())
+        app = self.get_application()
+        request_quit = getattr(app, "request_quit", None) if app is not None else None
+        if callable(request_quit) and self._service.is_saving_to_disk():
+            request_quit()
+            return True
         return False
 
     def _refresh_cached_release_quality(self, releases: list[Release]) -> list[Release]:
@@ -1499,9 +1504,46 @@ def run() -> int:
         ),
     )
     mpris_service = None
+    quit_dialog_open = False
+    download_resume_attempted = False
 
     class TunesApplication(Adw.Application):
+        def request_quit(self) -> None:
+            """Quit after confirming when a Save-to-disk job is active."""
+            nonlocal quit_dialog_open
+            if quit_dialog_open:
+                return
+            if not service.is_saving_to_disk():
+                Adw.Application.quit(self)
+                return
+            quit_dialog_open = True
+            dialog = Adw.AlertDialog(
+                heading="Download in progress",
+                body=(
+                    "Tunes is still saving music to disk. Quitting stops the "
+                    "transfer for now; it will resume when Tunes starts again."
+                ),
+            )
+            dialog.add_response("stay", "Stay")
+            dialog.add_response("quit", "Quit")
+            dialog.set_default_response("stay")
+            dialog.set_close_response("stay")
+            dialog.set_response_appearance("quit", Adw.ResponseAppearance.DESTRUCTIVE)
+
+            def on_response(_dialog: Adw.AlertDialog, response: str) -> None:
+                nonlocal quit_dialog_open
+                quit_dialog_open = False
+                if response != "quit":
+                    return
+                service.pause_save_to_disk_for_quit()
+                Adw.Application.quit(self)
+
+            dialog.connect("response", on_response)
+            parent = self.get_active_window()
+            dialog.present(parent)
+
         def do_activate(self) -> None:  # noqa: N802 — GTK vfunc
+            nonlocal download_resume_attempted
             window = self.get_active_window()
             if window is None:
                 window = TunesWindow(application=self, service=service)
@@ -1509,6 +1551,9 @@ def run() -> int:
                     window.realize()
                 window.prepare_for_first_show()
             window.present()
+            if not download_resume_attempted:
+                download_resume_attempted = True
+                service.resume_interrupted_save_to_disk()
 
         def do_shutdown(self) -> None:  # noqa: N802 — GTK vfunc
             nonlocal mpris_service, folder_monitor
@@ -1516,13 +1561,7 @@ def run() -> int:
             if mpris_service is not None:
                 mpris_service.stop()
                 mpris_service = None
-            was_downloading = service.is_saving_to_disk()
             service.shutdown()
-            if was_downloading or service.consume_download_cancelled_on_shutdown():
-                window = self.get_active_window()
-                overlay = getattr(window, "_toast_overlay", None) if window else None
-                if overlay is not None:
-                    show_toast(overlay, "Download cancelled")
             Adw.Application.do_shutdown(self)
 
     app = TunesApplication(application_id="tunes.player")
@@ -1542,7 +1581,7 @@ def run() -> int:
     mpris_service = create_mpris_service(
         service,
         on_raise=_raise_app,
-        on_quit=app.quit,
+        on_quit=app.request_quit,
     )
     mpris_service.start()
 
@@ -1560,8 +1599,8 @@ def run() -> int:
     import signal
 
     def _quit_on_signal(*_args: object) -> bool:
-        app.quit()
-        return False
+        app.request_quit()
+        return GLib.SOURCE_CONTINUE
 
     GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, _quit_on_signal)
     GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, _quit_on_signal)
