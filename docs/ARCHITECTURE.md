@@ -618,8 +618,8 @@ playback).
 
 **Already on disk (#68):** before starting a job, if the release appears in the local
 library (`ids.release_id` / casefold search) or files already exist under the Downloads
-folder at the expected path, show **Skip / Download anyway / Cancel**. Skip and Cancel
-abort; Download anyway proceeds and still uses `unique_destination` (no overwrite).
+folder at the expected path, show **Cancel / Download anyway**. Cancel aborts; Download
+anyway proceeds and still uses `unique_destination` (no overwrite).
 
 **Deferred (#68):** hover download control on release tiles; playlist Save to disk.
 

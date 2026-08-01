@@ -348,7 +348,6 @@ def _prompt_existing_local(
         body=conflict_dialog_body(match),
     )
     dialog.add_response("cancel", "Cancel")
-    dialog.add_response("skip", "Skip")
     dialog.add_response("download_anyway", "Download anyway")
     dialog.set_default_response("cancel")
     dialog.set_close_response("cancel")
