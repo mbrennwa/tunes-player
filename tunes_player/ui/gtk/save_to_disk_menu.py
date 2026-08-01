@@ -7,16 +7,21 @@ from pathlib import Path
 
 import gi
 
+gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gio", "2.0")
 
-from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.models import Source, Track
 from tunes_player.core.release_quality import playback_preference_for_tier
 from tunes_player.core.release_quality_tiles import parse_quality_tier_suffix
-from tunes_player.core.save_to_disk import SaveToDiskError, is_writable_dir
+from tunes_player.core.save_to_disk import (
+    ExistingLocalMatch,
+    SaveToDiskError,
+    is_writable_dir,
+)
 from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.errors import show_error_toast, show_toast
 from tunes_player.ui.gtk.release_label_menu import ReleaseLabelEditor
@@ -170,22 +175,24 @@ def begin_save_tracks(
 
     dest = resolved_download_folder(service)
     if dest is not None:
-        _start_save(
+        _confirm_and_start_save(
             service,
             tracks=list(streaming),
             dest=dest,
             toast_overlay=toast_overlay,
+            parent_window=parent_window,
             persist_folder=False,
         )
         return
     choose_download_folder(
         parent_window=parent_window,
         initial=suggested_download_folder(service),
-        on_chosen=lambda path: _start_save(
+        on_chosen=lambda path: _confirm_and_start_save(
             service,
             tracks=list(streaming),
             dest=path,
             toast_overlay=toast_overlay,
+            parent_window=parent_window,
             persist_folder=True,
         ),
         on_unwritable=lambda path: (
@@ -290,6 +297,72 @@ def choose_download_folder(
         on_chosen(dest)
 
     dialog.select_folder(parent_window, None, _on_selected)
+
+
+def conflict_dialog_body(match: ExistingLocalMatch) -> str:
+    if match.kind == "library":
+        return f"Already in library: {match.label}"
+    return f"Already in Downloads: {match.label}"
+
+
+def _confirm_and_start_save(
+    service: PlayerService,
+    *,
+    tracks: list[Track],
+    dest: Path,
+    toast_overlay: object | None,
+    parent_window: Gtk.Window | None,
+    persist_folder: bool,
+) -> None:
+    match = service.find_save_to_disk_conflict(tracks, dest_dir=dest)
+    if match is None:
+        _start_save(
+            service,
+            tracks=tracks,
+            dest=dest,
+            toast_overlay=toast_overlay,
+            persist_folder=persist_folder,
+        )
+        return
+    _prompt_existing_local(
+        match,
+        parent_window=parent_window,
+        on_download_anyway=lambda: _start_save(
+            service,
+            tracks=tracks,
+            dest=dest,
+            toast_overlay=toast_overlay,
+            persist_folder=persist_folder,
+        ),
+    )
+
+
+def _prompt_existing_local(
+    match: ExistingLocalMatch,
+    *,
+    parent_window: Gtk.Window | None,
+    on_download_anyway: Callable[[], None],
+) -> None:
+    dialog = Adw.AlertDialog(
+        heading="Already on disk",
+        body=conflict_dialog_body(match),
+    )
+    dialog.add_response("cancel", "Cancel")
+    dialog.add_response("skip", "Skip")
+    dialog.add_response("download_anyway", "Download anyway")
+    dialog.set_default_response("cancel")
+    dialog.set_close_response("cancel")
+    dialog.set_response_appearance(
+        "download_anyway",
+        Adw.ResponseAppearance.SUGGESTED,
+    )
+
+    def on_response(_dialog: Adw.AlertDialog, response: str) -> None:
+        if response == "download_anyway":
+            on_download_anyway()
+
+    dialog.connect("response", on_response)
+    dialog.present(parent_window)
 
 
 def _start_save(

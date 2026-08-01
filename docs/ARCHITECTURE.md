@@ -497,7 +497,8 @@ UI never polls mpv properties directly.
 2. **Heuristic merge (planned):** merged browse lists with duplicate-title collapsing.
 3. **Strong dedup (planned):** MusicBrainz / ISRC / UPC identity. Today the release grid
    shows one tile per catalog quality tier (`core/release_quality_tiles.py`); the shell
-   quality filter is browse-only.
+   quality filter gates which tiles appear and sets the playback / Save-to-disk quality
+   ceiling (`PlaybackPreference`).
 4. **Unified playlists (planned):** cross-source playlists with “prefer local if duplicate”
    playback policy.
 
@@ -608,6 +609,19 @@ Paths under a configured music folder (e.g. if the user later adds the downloads
 under Sources) are indexed via **`enqueue_incremental_scan`** (not a full-library rescan).
 First use (or an unset/unwritable folder) opens a folder picker and persists the choice.
 TIDAL DASH/MPD streams are remuxed with **ffmpeg**.
+
+**Stream quality:** there is no separate download-quality setting. Saves use the highest
+format allowed by the current shell quality filter (same `PlaybackPreference` ceiling as
+playback).
+
+**Concurrency (#68):** at most **two** tracks download simultaneously within a job.
+
+**Already on disk (#68):** before starting a job, if the release appears in the local
+library (`ids.release_id` / casefold search) or files already exist under the Downloads
+folder at the expected path, show **Skip / Download anyway / Cancel**. Skip and Cancel
+abort; Download anyway proceeds and still uses `unique_destination` (no overwrite).
+
+**Deferred (#68):** hover download control on release tiles; playlist Save to disk.
 
 **Quit / resume (Firefox-like, #70):** closing or quitting while a job is active shows a
 Stay / Quit confirm. Quit stops the transfer and persists a `manifest.json` in the job

@@ -42,11 +42,13 @@ from tunes_player.core.library.scan_process import terminate_orphan_library_scan
 from tunes_player.core.library.scan_worker import close_scan_queue, create_scan_process
 from tunes_player.core.models import Release, Source, Track
 from tunes_player.core.save_to_disk import (
+    MAX_SAVE_CONCURRENCY,
     STATUS_COMPLETED,
     STATUS_FAILED,
     STATUS_INTERRUPTED,
     STATUS_RUNNING,
     DownloadJobManifest,
+    ExistingLocalMatch,
     SaveCancelled,
     SaveToDiskError,
     StagedTrack,
@@ -57,6 +59,7 @@ from tunes_player.core.save_to_disk import (
     download_cache_dir,
     download_https,
     fetch_cover_bytes,
+    find_existing_local_match,
     find_staged_file,
     infer_extension,
     is_mpd_uri,
@@ -2250,6 +2253,20 @@ class PlayerService:
         except OSError:
             log.exception("Failed persisting interrupted download job %s", job_dir)
 
+    def find_save_to_disk_conflict(
+        self,
+        tracks: list[Track],
+        *,
+        dest_dir: str | Path,
+    ) -> ExistingLocalMatch | None:
+        """Return a local/Downloads match for the tracks, if any."""
+        return find_existing_local_match(
+            tracks,
+            get_release=self._store.get_release,
+            search_releases=self._store.search_releases,
+            download_folder=Path(dest_dir),
+        )
+
     def start_save_to_disk(
         self,
         *,
@@ -2257,7 +2274,7 @@ class PlayerService:
         tracks: list[Track] | None = None,
         dest_dir: str,
     ) -> None:
-        """Queue a sequential save job for streaming tracks into dest_dir."""
+        """Queue a save job for streaming tracks into dest_dir (up to 2 concurrent)."""
         track_list = list(tracks or [])
         ids = [t.id for t in track_list] if track_list else [tid for tid in (track_ids or []) if tid]
         if not ids:
@@ -2428,16 +2445,35 @@ class PlayerService:
             manifest.completed_indices = sorted(completed)
             save_job_manifest(job_dir, manifest)
             total = len(track_ids)
-            for index, track_id in enumerate(track_ids, start=1):
-                if index in completed:
-                    continue
+            pending = [
+                index
+                for index in range(1, total + 1)
+                if index not in completed
+            ]
+            stage_lock = threading.Lock()
+            active_labels: dict[int, str] = {}
+
+            def _should_stop() -> bool:
                 if self._download_cancel.is_set():
-                    cancelled = True
-                    break
+                    return True
+                if album_atomic and errors:
+                    return True
+                return False
+
+            def _stage_index(index: int) -> None:
+                nonlocal cancelled
+                track_id = track_ids[index - 1]
                 track = tracks_by_id.get(track_id)
                 label = track.title if track is not None else track_id
-                self._download_progress = (index, total, label)
-                self._emit("download_progress")
+                with stage_lock:
+                    if _should_stop():
+                        if self._download_cancel.is_set():
+                            cancelled = True
+                        return
+                    active_labels[index] = label
+                    progress_index = len(completed) + 1
+                    self._download_progress = (progress_index, total, label)
+                    self._emit("download_progress")
                 stale = find_staged_file(job_dir, index)
                 if stale is not None:
                     try:
@@ -2456,42 +2492,76 @@ class PlayerService:
                         track=track,
                     )
                 except SaveCancelled:
-                    cancelled = True
-                    break
+                    with stage_lock:
+                        cancelled = True
+                        active_labels.pop(index, None)
+                    return
                 except SaveToDiskError as exc:
-                    errors.append(f"{label}: {exc}")
+                    with stage_lock:
+                        errors.append(f"{label}: {exc}")
+                        active_labels.pop(index, None)
+                        if album_atomic:
+                            self._download_cancel.set()
                     log.warning("Save to disk failed for %s: %s", track_id, exc)
-                    if album_atomic:
-                        break
-                    continue
+                    return
                 except Exception as exc:
-                    errors.append(f"{label}: {exc}")
+                    with stage_lock:
+                        errors.append(f"{label}: {exc}")
+                        active_labels.pop(index, None)
+                        if album_atomic:
+                            self._download_cancel.set()
                     log.exception("Save to disk failed for %s", track_id)
-                    if album_atomic:
-                        break
-                    continue
-                staged.append(staged_item)
-                completed.add(index)
-                manifest.completed_indices = sorted(completed)
-                manifest.status = STATUS_RUNNING
-                save_job_manifest(job_dir, manifest)
-                if not album_atomic:
-                    final = promote_part_to_destination(
-                        staged_item.staged_path,
-                        staged_item.dest_path,
-                    )
-                    saved_paths.append(final)
+                    return
+                with stage_lock:
+                    active_labels.pop(index, None)
+                    # Keep successful stages even if a sibling failed/cancelled so
+                    # album-atomic resume can skip completed_indices.
+                    staged.append(staged_item)
+                    completed.add(index)
+                    manifest.completed_indices = sorted(completed)
+                    manifest.status = STATUS_RUNNING
+                    save_job_manifest(job_dir, manifest)
+                    if self._download_cancel.is_set():
+                        cancelled = True
+                    if not album_atomic:
+                        final = promote_part_to_destination(
+                            staged_item.staged_path,
+                            staged_item.dest_path,
+                        )
+                        saved_paths.append(final)
+                    if active_labels:
+                        next_label = next(iter(active_labels.values()))
+                        self._download_progress = (
+                            len(completed) + 1,
+                            total,
+                            next_label,
+                        )
+                        self._emit("download_progress")
+
+            if pending:
+                if self._download_cancel.is_set():
+                    cancelled = True
+                else:
+                    workers = min(MAX_SAVE_CONCURRENCY, len(pending))
+                    with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=workers,
+                        thread_name_prefix="tunes-save-track",
+                    ) as pool:
+                        futures = [
+                            pool.submit(_stage_index, index) for index in pending
+                        ]
+                        concurrent.futures.wait(futures)
+            if self._download_cancel.is_set():
+                cancelled = True
             persist = cancelled and self._download_persist_on_cancel
-            if cancelled and persist:
+            # Errors win over sibling-stop cancel (album-atomic failure sets cancel
+            # so the other worker aborts). Quit-persist still wins when no errors.
+            if cancelled and persist and not errors:
                 manifest.status = STATUS_INTERRUPTED
                 manifest.completed_indices = sorted(completed)
                 save_job_manifest(job_dir, manifest)
                 self._download_saved_count = len(saved_paths)
                 # No toast: quit path persists for resume.
-            elif cancelled and not persist:
-                self._download_saved_count = len(saved_paths)
-                discard_download_job(job_dir)
-                self._emit("download_cancelled")
             elif errors:
                 self._download_last_error = errors[0]
                 if album_atomic:
@@ -2505,6 +2575,10 @@ class PlayerService:
                         self._enqueue_saved_paths_scan(saved_paths)
                     discard_download_job(job_dir)
                 self._emit("download_error")
+            elif cancelled:
+                self._download_saved_count = len(saved_paths)
+                discard_download_job(job_dir)
+                self._emit("download_cancelled")
             else:
                 if album_atomic:
                     saved_paths = promote_staged_tracks(staged)
