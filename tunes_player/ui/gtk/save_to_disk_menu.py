@@ -200,7 +200,9 @@ def attach_download_toasts(overlay: object, service: PlayerService) -> None:
     """Show save-to-disk progress and results on an Adw.ToastOverlay."""
 
     def on_event(event: str) -> bool:
-        if event == "download_started":
+        if event == "download_resumed":
+            show_toast(overlay, "Resuming download…")
+        elif event == "download_started":
             show_toast(overlay, "Saving to disk…")
         elif event == "download_progress":
             progress = service.download_progress

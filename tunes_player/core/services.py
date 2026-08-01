@@ -42,20 +42,34 @@ from tunes_player.core.library.scan_process import terminate_orphan_library_scan
 from tunes_player.core.library.scan_worker import close_scan_queue, create_scan_process
 from tunes_player.core.models import Release, Source, Track
 from tunes_player.core.save_to_disk import (
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    STATUS_INTERRUPTED,
+    STATUS_RUNNING,
+    DownloadJobManifest,
     SaveCancelled,
     SaveToDiskError,
+    StagedTrack,
     build_track_path,
     cleanup_download_cache,
+    deserialize_track,
+    discard_download_job,
     download_cache_dir,
     download_https,
     fetch_cover_bytes,
+    find_staged_file,
     infer_extension,
     is_mpd_uri,
     is_writable_dir,
+    list_interrupted_jobs,
+    load_job_manifest,
     music_folder_for_path,
     promote_part_to_destination,
+    promote_staged_tracks,
     remux_mpd,
-    rmtree_quiet,
+    save_job_manifest,
+    serialize_track,
+    staging_part_path,
     tracks_need_disc_prefix,
     write_tags,
 )
@@ -265,8 +279,10 @@ class PlayerService:
         self._download_lock = threading.Lock()
         self._download_progress: tuple[int, int, str] | None = None
         self._download_last_error: str | None = None
-        self._download_cancelled_on_shutdown = False
         self._download_saved_count = 0
+        self._download_persist_on_cancel = False
+        self._download_active_job_dir: Path | None = None
+        self._download_active_manifest: DownloadJobManifest | None = None
         self._playback_position_stalled = False
         self._soft_stall_message: str | None = None
         self._direct_alsa_soft_stall_attempts = 0
@@ -2155,13 +2171,7 @@ class PlayerService:
         )
 
     def shutdown(self) -> None:
-        was_downloading = self.is_saving_to_disk()
-        self.cancel_save_to_disk()
-        thread = self._download_thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=5.0)
-        if was_downloading:
-            self._download_cancelled_on_shutdown = True
+        self.pause_save_to_disk_for_quit()
         monitor = self._playback_health_monitor
         self._playback_health_monitor = None
         if monitor is not None:
@@ -2206,16 +2216,39 @@ class PlayerService:
     def download_saved_count(self) -> int:
         return self._download_saved_count
 
-    def consume_download_cancelled_on_shutdown(self) -> bool:
-        flag = self._download_cancelled_on_shutdown
-        self._download_cancelled_on_shutdown = False
-        return flag
-
     def set_download_folder(self, folder: str | None) -> None:
         self._config_manager.set_download_folder(folder)
 
     def cancel_save_to_disk(self) -> None:
+        """Cancel the in-session download and discard staging (not resumable)."""
+        self._download_persist_on_cancel = False
         self._download_cancel.set()
+
+    def pause_save_to_disk_for_quit(self) -> None:
+        """Stop the active download and persist it for resume on next start."""
+        if not self.is_saving_to_disk():
+            self._mark_active_download_interrupted()
+            return
+        self._download_persist_on_cancel = True
+        self._download_cancel.set()
+        thread = self._download_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=30.0)
+        self._mark_active_download_interrupted()
+
+    def _mark_active_download_interrupted(self) -> None:
+        with self._download_lock:
+            manifest = self._download_active_manifest
+            job_dir = self._download_active_job_dir
+        if manifest is None or job_dir is None:
+            return
+        if manifest.status == STATUS_COMPLETED:
+            return
+        manifest.status = STATUS_INTERRUPTED
+        try:
+            save_job_manifest(job_dir, manifest)
+        except OSError:
+            log.exception("Failed persisting interrupted download job %s", job_dir)
 
     def start_save_to_disk(
         self,
@@ -2240,10 +2273,18 @@ class PlayerService:
             self._download_progress = None
             self._download_last_error = None
             self._download_saved_count = 0
-            self._download_cancelled_on_shutdown = False
+            self._download_persist_on_cancel = False
             thread = threading.Thread(
                 target=self._run_save_to_disk_job,
-                args=(list(ids), str(dest.resolve()), by_id),
+                args=(
+                    list(ids),
+                    str(dest.resolve()),
+                    by_id,
+                    None,
+                    None,
+                    [],
+                    False,
+                ),
                 name="tunes-save-to-disk",
                 daemon=True,
             )
@@ -2251,24 +2292,145 @@ class PlayerService:
             thread.start()
         self._emit("download_started")
 
+    def resume_interrupted_save_to_disk(self) -> bool:
+        """Resume the first interrupted download job, if any. Returns True if started."""
+        with self._download_lock:
+            if self.is_saving_to_disk():
+                return False
+        jobs = list_interrupted_jobs(self._config_manager.data_dir)
+        if not jobs:
+            return False
+        job_dir, manifest = jobs[0]
+        if not is_writable_dir(Path(manifest.dest_dir)):
+            log.warning(
+                "Skipping resume of download job %s; dest not writable: %s",
+                manifest.job_id,
+                manifest.dest_dir,
+            )
+            return False
+        by_id = {
+            t["id"]: deserialize_track(t)
+            for t in manifest.tracks
+            if isinstance(t, dict) and t.get("id")
+        }
+        for track_id in manifest.track_ids:
+            by_id.setdefault(
+                track_id,
+                Track(
+                    id=track_id,
+                    title=track_id,
+                    artist_name="Unknown Artist",
+                    release_title=None,
+                    source=Source.TIDAL
+                    if track_id.startswith("tidal:")
+                    else Source.QOBUZ
+                    if track_id.startswith("qobuz:")
+                    else Source.LOCAL,
+                ),
+            )
+        completed = sorted({int(i) for i in manifest.completed_indices if int(i) > 0})
+        with self._download_lock:
+            if self.is_saving_to_disk():
+                return False
+            self._download_cancel = threading.Event()
+            self._download_progress = None
+            self._download_last_error = None
+            self._download_saved_count = 0
+            self._download_persist_on_cancel = False
+            thread = threading.Thread(
+                target=self._run_save_to_disk_job,
+                args=(
+                    list(manifest.track_ids),
+                    str(Path(manifest.dest_dir).resolve()),
+                    by_id,
+                    manifest.job_id,
+                    job_dir,
+                    completed,
+                    True,
+                ),
+                name="tunes-save-to-disk",
+                daemon=True,
+            )
+            self._download_thread = thread
+            thread.start()
+        self._emit("download_resumed")
+        return True
+
     def _run_save_to_disk_job(
         self,
         track_ids: list[str],
         dest_dir: str,
         tracks_by_id: dict[str, Track],
+        job_id: str | None,
+        existing_job_dir: Path | None,
+        completed_indices: list[int],
+        resumed: bool,
     ) -> None:
-        job_id = uuid.uuid4().hex
+        del resumed  # reserved for logging / UI differentiation
         cache_root = download_cache_dir(self._config_manager.data_dir)
-        job_dir = cache_root / job_id
+        resolved_job_id = job_id or uuid.uuid4().hex
+        job_dir = (
+            Path(existing_job_dir)
+            if existing_job_dir is not None
+            else cache_root / resolved_job_id
+        )
+        album_atomic = len(track_ids) > 1
+        staged: list[StagedTrack] = []
         saved_paths: list[Path] = []
         cancelled = False
+        persist = False
         errors: list[str] = []
+        completed = {int(i) for i in completed_indices}
+        known_tracks = [tracks_by_id[tid] for tid in track_ids if tid in tracks_by_id]
+        include_disc = tracks_need_disc_prefix(known_tracks)
+        manifest = DownloadJobManifest(
+            version=1,
+            job_id=resolved_job_id,
+            dest_dir=dest_dir,
+            track_ids=list(track_ids),
+            tracks=[
+                serialize_track(tracks_by_id[tid])
+                for tid in track_ids
+                if tid in tracks_by_id
+            ],
+            completed_indices=sorted(completed),
+            status=STATUS_RUNNING,
+        )
+        with self._download_lock:
+            self._download_active_job_dir = job_dir
+            self._download_active_manifest = manifest
         try:
             job_dir.mkdir(parents=True, exist_ok=True)
-            known_tracks = [tracks_by_id[tid] for tid in track_ids if tid in tracks_by_id]
-            include_disc = tracks_need_disc_prefix(known_tracks)
+            save_job_manifest(job_dir, manifest)
+            for index in sorted(completed):
+                if index < 1 or index > len(track_ids):
+                    continue
+                existing = find_staged_file(job_dir, index)
+                if existing is None:
+                    # Staged file missing (e.g. single-track already promoted); drop marker.
+                    completed.discard(index)
+                    continue
+                track_id = track_ids[index - 1]
+                staged.append(
+                    StagedTrack(
+                        track_id=track_id,
+                        index=index,
+                        staged_path=existing,
+                        dest_path=self._dest_path_for_staged(
+                            existing,
+                            dest_root=Path(dest_dir),
+                            track=tracks_by_id.get(track_id),
+                            track_id=track_id,
+                            include_disc=include_disc,
+                        ),
+                    )
+                )
+            manifest.completed_indices = sorted(completed)
+            save_job_manifest(job_dir, manifest)
             total = len(track_ids)
             for index, track_id in enumerate(track_ids, start=1):
+                if index in completed:
+                    continue
                 if self._download_cancel.is_set():
                     cancelled = True
                     break
@@ -2276,11 +2438,19 @@ class PlayerService:
                 label = track.title if track is not None else track_id
                 self._download_progress = (index, total, label)
                 self._emit("download_progress")
+                stale = find_staged_file(job_dir, index)
+                if stale is not None:
+                    try:
+                        stale.unlink(missing_ok=True)
+                    except OSError:
+                        pass
                 try:
-                    path = self._save_one_track(
+                    staged_item = self._stage_one_track(
                         track_id,
                         dest_root=Path(dest_dir),
                         job_dir=job_dir,
+                        job_id=resolved_job_id,
+                        cache_root=cache_root,
                         index=index,
                         include_disc=include_disc,
                         track=track,
@@ -2291,44 +2461,115 @@ class PlayerService:
                 except SaveToDiskError as exc:
                     errors.append(f"{label}: {exc}")
                     log.warning("Save to disk failed for %s: %s", track_id, exc)
+                    if album_atomic:
+                        break
                     continue
                 except Exception as exc:
                     errors.append(f"{label}: {exc}")
                     log.exception("Save to disk failed for %s", track_id)
+                    if album_atomic:
+                        break
                     continue
-                saved_paths.append(path)
-            self._download_saved_count = len(saved_paths)
-            if saved_paths:
-                self._enqueue_saved_paths_scan(saved_paths)
-            if cancelled:
+                staged.append(staged_item)
+                completed.add(index)
+                manifest.completed_indices = sorted(completed)
+                manifest.status = STATUS_RUNNING
+                save_job_manifest(job_dir, manifest)
+                if not album_atomic:
+                    final = promote_part_to_destination(
+                        staged_item.staged_path,
+                        staged_item.dest_path,
+                    )
+                    saved_paths.append(final)
+            persist = cancelled and self._download_persist_on_cancel
+            if cancelled and persist:
+                manifest.status = STATUS_INTERRUPTED
+                manifest.completed_indices = sorted(completed)
+                save_job_manifest(job_dir, manifest)
+                self._download_saved_count = len(saved_paths)
+                # No toast: quit path persists for resume.
+            elif cancelled and not persist:
+                self._download_saved_count = len(saved_paths)
+                discard_download_job(job_dir)
                 self._emit("download_cancelled")
-            elif errors and not saved_paths:
+            elif errors:
                 self._download_last_error = errors[0]
+                if album_atomic:
+                    manifest.status = STATUS_FAILED
+                    manifest.completed_indices = sorted(completed)
+                    save_job_manifest(job_dir, manifest)
+                    self._download_saved_count = 0
+                else:
+                    self._download_saved_count = len(saved_paths)
+                    if saved_paths:
+                        self._enqueue_saved_paths_scan(saved_paths)
+                    discard_download_job(job_dir)
                 self._emit("download_error")
             else:
-                if errors:
-                    self._download_last_error = (
-                        f"Saved {len(saved_paths)} track(s); "
-                        f"{len(errors)} failed. {errors[0]}"
-                    )
+                if album_atomic:
+                    saved_paths = promote_staged_tracks(staged)
+                self._download_saved_count = len(saved_paths)
+                if saved_paths:
+                    self._enqueue_saved_paths_scan(saved_paths)
+                manifest.status = STATUS_COMPLETED
+                save_job_manifest(job_dir, manifest)
+                discard_download_job(job_dir)
                 self._emit("download_finished")
         finally:
-            rmtree_quiet(job_dir)
             self._download_progress = None
             with self._download_lock:
                 if self._download_thread is threading.current_thread():
                     self._download_thread = None
+                remaining = (
+                    load_job_manifest(job_dir) if job_dir.is_dir() else None
+                )
+                if remaining is not None and remaining.status in {
+                    STATUS_INTERRUPTED,
+                    STATUS_FAILED,
+                    STATUS_RUNNING,
+                }:
+                    self._download_active_job_dir = job_dir
+                    self._download_active_manifest = remaining
+                else:
+                    self._download_active_job_dir = None
+                    self._download_active_manifest = None
+            self._download_persist_on_cancel = False
 
-    def _save_one_track(
+    def _dest_path_for_staged(
+        self,
+        staged_path: Path,
+        *,
+        dest_root: Path,
+        track: Track | None,
+        track_id: str,
+        include_disc: bool,
+    ) -> Path:
+        name = staged_path.name
+        if name.endswith(".tunes-partial"):
+            name = name[: -len(".tunes-partial")]
+        # name like 0001.flac
+        ext = Path(name).suffix or ".flac"
+        meta = track or Track(
+            id=track_id,
+            title=track_id,
+            artist_name="Unknown Artist",
+            release_title=None,
+            source=Source.TIDAL,
+        )
+        return build_track_path(dest_root, meta, ext, include_disc=include_disc)
+
+    def _stage_one_track(
         self,
         track_id: str,
         *,
         dest_root: Path,
         job_dir: Path,
+        job_id: str,
+        cache_root: Path,
         index: int,
         include_disc: bool,
         track: Track | None,
-    ) -> Path:
+    ) -> StagedTrack:
         if self._download_cancel.is_set():
             raise SaveCancelled()
         if track_id.startswith("local:"):
@@ -2352,7 +2593,10 @@ class PlayerService:
         meta = track or source.metadata
         for_mpd = is_mpd_uri(source.uri)
         ext = infer_extension(source.uri, source.stream_metadata, for_mpd=for_mpd)
-        part_path = job_dir / f"{index:04d}{ext}"
+        part_path = staging_part_path(cache_root, job_id, index, ext)
+        # Ensure parent is job_dir (staging_part_path uses cache_root/job_id).
+        if part_path.parent != job_dir:
+            part_path = job_dir / part_path.name
         if for_mpd:
             remux_mpd(source.uri, part_path, cancel_event=self._download_cancel)
         else:
@@ -2370,7 +2614,12 @@ class PlayerService:
             ext,
             include_disc=include_disc,
         )
-        return promote_part_to_destination(part_path, dest_path)
+        return StagedTrack(
+            track_id=track_id,
+            index=index,
+            staged_path=part_path,
+            dest_path=dest_path,
+        )
 
     def _enqueue_saved_paths_scan(self, paths: list[Path]) -> None:
         by_folder: dict[str, list[str]] = {}

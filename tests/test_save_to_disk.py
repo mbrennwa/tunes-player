@@ -12,6 +12,8 @@ from unittest import mock
 from tunes_player.core.library.store import FileMetadata
 from tunes_player.core.models import Source, Track
 from tunes_player.core.save_to_disk import (
+    STATUS_INTERRUPTED,
+    DownloadJobManifest,
     SaveCancelled,
     SaveToDiskError,
     build_track_path,
@@ -20,10 +22,14 @@ from tunes_player.core.save_to_disk import (
     infer_extension,
     is_mpd_uri,
     is_writable_dir,
+    list_interrupted_jobs,
     music_folder_for_path,
     promote_part_to_destination,
     remux_mpd,
     sanitize_filename,
+    save_job_manifest,
+    serialize_track,
+    staging_part_path,
     unique_destination,
     write_tags,
 )
@@ -146,6 +152,36 @@ class TestSaveToDiskHelpers(unittest.TestCase):
             removed = cleanup_download_cache(data)
             self.assertGreaterEqual(removed, 1)
             self.assertFalse(stale.exists())
+
+    def test_cleanup_spares_interrupted_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            job_dir = data / "download-cache" / "abc123"
+            job_dir.mkdir(parents=True)
+            staged = job_dir / "0001.flac.tunes-partial"
+            staged.write_bytes(b"audio")
+            save_job_manifest(
+                job_dir,
+                DownloadJobManifest(
+                    version=1,
+                    job_id="abc123",
+                    dest_dir=str(data / "downloads"),
+                    track_ids=["tidal:1"],
+                    tracks=[serialize_track(_track())],
+                    completed_indices=[1],
+                    status=STATUS_INTERRUPTED,
+                ),
+            )
+            removed = cleanup_download_cache(data)
+            self.assertEqual(removed, 0)
+            self.assertTrue(staged.is_file())
+            jobs = list_interrupted_jobs(data)
+            self.assertEqual(len(jobs), 1)
+            self.assertEqual(jobs[0][1].job_id, "abc123")
+
+    def test_staging_part_path_suffix(self) -> None:
+        path = staging_part_path(Path("/cache"), "job", 3, ".flac")
+        self.assertEqual(path, Path("/cache/job/0003.flac.tunes-partial"))
 
     def test_download_https_writes_and_cancel(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -290,6 +326,55 @@ class TestSaveToDiskHelpers(unittest.TestCase):
             self.assertEqual(audio["album"], ["LP"])
             self.assertEqual(audio["tracknumber"], ["2"])
 
+    def test_write_tags_on_tunes_partial_suffix(self) -> None:
+        try:
+            from mutagen.flac import FLAC
+        except ImportError:
+            self.skipTest("mutagen unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            import shutil
+            import subprocess
+
+            if shutil.which("ffmpeg") is None:
+                self.skipTest("ffmpeg unavailable for FLAC fixture")
+            flac_path = Path(tmp) / "0001.flac"
+            path = Path(tmp) / "0001.flac.tunes-partial"
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "anullsrc=r=44100:cl=mono",
+                    "-t",
+                    "0.05",
+                    "-c:a",
+                    "flac",
+                    str(flac_path),
+                ],
+                check=True,
+            )
+            flac_path.rename(path)
+            write_tags(
+                path,
+                _track(title="Partial", artist_name="Artist", release_title="Alb"),
+            )
+            audio = FLAC(path)
+            self.assertEqual(audio["title"], ["Partial"])
+            self.assertEqual(audio["artist"], ["Artist"])
+            self.assertEqual(audio["album"], ["Alb"])
+
+    def test_media_extension_strips_partial(self) -> None:
+        from tunes_player.core.save_to_disk import media_extension
+
+        self.assertEqual(media_extension(Path("a.flac")), ".flac")
+        self.assertEqual(media_extension(Path("0001.flac.tunes-partial")), ".flac")
+        self.assertEqual(media_extension(Path("0002.mp3.tunes-partial")), ".mp3")
+        self.assertEqual(media_extension(Path("x.m4a.tunes-partial")), ".m4a")
+
 
 class TestSaveFolderConfig(unittest.TestCase):
     def test_download_folder_roundtrip(self) -> None:
@@ -421,6 +506,266 @@ class TestPlayerServiceSaveHook(unittest.TestCase):
             downloads.mkdir()
             scanned = self._run_fake_save(music_folder=music, dest=downloads)
             self.assertEqual(scanned, [])
+
+    def _make_service(self, root: Path, *, dest: Path):
+        from tunes_player.core.backends.playable import PlayableSource
+        from tunes_player.core.config import ConfigManager
+        from tunes_player.core.services import PlayerService
+
+        manager = ConfigManager(root / "config.json")
+        manager.load()
+        service = PlayerService(config=manager)
+        cache = root / "download-cache"
+
+        def fake_resolve(store, track_id, **_kwargs):
+            track = _track(
+                id=track_id,
+                title=f"Song-{track_id.split(':')[-1]}",
+                track_number=int(track_id.split(":")[-1]),
+            )
+            return PlayableSource(
+                uri="https://example.com/a.flac",
+                metadata=track,
+                stream_metadata=FileMetadata(
+                    path="",
+                    codec="flac",
+                    duration_sec=1.0,
+                    sample_rate=44100,
+                    bit_depth=16,
+                    channels=2,
+                ),
+            )
+
+        def _cache_dir(_data_dir=None):
+            return cache
+
+        patches = [
+            mock.patch(
+                "tunes_player.core.services.resolve_track",
+                side_effect=fake_resolve,
+            ),
+            mock.patch(
+                "tunes_player.core.services.download_https",
+                side_effect=lambda url, part, cancel_event=None: part.write_bytes(
+                    b"flac"
+                ),
+            ),
+            mock.patch("tunes_player.core.services.write_tags"),
+            mock.patch(
+                "tunes_player.core.services.fetch_cover_bytes",
+                return_value=None,
+            ),
+            mock.patch(
+                "tunes_player.core.services.download_cache_dir",
+                side_effect=_cache_dir,
+            ),
+            mock.patch(
+                "tunes_player.core.save_to_disk.download_cache_dir",
+                side_effect=_cache_dir,
+            ),
+            mock.patch(
+                "tunes_player.core.services.cleanup_download_cache",
+                return_value=0,
+            ),
+        ]
+        for p in patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in patches])
+        return service, cache
+
+    def test_single_track_promotes_on_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "downloads"
+            dest.mkdir()
+            service, _cache = self._make_service(root, dest=dest)
+            try:
+                service.start_save_to_disk(tracks=[_track()], dest_dir=str(dest))
+                thread = service._download_thread
+                assert thread is not None
+                thread.join(timeout=10)
+                self.assertEqual(service.download_saved_count, 1)
+                finals = list(dest.rglob("*.flac"))
+                self.assertEqual(len(finals), 1)
+                self.assertFalse(any(dest.rglob("*.tunes-partial")))
+            finally:
+                service.shutdown()
+
+    def test_multi_track_cancel_leaves_no_dest_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "downloads"
+            dest.mkdir()
+            service, cache = self._make_service(root, dest=dest)
+            gate = threading.Event()
+            started = threading.Event()
+
+            def slow_download(url, part, cancel_event=None):
+                started.set()
+                while not gate.is_set():
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise SaveCancelled()
+                    gate.wait(0.05)
+                if cancel_event is not None and cancel_event.is_set():
+                    raise SaveCancelled()
+                part.write_bytes(b"flac")
+
+            with mock.patch(
+                "tunes_player.core.services.download_https",
+                side_effect=slow_download,
+            ):
+                try:
+                    tracks = [
+                        _track(id="tidal:1", title="One", track_number=1),
+                        _track(id="tidal:2", title="Two", track_number=2),
+                    ]
+                    service.start_save_to_disk(tracks=tracks, dest_dir=str(dest))
+                    self.assertTrue(started.wait(timeout=5))
+                    service.pause_save_to_disk_for_quit()
+                    self.assertEqual(list(dest.rglob("*.flac")), [])
+                    jobs = list_interrupted_jobs(root)
+                    self.assertEqual(len(jobs), 1)
+                    self.assertEqual(jobs[0][1].status, STATUS_INTERRUPTED)
+                    self.assertTrue(cache.is_dir())
+                finally:
+                    gate.set()
+                    service.shutdown()
+
+    def test_multi_track_success_promotes_all(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "downloads"
+            dest.mkdir()
+            service, _cache = self._make_service(root, dest=dest)
+            try:
+                tracks = [
+                    _track(id="tidal:1", title="One", track_number=1),
+                    _track(id="tidal:2", title="Two", track_number=2),
+                ]
+                service.start_save_to_disk(tracks=tracks, dest_dir=str(dest))
+                thread = service._download_thread
+                assert thread is not None
+                thread.join(timeout=10)
+                self.assertEqual(service.download_saved_count, 2)
+                finals = sorted(p.name for p in dest.rglob("*.flac"))
+                self.assertEqual(finals, ["01 - One.flac", "02 - Two.flac"])
+            finally:
+                service.shutdown()
+
+    def test_multi_track_failure_does_not_promote(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "downloads"
+            dest.mkdir()
+            service, _cache = self._make_service(root, dest=dest)
+            calls = {"n": 0}
+
+            def flaky_download(url, part, cancel_event=None):
+                calls["n"] += 1
+                if calls["n"] >= 2:
+                    raise SaveToDiskError("boom")
+                part.write_bytes(b"flac")
+
+            with mock.patch(
+                "tunes_player.core.services.download_https",
+                side_effect=flaky_download,
+            ):
+                try:
+                    tracks = [
+                        _track(id="tidal:1", title="One", track_number=1),
+                        _track(id="tidal:2", title="Two", track_number=2),
+                    ]
+                    service.start_save_to_disk(tracks=tracks, dest_dir=str(dest))
+                    thread = service._download_thread
+                    assert thread is not None
+                    thread.join(timeout=10)
+                    self.assertEqual(service.download_saved_count, 0)
+                    self.assertEqual(list(dest.rglob("*.flac")), [])
+                    jobs = list_interrupted_jobs(root)
+                    self.assertEqual(len(jobs), 1)
+                    self.assertEqual(jobs[0][1].completed_indices, [1])
+                finally:
+                    service.shutdown()
+
+    def test_resume_skips_completed_indices(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "downloads"
+            dest.mkdir()
+            service, cache = self._make_service(root, dest=dest)
+            job_id = "resumejob1"
+            job_dir = cache / job_id
+            job_dir.mkdir(parents=True)
+            staged = staging_part_path(cache, job_id, 1, ".flac")
+            staged.write_bytes(b"flac")
+            tracks = [
+                _track(id="tidal:1", title="One", track_number=1),
+                _track(id="tidal:2", title="Two", track_number=2),
+            ]
+            save_job_manifest(
+                job_dir,
+                DownloadJobManifest(
+                    version=1,
+                    job_id=job_id,
+                    dest_dir=str(dest.resolve()),
+                    track_ids=[t.id for t in tracks],
+                    tracks=[serialize_track(t) for t in tracks],
+                    completed_indices=[1],
+                    status=STATUS_INTERRUPTED,
+                ),
+            )
+            downloaded: list[str] = []
+
+            def tracking_download(url, part, cancel_event=None):
+                downloaded.append(part.name)
+                part.write_bytes(b"flac")
+
+            with mock.patch(
+                "tunes_player.core.services.download_https",
+                side_effect=tracking_download,
+            ):
+                try:
+                    self.assertTrue(service.resume_interrupted_save_to_disk())
+                    thread = service._download_thread
+                    assert thread is not None
+                    thread.join(timeout=10)
+                    self.assertEqual(service.download_saved_count, 2)
+                    self.assertEqual(downloaded, ["0002.flac.tunes-partial"])
+                    finals = sorted(p.name for p in dest.rglob("*.flac"))
+                    self.assertEqual(finals, ["01 - One.flac", "02 - Two.flac"])
+                    self.assertEqual(list_interrupted_jobs(root), [])
+                finally:
+                    service.shutdown()
+
+    def test_shutdown_persists_interrupted_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "downloads"
+            dest.mkdir()
+            service, _cache = self._make_service(root, dest=dest)
+            started = threading.Event()
+
+            def slow_download(url, part, cancel_event=None):
+                started.set()
+                while cancel_event is None or not cancel_event.is_set():
+                    started.wait(0.05)
+                raise SaveCancelled()
+
+            with mock.patch(
+                "tunes_player.core.services.download_https",
+                side_effect=slow_download,
+            ):
+                tracks = [
+                    _track(id="tidal:1", title="One", track_number=1),
+                    _track(id="tidal:2", title="Two", track_number=2),
+                ]
+                service.start_save_to_disk(tracks=tracks, dest_dir=str(dest))
+                self.assertTrue(started.wait(timeout=5))
+                service.shutdown()
+                jobs = list_interrupted_jobs(root)
+                self.assertEqual(len(jobs), 1)
+                self.assertEqual(jobs[0][1].status, STATUS_INTERRUPTED)
+                self.assertEqual(list(dest.rglob("*.flac")), [])
 
 
 if __name__ == "__main__":

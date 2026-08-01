@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import shutil
 import subprocess
 import threading
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlparse
 from urllib.request import Request, urlopen
 
 from tunes_player.core.library.store import FileMetadata
-from tunes_player.core.models import Track
+from tunes_player.core.models import Source, Track
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +25,12 @@ _USER_AGENT = "Tunes/0.1"
 _CHUNK_SIZE = 256 * 1024
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _PART_SUFFIX = ".tunes-partial"
+_MANIFEST_NAME = "manifest.json"
+_MANIFEST_VERSION = 1
+STATUS_RUNNING = "running"
+STATUS_INTERRUPTED = "interrupted"
+STATUS_FAILED = "failed"
+STATUS_COMPLETED = "completed"
 
 
 class SaveToDiskError(Exception):
@@ -39,36 +47,233 @@ class SavedTrackResult:
     path: Path
 
 
+@dataclass(frozen=True, slots=True)
+class StagedTrack:
+    """One track fully downloaded and tagged in the job staging dir."""
+
+    track_id: str
+    index: int
+    staged_path: Path
+    dest_path: Path
+
+
+@dataclass
+class DownloadJobManifest:
+    version: int
+    job_id: str
+    dest_dir: str
+    track_ids: list[str]
+    tracks: list[dict[str, Any]]
+    completed_indices: list[int]
+    status: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "job_id": self.job_id,
+            "dest_dir": self.dest_dir,
+            "track_ids": list(self.track_ids),
+            "tracks": list(self.tracks),
+            "completed_indices": list(self.completed_indices),
+            "status": self.status,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> DownloadJobManifest:
+        return cls(
+            version=int(data.get("version") or _MANIFEST_VERSION),
+            job_id=str(data["job_id"]),
+            dest_dir=str(data["dest_dir"]),
+            track_ids=[str(t) for t in data.get("track_ids") or []],
+            tracks=[dict(t) for t in data.get("tracks") or [] if isinstance(t, dict)],
+            completed_indices=[
+                int(i) for i in data.get("completed_indices") or []
+            ],
+            status=str(data.get("status") or STATUS_INTERRUPTED),
+        )
+
+
 def download_cache_dir(data_dir: Path) -> Path:
     return Path(data_dir) / "download-cache"
 
 
+def job_manifest_path(job_dir: Path) -> Path:
+    return Path(job_dir) / _MANIFEST_NAME
+
+
+def serialize_track(track: Track) -> dict[str, Any]:
+    payload = asdict(track)
+    payload["source"] = (
+        track.source.value if isinstance(track.source, Source) else str(track.source)
+    )
+    return payload
+
+
+def deserialize_track(data: dict[str, Any]) -> Track:
+    source_raw = data.get("source", "tidal")
+    try:
+        source = Source(str(source_raw))
+    except ValueError:
+        source = Source.TIDAL
+    return Track(
+        id=str(data["id"]),
+        title=str(data.get("title") or "Unknown Title"),
+        artist_name=str(data.get("artist_name") or "Unknown Artist"),
+        release_title=data.get("release_title"),
+        source=source,
+        duration_sec=data.get("duration_sec"),
+        art_uri=data.get("art_uri"),
+        track_number=data.get("track_number"),
+        disc_number=data.get("disc_number"),
+    )
+
+
+def save_job_manifest(job_dir: Path, manifest: DownloadJobManifest) -> None:
+    job_dir = Path(job_dir)
+    job_dir.mkdir(parents=True, exist_ok=True)
+    path = job_manifest_path(job_dir)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(tmp, path)
+
+
+def load_job_manifest(job_dir: Path) -> DownloadJobManifest | None:
+    path = job_manifest_path(job_dir)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        log.debug("Could not read download job manifest %s", path, exc_info=True)
+        return None
+    if not isinstance(data, dict) or "job_id" not in data or "dest_dir" not in data:
+        return None
+    try:
+        return DownloadJobManifest.from_dict(data)
+    except (KeyError, TypeError, ValueError):
+        log.debug("Invalid download job manifest %s", path, exc_info=True)
+        return None
+
+
+def list_interrupted_jobs(data_dir: Path) -> list[tuple[Path, DownloadJobManifest]]:
+    """Return (job_dir, manifest) for interrupted (resumable) download jobs."""
+    root = download_cache_dir(data_dir)
+    if not root.is_dir():
+        return []
+    found: list[tuple[Path, DownloadJobManifest]] = []
+    try:
+        for child in sorted(root.iterdir()):
+            if not child.is_dir():
+                continue
+            manifest = load_job_manifest(child)
+            if manifest is None:
+                continue
+            if manifest.status not in {STATUS_INTERRUPTED, STATUS_RUNNING, STATUS_FAILED}:
+                continue
+            if not manifest.track_ids:
+                continue
+            found.append((child, manifest))
+    except OSError:
+        log.exception("Failed listing interrupted download jobs under %s", root)
+    return found
+
+
+def discard_download_job(job_dir: Path) -> None:
+    """Remove a job staging directory (including manifest)."""
+    rmtree_quiet(Path(job_dir))
+
+
+def _path_under_dirs(path: Path, roots: set[Path]) -> bool:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    for root in roots:
+        if resolved == root or root in resolved.parents:
+            return True
+    return False
+
+
 def cleanup_download_cache(data_dir: Path) -> int:
-    """Remove stale staging files under download-cache. Returns files removed."""
+    """Remove orphan staging under download-cache; keep resumable job dirs.
+
+    Job directories that contain a valid ``manifest.json`` with a resumable status
+    are left intact. Orphan partials and empty dirs are removed.
+    """
     root = download_cache_dir(data_dir)
     if not root.is_dir():
         return 0
     removed = 0
+    resumable_dirs: set[Path] = set()
     try:
+        for child in root.iterdir():
+            if not child.is_dir():
+                continue
+            manifest = load_job_manifest(child)
+            if manifest is not None and manifest.status in {
+                STATUS_INTERRUPTED,
+                STATUS_RUNNING,
+                STATUS_FAILED,
+            }:
+                try:
+                    resumable_dirs.add(child.resolve())
+                except OSError:
+                    resumable_dirs.add(child)
         for path in root.rglob("*"):
             if not path.is_file():
                 continue
+            if _path_under_dirs(path, resumable_dirs):
+                continue
             name = path.name
-            if name.endswith(_PART_SUFFIX) or name.endswith(".part") or name.endswith(".mpd"):
+            if (
+                name.endswith(_PART_SUFFIX)
+                or name.endswith(".part")
+                or name.endswith(".mpd")
+                or name == _MANIFEST_NAME
+            ):
                 try:
                     path.unlink()
                     removed += 1
                 except OSError:
                     log.debug("Could not remove stale download cache file %s", path)
         for path in sorted(root.rglob("*"), reverse=True):
-            if path.is_dir():
-                try:
-                    path.rmdir()
-                except OSError:
-                    pass
+            if not path.is_dir():
+                continue
+            if _path_under_dirs(path, resumable_dirs):
+                continue
+            try:
+                path.rmdir()
+            except OSError:
+                pass
     except OSError:
         log.exception("Failed cleaning download cache under %s", root)
     return removed
+
+
+def promote_staged_tracks(staged: list[StagedTrack]) -> list[Path]:
+    """Atomically promote a list of staged tracks into their destinations."""
+    promoted: list[Path] = []
+    for item in staged:
+        promoted.append(promote_part_to_destination(item.staged_path, item.dest_path))
+    return promoted
+
+
+def find_staged_file(job_dir: Path, index: int) -> Path | None:
+    """Return the staged ``.tunes-partial`` file for a 1-based track index, if any."""
+    prefix = f"{index:04d}"
+    try:
+        for path in Path(job_dir).iterdir():
+            if not path.is_file():
+                continue
+            name = path.name
+            if name.startswith(prefix) and name.endswith(_PART_SUFFIX):
+                return path
+    except OSError:
+        return None
+    return None
 
 
 def sanitize_filename(name: str, *, fallback: str = "Unknown") -> str:
@@ -184,6 +389,19 @@ def download_https(
         raise SaveToDiskError(f"Download failed: {exc}") from exc
 
 
+def media_extension(path: Path) -> str:
+    """Return the audio file extension, ignoring a trailing ``.tunes-partial``.
+
+    Staging names look like ``0001.flac.tunes-partial``; ``Path.suffix`` alone is
+    ``.tunes-partial`` and would break tag writers / ffmpeg codec selection.
+    """
+    name = path.name
+    if name.casefold().endswith(_PART_SUFFIX):
+        name = name[: -len(_PART_SUFFIX)]
+    suffix = Path(name).suffix.casefold()
+    return suffix
+
+
 def remux_mpd(
     mpd_uri_or_path: str,
     part_path: Path,
@@ -202,12 +420,16 @@ def remux_mpd(
     if not mpd_path.is_file():
         raise SaveToDiskError(f"MPD manifest not found: {mpd_path}")
     part_path.parent.mkdir(parents=True, exist_ok=True)
-    suffix = part_path.suffix.casefold()
+    suffix = media_extension(part_path)
     if suffix == ".flac":
         # Native FLAC muxer (lossless decode from DASH FLAC).
         codec_args = ["-c:a", "flac"]
     else:
         codec_args = ["-c", "copy"]
+    # Staging paths end in ``.tunes-partial``; ffmpeg needs an explicit muxer.
+    format_args: list[str] = []
+    if suffix.lstrip("."):
+        format_args = ["-f", suffix.lstrip(".")]
     cmd = [
         "ffmpeg",
         "-y",
@@ -219,6 +441,7 @@ def remux_mpd(
         "-i",
         str(mpd_path),
         *codec_args,
+        *format_args,
         str(part_path),
     ]
     try:
@@ -278,7 +501,7 @@ def write_tags(
     *,
     cover_bytes: bytes | None = None,
 ) -> None:
-    suffix = path.suffix.casefold()
+    suffix = media_extension(path)
     if suffix == ".flac":
         _write_flac_tags(path, track, cover_bytes=cover_bytes)
     elif suffix == ".mp3":
