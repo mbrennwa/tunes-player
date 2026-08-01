@@ -54,7 +54,7 @@ Logs go to `~/.local/state/tunes-player/tunes-player.log`. Useful env flags:
 Tunes is **not affiliated with Qobuz, TIDAL, or any other streaming provider**.
 Streaming requires your own paid subscriptions where applicable. Features can break when providers change authentication or terms. Use at your own responsibility and in compliance with each service's terms of use.
 
-**Save to disk** uses the same streaming endpoints as playback (not an official download/purchase API). Saving streams may conflict with a provider's terms; you remain responsible for lawful use. Files go to a dedicated **Downloads folder** (Settings → Application), not into your music library folders unless you add that folder under Sources. Some TIDAL tracks are delivered as DASH/MPD and require **ffmpeg** on your `PATH` to remux into a single file.
+**Save to disk** uses the same streaming endpoints as playback (not an official download/purchase API). Saving streams may conflict with a provider's terms; you remain responsible for lawful use. Files go to a dedicated **Downloads folder** (Settings → Application), not into your music library folders unless you add that folder under Sources. Stream quality follows the shell quality filter (highest allowed tier), the same ceiling as playback. Some TIDAL tracks are delivered as DASH/MPD and require **ffmpeg** on your `PATH` to remux into a single file.
 
 ## License
 

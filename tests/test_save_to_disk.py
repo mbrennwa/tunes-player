@@ -9,16 +9,21 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tunes_player.core.library import ids as library_ids
 from tunes_player.core.library.store import FileMetadata
-from tunes_player.core.models import Source, Track
+from tunes_player.core.models import Release, Source, Track
 from tunes_player.core.save_to_disk import (
+    MAX_SAVE_CONCURRENCY,
     STATUS_INTERRUPTED,
     DownloadJobManifest,
+    ExistingLocalMatch,
     SaveCancelled,
     SaveToDiskError,
     build_track_path,
     cleanup_download_cache,
+    destination_file_exists,
     download_https,
+    find_existing_local_match,
     infer_extension,
     is_mpd_uri,
     is_writable_dir,
@@ -47,6 +52,84 @@ def _track(**kwargs: object) -> Track:
     }
     values.update(kwargs)
     return Track(**values)  # type: ignore[arg-type]
+
+
+class TestExistingLocalMatch(unittest.TestCase):
+    def test_library_exact_release_id(self) -> None:
+        track = _track(artist_name="Artist", release_title="Album")
+        local = Release(
+            id=library_ids.release_id("Artist", "Album"),
+            title="Album",
+            artist_name="Artist",
+            source=Source.LOCAL,
+            track_count=1,
+        )
+        match = find_existing_local_match(
+            [track],
+            get_release=lambda rid: local if rid == local.id else None,
+            search_releases=lambda _q: [],
+        )
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match.kind, "library")
+        self.assertEqual(match.label, "Artist – Album")
+
+    def test_library_search_fallback_casefold(self) -> None:
+        track = _track(artist_name="Artist", release_title="Album")
+        cand = Release(
+            id="local:album:other",
+            title="album",
+            artist_name="artist",
+            source=Source.LOCAL,
+            track_count=2,
+        )
+        match = find_existing_local_match(
+            [track],
+            get_release=lambda _rid: None,
+            search_releases=lambda _q: [cand],
+        )
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match.kind, "library")
+
+    def test_downloads_path_match(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            track = _track()
+            path = build_track_path(dest, track, ".flac")
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"x")
+            match = find_existing_local_match(
+                [track],
+                get_release=lambda _rid: None,
+                search_releases=lambda _q: [],
+                download_folder=dest,
+            )
+            self.assertIsNotNone(match)
+            assert match is not None
+            self.assertEqual(match.kind, "downloads")
+            self.assertTrue(destination_file_exists(dest, track))
+
+    def test_no_match(self) -> None:
+        match = find_existing_local_match(
+            [_track()],
+            get_release=lambda _rid: None,
+            search_releases=lambda _q: [],
+            download_folder=Path("/tmp/nonexistent-tunes-dl"),
+        )
+        self.assertIsNone(match)
+
+    def test_conflict_dialog_body(self) -> None:
+        from tunes_player.ui.gtk.save_to_disk_menu import conflict_dialog_body
+
+        self.assertEqual(
+            conflict_dialog_body(ExistingLocalMatch("library", "A – B")),
+            "Already in library: A – B",
+        )
+        self.assertEqual(
+            conflict_dialog_body(ExistingLocalMatch("downloads", "A – B")),
+            "Already in Downloads: A – B",
+        )
 
 
 class TestSaveToDiskHelpers(unittest.TestCase):
@@ -658,13 +741,16 @@ class TestPlayerServiceSaveHook(unittest.TestCase):
             dest = root / "downloads"
             dest.mkdir()
             service, _cache = self._make_service(root, dest=dest)
-            calls = {"n": 0}
+
+            track1_done = threading.Event()
 
             def flaky_download(url, part, cancel_event=None):
-                calls["n"] += 1
-                if calls["n"] >= 2:
+                # Fail track 2 only after track 1 has staged, so completed=[1].
+                if "0002" in part.name:
+                    track1_done.wait(timeout=5)
                     raise SaveToDiskError("boom")
                 part.write_bytes(b"flac")
+                track1_done.set()
 
             with mock.patch(
                 "tunes_player.core.services.download_https",
@@ -685,6 +771,59 @@ class TestPlayerServiceSaveHook(unittest.TestCase):
                     self.assertEqual(len(jobs), 1)
                     self.assertEqual(jobs[0][1].completed_indices, [1])
                 finally:
+                    service.shutdown()
+
+    def test_max_two_concurrent_downloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "downloads"
+            dest.mkdir()
+            service, _cache = self._make_service(root, dest=dest)
+            active = 0
+            peak = 0
+            lock = threading.Lock()
+            release = threading.Event()
+
+            def gated_download(url, part, cancel_event=None):
+                nonlocal active, peak
+                with lock:
+                    active += 1
+                    peak = max(peak, active)
+                # Hold until at least two have entered (or timeout), then finish.
+                release.wait(timeout=2)
+                with lock:
+                    active -= 1
+                if cancel_event is not None and cancel_event.is_set():
+                    raise SaveCancelled()
+                part.write_bytes(b"flac")
+
+            with mock.patch(
+                "tunes_player.core.services.download_https",
+                side_effect=gated_download,
+            ):
+                try:
+                    tracks = [
+                        _track(id="tidal:1", title="One", track_number=1),
+                        _track(id="tidal:2", title="Two", track_number=2),
+                        _track(id="tidal:3", title="Three", track_number=3),
+                    ]
+                    service.start_save_to_disk(tracks=tracks, dest_dir=str(dest))
+                    # Wait until two workers are in flight.
+                    deadline = threading.Event()
+                    for _ in range(100):
+                        with lock:
+                            if peak >= 2 or active >= 2:
+                                break
+                        deadline.wait(0.05)
+                    release.set()
+                    thread = service._download_thread
+                    assert thread is not None
+                    thread.join(timeout=10)
+                    self.assertEqual(service.download_saved_count, 3)
+                    self.assertLessEqual(peak, MAX_SAVE_CONCURRENCY)
+                    self.assertGreaterEqual(peak, 2)
+                finally:
+                    release.set()
                     service.shutdown()
 
     def test_resume_skips_completed_indices(self) -> None:

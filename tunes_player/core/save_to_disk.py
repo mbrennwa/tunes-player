@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import threading
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -16,8 +17,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlparse
 from urllib.request import Request, urlopen
 
+from tunes_player.core.library import ids as library_ids
 from tunes_player.core.library.store import FileMetadata
-from tunes_player.core.models import Source, Track
+from tunes_player.core.models import Release, Source, Track
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +29,9 @@ _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _PART_SUFFIX = ".tunes-partial"
 _MANIFEST_NAME = "manifest.json"
 _MANIFEST_VERSION = 1
+_COMMON_AUDIO_EXTS = (".flac", ".mp3", ".m4a", ".aac", ".ogg", ".wav", ".aiff")
+# Max concurrent track downloads within a single Save-to-disk job.
+MAX_SAVE_CONCURRENCY = 2
 STATUS_RUNNING = "running"
 STATUS_INTERRUPTED = "interrupted"
 STATUS_FAILED = "failed"
@@ -55,6 +60,14 @@ class StagedTrack:
     index: int
     staged_path: Path
     dest_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class ExistingLocalMatch:
+    """Streaming save target already present in the library or Downloads folder."""
+
+    kind: str  # "library" | "downloads"
+    label: str
 
 
 @dataclass
@@ -300,6 +313,80 @@ def build_track_path(
     else:
         filename = f"{number:02d} - {title}{suffix}"
     return Path(dest_root) / artist / album / filename
+
+
+def destination_file_exists(
+    dest_root: Path,
+    track: Track,
+    *,
+    include_disc: bool = False,
+) -> bool:
+    """True if any common-extension sibling of the expected track path exists."""
+    for ext in _COMMON_AUDIO_EXTS:
+        path = build_track_path(dest_root, track, ext, include_disc=include_disc)
+        try:
+            if path.is_file():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _norm_meta(value: str | None) -> str:
+    return (value or "").casefold().strip()
+
+
+def find_existing_local_match(
+    tracks: Sequence[Track],
+    *,
+    get_release: Callable[[str], Release | None],
+    search_releases: Callable[[str], Sequence[Release]],
+    download_folder: Path | None = None,
+) -> ExistingLocalMatch | None:
+    """Detect if a streaming save would collide with library or Downloads files.
+
+    Library match: ``ids.release_id(artist, album)`` then casefold search fallback.
+    Downloads match: expected ``build_track_path`` exists for any common audio ext.
+    """
+    if not tracks:
+        return None
+    first = tracks[0]
+    artist = first.artist_name
+    album = first.release_title or ""
+    if artist and album:
+        local_id = library_ids.release_id(artist, album)
+        release = get_release(local_id)
+        if release is not None:
+            return ExistingLocalMatch(
+                kind="library",
+                label=f"{release.artist_name} – {release.title}",
+            )
+        query = f"{artist} {album}".strip()
+        for candidate in search_releases(query):
+            if (
+                _norm_meta(candidate.artist_name) == _norm_meta(artist)
+                and _norm_meta(candidate.title) == _norm_meta(album)
+            ):
+                return ExistingLocalMatch(
+                    kind="library",
+                    label=f"{candidate.artist_name} – {candidate.title}",
+                )
+    if download_folder is not None:
+        include_disc = tracks_need_disc_prefix(list(tracks))
+        for track in tracks:
+            if destination_file_exists(
+                download_folder, track, include_disc=include_disc
+            ):
+                if len(tracks) == 1:
+                    label = f"{track.artist_name} – {track.title}"
+                else:
+                    label = (
+                        f"{artist} – {album}"
+                        if album
+                        else f"{track.artist_name} – {track.title}"
+                    )
+                return ExistingLocalMatch(kind="downloads", label=label)
+    return None
 
 
 def is_writable_dir(path: Path) -> bool:
