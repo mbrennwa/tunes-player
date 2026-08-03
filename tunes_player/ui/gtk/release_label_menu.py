@@ -6,15 +6,13 @@ from collections.abc import Callable
 
 import gi
 
-gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Gdk, Gtk  # noqa: E402
+from gi.repository import Gtk  # noqa: E402
 
 from tunes_player.core.services import PlayerService
 
 _LIST_WIDTH = 260
-
 
 class ReleaseLabelEditor(Gtk.Popover):
     def __init__(
@@ -108,48 +106,3 @@ class ReleaseLabelEditor(Gtk.Popover):
         self._rebuild_checks()
         self._notify_changed()
 
-
-def _picked_has_css_class(widget: Gtk.Widget, x: float, y: float, css_class: str) -> bool:
-    picked = widget.pick(x, y, Gtk.PickFlags.DEFAULT)
-    while picked is not None:
-        if picked.has_css_class(css_class):
-            return True
-        picked = picked.get_parent()
-    return False
-
-
-def attach_release_label_menu(
-    tile: Gtk.Widget,
-    *,
-    service: PlayerService,
-    release_id: str,
-    on_changed: Callable[[], None] | None = None,
-) -> None:
-    popover: ReleaseLabelEditor | None = None
-
-    def show_popover() -> None:
-        nonlocal popover
-        if popover is None:
-            popover = ReleaseLabelEditor(
-                service=service,
-                release_id=release_id,
-                on_changed=on_changed,
-            )
-            popover.set_parent(tile)
-        else:
-            popover._release_id = release_id
-            popover._rebuild_checks()
-        popover.popup()
-
-    gesture = Gtk.GestureClick()
-    gesture.set_button(Gdk.BUTTON_SECONDARY)
-
-    def _on_pressed(_gesture: Gtk.GestureClick, _n_press: int, x: float, y: float) -> None:
-        if _picked_has_css_class(tile, x, y, "release-art-play"):
-            return
-        if _picked_has_css_class(tile, x, y, "artist-link"):
-            return
-        show_popover()
-
-    gesture.connect("pressed", _on_pressed)
-    tile.add_controller(gesture)

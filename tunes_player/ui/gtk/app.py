@@ -60,7 +60,7 @@ from tunes_player.ui.gtk.quality_multi_switch import QualityMultiSwitch
 from tunes_player.ui.gtk.release_sort_switch import ReleaseSortSwitch
 from tunes_player.ui.gtk.release_type_multi_switch import ReleaseTypeMultiSwitch
 from tunes_player.ui.gtk.source_multi_switch import SourceMultiSwitch
-from tunes_player.ui.gtk.util import escape_markup, load_app_css, source_label
+from tunes_player.ui.gtk.util import escape_markup, load_app_css
 from tunes_player.ui.gtk.views import (
     LoadingDiscoverView,
     PlaceholderView,

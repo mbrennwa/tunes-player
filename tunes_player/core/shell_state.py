@@ -17,7 +17,6 @@ from tunes_player.core import release_quality as _release_quality
 from tunes_player.core.release_quality import (
     release_available_quality_tiers,
     release_matches_quality_filter,
-    release_quality_filter_bucket,
 )
 
 QUALITY_FILTER_COMPRESSED = _release_quality.QUALITY_FILTER_COMPRESSED

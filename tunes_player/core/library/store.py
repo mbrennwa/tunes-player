@@ -18,7 +18,6 @@ from tunes_player.core.home import (
     SUGGESTIONS_REDISCOVER_IDLE_MONTHS,
     RecentlyAddedItem,
 )
-from tunes_player.core.library import ids
 from tunes_player.core.library.db import connect, with_db_retry
 from tunes_player.core.library.release_logic import infer_release_metadata
 from tunes_player.core.models import Release, Source, Track

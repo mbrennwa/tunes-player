@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from tunes_player.core.backends.tidal import ids as tidal_ids
-from tunes_player.core.backends.tidal.stream_quality import track_peak_quality
 from tunes_player.core.library.release_logic import (
     infer_release_completeness,
     release_type_from_metadata,
@@ -18,14 +17,10 @@ from tunes_player.core.release_catalog import (
     tidal_first_track_openapi_payload,
 )
 from tunes_player.core.release_quality import (
-    QUALITY_FILTER_COMPRESSED,
     classify_tidal_catalog,
-    max_quality_tier,
     peak_quality_tier_from_tiers,
-    tier_from_tidal_peak,
 )
 from tunes_player.core.models import (
-    Artist,
     Release,
     Source,
     Track,
@@ -33,17 +28,14 @@ from tunes_player.core.models import (
 
 if TYPE_CHECKING:
     from tidalapi.album import Album as TidalAlbum
-    from tidalapi.artist import Artist as TidalArtist
     from tidalapi.media import Track as TidalTrack
     from tidalapi.session import Session
-
 
 def _album_art(session: Session, album: TidalAlbum, *, size: int = 320) -> str | None:
     try:
         return album.image(size)
     except Exception:
         return None
-
 
 def _tidal_album_type_raw(album: TidalAlbum) -> str | None:
     raw = getattr(album, "type", None)
@@ -62,7 +54,6 @@ def _tidal_album_type_raw(album: TidalAlbum) -> str | None:
         text = text.rsplit(".", 1)[-1].strip()
     return text or None
 
-
 def _resolve_tidal_release_type(session: Session, album: TidalAlbum) -> str | None:
     """Read album.type; fetch full album metadata when search gave a sparse album."""
     type_raw = _tidal_album_type_raw(album)
@@ -76,7 +67,6 @@ def _resolve_tidal_release_type(session: Session, album: TidalAlbum) -> str | No
     except Exception:
         return None
     return _tidal_album_type_raw(full)
-
 
 def _release_common_fields(
     session: Session,
@@ -103,7 +93,6 @@ def _release_common_fields(
     )
     art_uri = _album_art(session, album)
     return artist_name, year, expected, track_count, completeness, release_type, art_uri
-
 
 def release_stub_from_tidal(
     session: Session,
@@ -132,7 +121,6 @@ def release_stub_from_tidal(
         catalog_quality_ready=False,
         catalog_release_id=catalog_id,
     )
-
 
 def release_from_tidal(
     session: Session,
@@ -183,26 +171,6 @@ def release_from_tidal(
         peak_sample_rate_hz=peak_sample_rate_from_tidal_album(album),
         peak_bit_depth=peak_bit_depth_from_tidal_album(album),
     )
-
-
-def peak_quality_tier_from_tidal_tracks(tracks: list[object]) -> str:
-    if not tracks:
-        return ""
-    peak_rank = max(track_peak_quality(track) for track in tracks)
-    return tier_from_tidal_peak(peak_rank)
-
-
-def album_from_tidal(session: Session, album: TidalAlbum) -> Release:
-    return release_from_tidal(session, album)
-
-
-def artist_from_tidal(artist: TidalArtist) -> Artist:
-    return Artist(
-        id=tidal_ids.artist_id(artist.id),
-        name=artist.name or "Unknown Artist",
-        source=Source.TIDAL,
-    )
-
 
 def track_from_tidal(session: Session, track: TidalTrack, *, album: TidalAlbum | None = None) -> Track:
     artists = track.artists or []

@@ -6,12 +6,9 @@ import unittest
 from unittest.mock import patch
 
 from tunes_player.platform.linux.alsa_mixer import (
-    AlsaVolumeControl,
     clear_alsa_mixer_cache,
-    discover_output_volume_control,
 )
 from tunes_player.platform.linux.volume_discovery import (
-    clear_volume_discovery_cache,
     discover_hardware_volume,
 )
 from tunes_player.platform.linux.volume_quirks import CardIdentity, QuirkMatch, QuirkRule

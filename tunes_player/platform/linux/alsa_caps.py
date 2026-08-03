@@ -12,7 +12,6 @@ _RATES_LINE = re.compile(r"rates\s+\[0x[0-9a-f]+\]:\s*(.+)", re.IGNORECASE)
 _BITS_LINE = re.compile(r"bits\s+\[0x[0-9a-f]+\]:\s*(.+)", re.IGNORECASE)
 _caps_cache: dict[int, HwAudioCaps] = {}
 
-
 def _parse_rate_bit_tokens(line: str) -> tuple[int, ...]:
     values: list[int] = []
     for token in line.split():
@@ -22,13 +21,11 @@ def _parse_rate_bit_tokens(line: str) -> tuple[int, ...]:
             continue
     return tuple(sorted(set(values)))
 
-
 def _read_codec_paths(card: int) -> list[Path]:
     codec_dir = Path(f"/proc/asound/card{card}")
     if not codec_dir.is_dir():
         return []
     return sorted(codec_dir.glob("codec#*"))
-
 
 def _parse_codec_file(path: Path) -> HwAudioCaps | None:
     text = path.read_text(encoding="utf-8", errors="replace")
@@ -63,7 +60,6 @@ def _parse_codec_file(path: Path) -> HwAudioCaps | None:
         bit_depths=tuple(sorted(bits)),
         max_channels=2,
     )
-
 
 def probe_card_caps(card: int, *, data_dir: Path | None = None) -> HwAudioCaps | None:
     """Return hardware PCM caps for card, using cache and optional JSON persistence."""
@@ -110,14 +106,6 @@ def probe_card_caps(card: int, *, data_dir: Path | None = None) -> HwAudioCaps |
                 encoding="utf-8",
             )
     return caps
-
-
-def invalidate_card_caps_cache(card: int | None = None) -> None:
-    if card is None:
-        _caps_cache.clear()
-    else:
-        _caps_cache.pop(card, None)
-
 
 def caps_for_endpoint(
     endpoint_id: str | None,
