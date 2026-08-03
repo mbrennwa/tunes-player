@@ -46,11 +46,6 @@ class SaveCancelled(Exception):
     """Download job was cancelled."""
 
 
-@dataclass(frozen=True, slots=True)
-class SavedTrackResult:
-    track_id: str
-    path: Path
-
 
 @dataclass(frozen=True, slots=True)
 class StagedTrack:

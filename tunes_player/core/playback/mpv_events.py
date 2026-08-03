@@ -5,8 +5,6 @@ from __future__ import annotations
 # mpv client.h mpv_end_file_reason (numeric property values).
 END_FILE_EOF = 0
 END_FILE_STOP = 2
-END_FILE_QUIT = 3
-END_FILE_REDIRECT = 4
 END_FILE_ERROR = 5
 
 # mpv also emits string reasons in end-file events on current releases.

@@ -40,7 +40,6 @@ _HW_PARAMS_RATE = re.compile(r"^rate:\s*(\d+)")
 _HW_PARAMS_FORMAT = re.compile(r"^format:\s*(\S+)")
 _LOOPBACK_DELIVERY_CACHE: dict[tuple[int, int, int], bool] = {}
 
-
 @dataclass(frozen=True, slots=True)
 class WavPcm:
     samples: array
@@ -48,14 +47,12 @@ class WavPcm:
     channels: int
     bit_depth: int
 
-
 @dataclass(frozen=True, slots=True)
 class CaptureStrategy:
     playback_first: bool
     recorder_after_hw_params: bool = False
     recorder_on_hw_match: bool = False
     use_plug_routing: bool = False
-
 
 @dataclass(frozen=True, slots=True)
 class LoopbackDevices:
@@ -65,7 +62,6 @@ class LoopbackDevices:
     mpv_device: str
     capture_device: str
 
-
 @dataclass(frozen=True, slots=True)
 class LoopbackAlsaRouting:
     """ALSA plug PCMs that pin rate/format on both loopback sides."""
@@ -74,7 +70,6 @@ class LoopbackAlsaRouting:
     capture_pcm: str
     config_path: Path
     sample_format: str
-
 
 class _RoutingVolumeController:
     """Route mpv through the pinned-rate plug playback PCM."""
@@ -89,7 +84,6 @@ class _RoutingVolumeController:
     def __getattr__(self, name: str) -> object:
         return getattr(self._inner, name)
 
-
 def integration_skip_reason() -> str | None:
     if shutil.which("arecord") is None:
         return "arecord not found"
@@ -101,7 +95,6 @@ def integration_skip_reason() -> str | None:
     if mpv_error is not None:
         return mpv_error
     return None
-
 
 def find_loopback_devices() -> LoopbackDevices | None:
     if shutil.which("aplay") is None:
@@ -134,11 +127,6 @@ def find_loopback_devices() -> LoopbackDevices | None:
         )
     return None
 
-
-def loopback_available() -> bool:
-    return find_loopback_devices() is not None
-
-
 def release_loopback(loopback: LoopbackDevices, *, timeout_sec: float = 2.0) -> None:
     """Wait for loopback playback PCM to close between tests."""
     deadline = time.monotonic() + timeout_sec
@@ -149,7 +137,6 @@ def release_loopback(loopback: LoopbackDevices, *, timeout_sec: float = 2.0) -> 
         time.sleep(0.05)
     time.sleep(0.2)
 
-
 def _invalidate_delivery_cache(
     loopback: LoopbackDevices,
     *,
@@ -158,17 +145,14 @@ def _invalidate_delivery_cache(
 ) -> None:
     _LOOPBACK_DELIVERY_CACHE.pop((loopback.card, sample_rate, bit_depth), None)
 
-
 def clear_loopback_delivery_cache() -> None:
     _LOOPBACK_DELIVERY_CACHE.clear()
-
 
 def alsa_capture_format(bit_depth: int) -> str:
     """ALSA format for arecord during mpv playback."""
     if bit_depth <= 16:
         return "S16_LE"
     return "S32_LE"
-
 
 def alsa_smoke_capture_format(bit_depth: int) -> str:
     """ALSA format for arecord during aplay smoke tests."""
@@ -177,7 +161,6 @@ def alsa_smoke_capture_format(bit_depth: int) -> str:
     if bit_depth == 32:
         return "S32_LE"
     return "S24_3LE"
-
 
 def create_loopback_alsa_routing(
     workspace: Path,
@@ -217,7 +200,6 @@ def create_loopback_alsa_routing(
         sample_format=sample_format,
     )
 
-
 def _apply_capture_routing(context: BitPerfectTestContext, *, use_plug: bool) -> None:
     if use_plug:
         context._saved_alsa_config = os.environ.get("ALSA_CONFIG_PATH")
@@ -230,7 +212,6 @@ def _apply_capture_routing(context: BitPerfectTestContext, *, use_plug: bool) ->
     else:
         _restore_capture_routing(context)
 
-
 def _restore_capture_routing(context: BitPerfectTestContext) -> None:
     saved = context._saved_alsa_config
     if saved is None:
@@ -240,18 +221,15 @@ def _restore_capture_routing(context: BitPerfectTestContext) -> None:
     if context._base_volume_controller is not None:
         context.service._volume_controller = context._base_volume_controller
 
-
 def _reset_playback_engine(service: PlayerService) -> None:
     if service._engine is not None:
         service._engine.quit()
         service._engine = None
 
-
 def _sign_extend_24(value: int) -> int:
     if value & 0x800000:
         value -= 1 << 24
     return value
-
 
 def _read_wav_32(handle: wave.Wave_read) -> WavPcm:
     channels = handle.getnchannels()
@@ -269,7 +247,6 @@ def _read_wav_32(handle: wave.Wave_read) -> WavPcm:
         bit_depth=32,
     )
 
-
 def _read_wav_16(handle: wave.Wave_read) -> WavPcm:
     channels = handle.getnchannels()
     sample_rate = handle.getframerate()
@@ -285,7 +262,6 @@ def _read_wav_16(handle: wave.Wave_read) -> WavPcm:
         channels=channels,
         bit_depth=16,
     )
-
 
 def _read_wav_24(path: Path) -> WavPcm:
     data = path.read_bytes()
@@ -319,7 +295,6 @@ def _read_wav_24(path: Path) -> WavPcm:
         bit_depth=24,
     )
 
-
 def read_wav_pcm(path: Path) -> WavPcm:
     with wave.open(str(path), "rb") as handle:
         sample_width = handle.getsampwidth()
@@ -328,7 +303,6 @@ def read_wav_pcm(path: Path) -> WavPcm:
         if sample_width == 4:
             return _read_wav_32(handle)
     return _read_wav_24(path)
-
 
 def _normalize_capture_to_reference(
     reference: WavPcm, captured: WavPcm
@@ -346,12 +320,10 @@ def _normalize_capture_to_reference(
         )
     return captured
 
-
 def _pcm_peak(mono: list[int]) -> int:
     if not mono:
         return 0
     return max(abs(sample) for sample in mono)
-
 
 def _assert_capture_not_silent(captured: WavPcm) -> None:
     mono = _mono_channel(captured.samples, captured.channels)
@@ -363,18 +335,15 @@ def _assert_capture_not_silent(captured: WavPcm) -> None:
             f"before running integration tests (rate={captured.sample_rate} Hz)."
         )
 
-
 def _to_compare_array(pcm: WavPcm) -> array:
     if pcm.bit_depth <= 16:
         return pcm.samples
     return pcm.samples
 
-
 def _mono_channel(samples: array, channels: int) -> list[int]:
     if channels <= 1:
         return list(samples)
     return [samples[index] for index in range(0, len(samples), channels)]
-
 
 def align_pcm(
     reference: WavPcm,
@@ -436,7 +405,6 @@ def align_pcm(
     ]
     return pattern_ref, pattern_cap
 
-
 def _assert_aligned_equal(ref_aligned: array, cap_aligned: array) -> None:
     if len(ref_aligned) != len(cap_aligned):
         raise AssertionError(
@@ -459,13 +427,11 @@ def _assert_aligned_equal(ref_aligned: array, cap_aligned: array) -> None:
             f"max_abs_diff={max_diff} at sample {mismatch_index}"
         )
 
-
 def assert_pcm_equal(reference: WavPcm, captured: WavPcm) -> None:
     captured = _normalize_capture_to_reference(reference, captured)
     _assert_capture_not_silent(captured)
     ref_aligned, cap_aligned = align_pcm(reference, captured)
     _assert_aligned_equal(ref_aligned, cap_aligned)
-
 
 def read_hw_params(card: int, *, device: int = 0) -> dict[str, str]:
     path = Path(f"/proc/asound/card{card}/pcm{device}p/sub0/hw_params")
@@ -482,7 +448,6 @@ def read_hw_params(card: int, *, device: int = 0) -> dict[str, str]:
             values["format"] = format_match.group(1)
     return values
 
-
 def _wait_for_hw_params(
     loopback: LoopbackDevices,
     *,
@@ -497,7 +462,6 @@ def _wait_for_hw_params(
             return latest
         time.sleep(0.05)
     return latest
-
 
 def assert_hw_params_match(
     hw_params: dict[str, str],
@@ -520,7 +484,6 @@ def assert_hw_params_match(
         raise AssertionError(
             f"hw_params format mismatch: {hw_params.get('format')} != {expected_format}"
         )
-
 
 class AudioRecorder:
     def __init__(
@@ -572,13 +535,11 @@ class AudioRecorder:
     def returncode(self) -> int | None:
         return self._process.poll()
 
-
 def _playback_timeout_sec(reference: WavPcm) -> float:
     frames = len(reference.samples) // max(reference.channels, 1)
     duration = frames / reference.sample_rate
     # Hi-res mpv/ALSA open can take several seconds on loopback.
     return duration + (12.0 if is_hires_sample_rate(reference.sample_rate) else 6.0)
-
 
 def wait_for_playback(service: PlayerService, *, timeout_sec: float = 15.0) -> None:
     deadline = time.monotonic() + timeout_sec
@@ -598,7 +559,6 @@ def wait_for_playback(service: PlayerService, *, timeout_sec: float = 15.0) -> N
     else:
         raise TimeoutError("playback did not finish before timeout")
 
-
 @dataclass
 class BitPerfectTestContext:
     workspace: Path
@@ -609,7 +569,6 @@ class BitPerfectTestContext:
     plug_routing: LoopbackAlsaRouting
     _base_volume_controller: object | None = None
     _saved_alsa_config: str | None = None
-
 
 def track_id_for_path(db_path: Path, file_path: Path) -> str:
     connection = connect(db_path)
@@ -628,7 +587,6 @@ def track_id_for_path(db_path: Path, file_path: Path) -> str:
     if row is None:
         raise RuntimeError(f"no indexed track for {file_path}")
     return str(row["id"])
-
 
 def _recorder_kwargs(
     context: BitPerfectTestContext,
@@ -651,7 +609,6 @@ def _recorder_kwargs(
         "channels": reference.channels,
         "alsa_config_path": None,
     }
-
 
 def _smoke_loopback_capture(
     loopback: LoopbackDevices,
@@ -711,7 +668,6 @@ def _smoke_loopback_capture(
     mono = _mono_channel(pcm.samples, pcm.channels)
     return _pcm_peak(mono) > 0
 
-
 def loopback_delivers_audio(
     loopback: LoopbackDevices,
     *,
@@ -743,7 +699,6 @@ def loopback_delivers_audio(
                 break
         _LOOPBACK_DELIVERY_CACHE[cache_key] = ok
         return ok
-
 
 def build_test_service(
     fixture_path: Path,
@@ -794,17 +749,14 @@ def build_test_service(
         _base_volume_controller=volume_controller,
     )
 
-
 def _stop_playback(service: PlayerService) -> None:
     engine = service._engine
     if engine is not None:
         engine.stop()
 
-
 def _is_loopback_capture_failure(exc: AssertionError) -> bool:
     message = str(exc).casefold()
     return "correlate" in message or "silent" in message
-
 
 def _capture_strategies(sample_rate: int) -> tuple[CaptureStrategy, ...]:
     direct = (
@@ -827,7 +779,6 @@ def _capture_strategies(sample_rate: int) -> tuple[CaptureStrategy, ...]:
         for strategy in direct_hires
     )
     return direct_hires + plug_hires
-
 
 def _capture_during_mpv_playback(
     context: BitPerfectTestContext,
@@ -931,7 +882,6 @@ def _capture_during_mpv_playback(
             recorder.stop()
         _restore_capture_routing(context)
 
-
 def run_bitperfect_case(fixture_path: Path) -> None:
     loopback = find_loopback_devices()
     if loopback is None:
@@ -989,7 +939,3 @@ def run_bitperfect_case(fixture_path: Path) -> None:
         context.service.shutdown()
         release_loopback(loopback)
 
-
-def cleanup_context(context: BitPerfectTestContext) -> None:
-    context.service.shutdown()
-    shutil.rmtree(context.workspace, ignore_errors=True)

@@ -10,7 +10,6 @@ from tunes_player.core.library.release_logic import (
     release_type_from_metadata,
 )
 from tunes_player.core.models import (
-    Artist,
     Release,
     Source,
     Track,
@@ -23,7 +22,6 @@ from tunes_player.core.release_quality import (
     classify_qobuz_catalog,
     peak_quality_tier_from_tiers,
 )
-
 
 def cover_url(image: Any) -> str | None:
     """Resolve album art from Qobuz image hash or images dict."""
@@ -44,7 +42,6 @@ def cover_url(image: Any) -> str | None:
             return cover_url(nested)
     return None
 
-
 def _artist_name_from_album(album: dict[str, Any]) -> str:
     artist = album.get("artist")
     if isinstance(artist, dict) and artist.get("name"):
@@ -56,7 +53,6 @@ def _artist_name_from_album(album: dict[str, Any]) -> str:
             return str(first["name"])
     return "Unknown Artist"
 
-
 def _year_from_album(album: dict[str, Any]) -> int | None:
     for key in ("release_date_stream", "released_at", "release_date_original"):
         raw = album.get(key)
@@ -66,7 +62,6 @@ def _year_from_album(album: dict[str, Any]) -> int | None:
             except ValueError:
                 continue
     return None
-
 
 def _release_common_fields(
     album: dict[str, Any],
@@ -117,7 +112,6 @@ def _release_common_fields(
         art_uri,
     )
 
-
 def release_stub_from_qobuz(
     album: dict[str, Any],
     *,
@@ -155,7 +149,6 @@ def release_stub_from_qobuz(
         catalog_quality_ready=False,
         catalog_release_id=catalog_id,
     )
-
 
 def release_from_qobuz(
     album: dict[str, Any],
@@ -198,15 +191,6 @@ def release_from_qobuz(
         peak_sample_rate_hz=peak_sample_rate_from_qobuz_album(album),
         peak_bit_depth=peak_bit_depth_from_qobuz_album(album),
     )
-
-
-def artist_from_qobuz(artist: dict[str, Any]) -> Artist:
-    return Artist(
-        id=qobuz_ids.artist_id(artist.get("id", "")),
-        name=str(artist.get("name") or "Unknown Artist"),
-        source=Source.QOBUZ,
-    )
-
 
 def track_from_qobuz(
     track: dict[str, Any],

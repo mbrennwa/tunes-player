@@ -19,7 +19,7 @@ from tunes_player.core.release_quality import (
     QUALITY_FILTER_HI_RES,
     playback_preference_from_shell,
 )
-from tunes_player.core.models import Release, Source
+from tunes_player.core.models import Source
 
 
 class TestQobuzIds(unittest.TestCase):

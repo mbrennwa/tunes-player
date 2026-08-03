@@ -33,7 +33,6 @@ _USB_MIXER_INFO = re.compile(
 _AMIXER_TIMEOUT_SEC = 2.0
 _VOLUME_CONTROL_CACHE: dict[tuple[int, int | None, bool], AlsaVolumeControl | None] = {}
 
-
 @dataclass(frozen=True)
 class AlsaVolumeControl:
     card: int
@@ -41,7 +40,6 @@ class AlsaVolumeControl:
     scontrol: str
     min_val: int
     max_val: int
-
 
 @dataclass(frozen=True)
 class _MixerCandidate:
@@ -54,13 +52,11 @@ class _MixerCandidate:
     playback_channels: int
     joined_volume: bool
 
-
 @dataclass(frozen=True)
 class _ControlDetails:
     playback_channels: int
     db_range: float
     joined_volume: bool
-
 
 def alsa_card_is_usb(card: int) -> bool:
     """True when the kernel exposes this ALSA card as a USB audio device."""
@@ -76,13 +72,11 @@ def alsa_card_is_usb(card: int) -> bool:
     except OSError:
         return False
 
-
 def alsa_card_from_endpoint_id(endpoint_id: str) -> int | None:
     match = _ALSA_HW_ID.match(endpoint_id)
     if match is None:
         return None
     return int(match.group(1))
-
 
 def alsa_device_from_endpoint_id(endpoint_id: str) -> int | None:
     match = _ALSA_HW_ID.match(endpoint_id)
@@ -90,13 +84,11 @@ def alsa_device_from_endpoint_id(endpoint_id: str) -> int | None:
         return None
     return int(match.group(2))
 
-
 def clear_alsa_mixer_cache() -> None:
     _VOLUME_CONTROL_CACHE.clear()
     from tunes_player.platform.linux.volume_discovery import clear_volume_discovery_cache
 
     clear_volume_discovery_cache()
-
 
 def discover_output_volume_control(
     card: int,
@@ -117,7 +109,6 @@ def discover_output_volume_control(
         _VOLUME_CONTROL_CACHE[(card, device, False)] = discovered
     return discovered
 
-
 def discover_output_volume_control_for_endpoint(
     endpoint_id: str,
     *,
@@ -129,28 +120,11 @@ def discover_output_volume_control_for_endpoint(
         return None
     return discover_output_volume_control(card, device=device, verify=verify)
 
-
-def alsa_mixer_control_for_endpoint(endpoint_id: str) -> str | None:
-    control = discover_output_volume_control_for_endpoint(endpoint_id)
-    if control is None:
-        return None
-    return control.scontrol
-
-
-def alsa_mixer_control_for_card(card: int) -> str | None:
-    control = discover_output_volume_control(card)
-    if control is None:
-        return None
-    return control.scontrol
-
-
 def alsa_mixer_available_for_endpoint(endpoint_id: str) -> bool:
     return discover_output_volume_control_for_endpoint(endpoint_id, verify=True) is not None
 
-
 def alsa_mixer_available(card: int) -> bool:
     return discover_output_volume_control(card, verify=True) is not None
-
 
 def alsa_mixer_adjustable_for_endpoint(endpoint_id: str) -> bool:
     return (
@@ -158,10 +132,8 @@ def alsa_mixer_adjustable_for_endpoint(endpoint_id: str) -> bool:
         is not None
     )
 
-
 def alsa_mixer_adjustable(card: int) -> bool:
     return discover_output_volume_control(card, verify=True) is not None
-
 
 def alsa_get_level_for_endpoint(endpoint_id: str) -> float:
     control = discover_output_volume_control_for_endpoint(endpoint_id)
@@ -169,27 +141,11 @@ def alsa_get_level_for_endpoint(endpoint_id: str) -> float:
         return 0.72
     return _read_normalized_level(control.card, control)
 
-
 def alsa_set_level_for_endpoint(endpoint_id: str, level: float) -> None:
     control = discover_output_volume_control_for_endpoint(endpoint_id)
     if control is None:
         return
     _write_normalized_level(control.card, control, max(0.0, min(1.0, level)))
-
-
-def alsa_get_level(card: int) -> float:
-    control = discover_output_volume_control(card)
-    if control is None:
-        return 0.72
-    return _read_normalized_level(card, control)
-
-
-def alsa_set_level(card: int, level: float) -> None:
-    control = discover_output_volume_control(card)
-    if control is None:
-        return
-    _write_normalized_level(card, control, max(0.0, min(1.0, level)))
-
 
 def alsa_pcm_device_is_digital_output(card: int, device: int) -> bool:
     """True when ALSA exposes this PCM as an HDMI/DP jack without local pvolume."""
@@ -200,7 +156,6 @@ def alsa_pcm_device_is_digital_output(card: int, device: int) -> bool:
     needle = f"HDMI/DP,pcm={device} Jack"
     return needle in result.stdout
 
-
 def _run_amixer(card: int, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["amixer", "-c", str(card), *args],
@@ -209,7 +164,6 @@ def _run_amixer(card: int, *args: str) -> subprocess.CompletedProcess[str]:
         text=True,
         timeout=_AMIXER_TIMEOUT_SEC,
     )
-
 
 def lookup_mixer_control_by_name(
     card: int,
@@ -232,7 +186,6 @@ def lookup_mixer_control_by_name(
         if not verify or _verify_control(card, control):
             return control
     return None
-
 
 def discover_alsa_heuristic_volume_control(
     card: int,
@@ -266,7 +219,6 @@ def discover_alsa_heuristic_volume_control(
         if _verify_control(card, control):
             return control
     return None
-
 
 def _list_mixer_candidates(card: int) -> list[_MixerCandidate]:
     try:
@@ -333,7 +285,6 @@ def _list_mixer_candidates(card: int) -> list[_MixerCandidate]:
 
     return candidates
 
-
 def _control_details(card: int, scontrol: str) -> _ControlDetails | None:
     try:
         result = _run_amixer(card, "get", scontrol)
@@ -372,7 +323,6 @@ def _control_details(card: int, scontrol: str) -> _ControlDetails | None:
         joined_volume="pvolume-joined" in capabilities,
     )
 
-
 def _db_range_from_get_output(output: str) -> float:
     for line in output.splitlines():
         minmax = _DBMINMAX.search(line)
@@ -388,7 +338,6 @@ def _db_range_from_get_output(output: str) -> float:
                 return abs(steps * step) if steps > 0 else abs(low)
             return abs(low)
     return 0.0
-
 
 def _usb_mixer_channel_map(card: int) -> dict[str, int]:
     path = Path(f"/proc/asound/card{card}/usbmixer")
@@ -414,7 +363,6 @@ def _usb_mixer_channel_map(card: int) -> dict[str, int]:
             pending_name = None
     return channels
 
-
 def _candidate_score(
     candidate: _MixerCandidate,
     usb_channels: dict[str, int],
@@ -431,7 +379,6 @@ def _candidate_score(
         candidate.max_val - candidate.min_val,
     )
 
-
 def _verify_control(card: int, control: AlsaVolumeControl) -> bool:
     before = _read_normalized_level(card, control)
     if before >= 0.55:
@@ -444,7 +391,6 @@ def _verify_control(card: int, control: AlsaVolumeControl) -> bool:
     after = _read_normalized_level(card, control)
     _write_normalized_level(card, control, before)
     return abs(after - before) >= 0.05 and abs(after - target) <= 0.1
-
 
 def _read_normalized_level(card: int, control: AlsaVolumeControl) -> float:
     try:
@@ -464,7 +410,6 @@ def _read_normalized_level(card: int, control: AlsaVolumeControl) -> float:
         return max(0.0, min(1.0, sum(percents) / len(percents) / 100))
     return _level_from_raw_values(result.stdout, control)
 
-
 def _level_from_raw_values(output: str, control: AlsaVolumeControl) -> float:
     values: list[int] = []
     for line in output.splitlines():
@@ -480,7 +425,6 @@ def _level_from_raw_values(output: str, control: AlsaVolumeControl) -> float:
         return 0.72
     normalized = (sum(values) / len(values) - control.min_val) / span
     return max(0.0, min(1.0, normalized))
-
 
 def _write_normalized_level(card: int, control: AlsaVolumeControl, level: float) -> None:
     span = control.max_val - control.min_val

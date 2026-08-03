@@ -8,18 +8,10 @@ RELEASE_TILE_MIN_EDGE = 140
 RELEASE_TILE_MAX_EDGE = 200
 RELEASE_GRID_SPACING = 12
 RELEASE_GRID_VIEW_MARGIN = 18
-SEARCH_VIEW_HORIZONTAL_MARGIN = 12
-
 
 def release_grid_min_content_width() -> int:
     """Minimum main-pane width for one column at min tile size (includes grid margins)."""
     return 2 * RELEASE_GRID_VIEW_MARGIN + RELEASE_TILE_MIN_EDGE
-
-
-def search_grid_min_content_width() -> int:
-    """Minimum width for search release tiles (search box margins + min tile)."""
-    return 2 * SEARCH_VIEW_HORIZONTAL_MARGIN + RELEASE_TILE_MIN_EDGE
-
 
 def release_grid_inner_width(
     window_width: int,
@@ -29,7 +21,6 @@ def release_grid_inner_width(
 ) -> int:
     """Width available for tile rows, derived from the window."""
     return max(0, window_width - sidebar_width - horizontal_padding)
-
 
 def release_grid_content_inner_width(
     outer_width: int,
@@ -45,7 +36,6 @@ def release_grid_content_inner_width(
     if outer_width < 1:
         return 0
     return max(0, outer_width - margin_start - margin_end)
-
 
 def release_grid_resolve_inner_width(
     *,
@@ -82,7 +72,6 @@ def release_grid_resolve_inner_width(
         inner = win
     return inner, vp, win
 
-
 def release_grid_layout(inner_width: int) -> tuple[int, int]:
     """Return (columns, tile_edge) for a start-aligned grid that fills inner_width."""
     spacing = RELEASE_GRID_SPACING
@@ -102,7 +91,6 @@ def release_grid_layout(inner_width: int) -> tuple[int, int]:
 
     edge = max(min_edge, min(edge, max_edge))
     return columns, edge
-
 
 def release_grid_visible_card_indices(
     *,

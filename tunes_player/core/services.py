@@ -1581,7 +1581,8 @@ class PlayerService:
         return self._volume_mode() != "fixed"
 
     def volume_adjustable(self) -> bool:
-        return self._volume_mode() != "fixed"
+        """Alias for volume_control_enabled (transport / MPRIS call sites)."""
+        return self.volume_control_enabled()
 
     def refresh_output_volume_detection(self) -> None:
         """Re-probe whether the active output supports hardware volume."""
@@ -2057,7 +2058,6 @@ class PlayerService:
         """Return LinuxAudioStackInfo on Linux, else None."""
         try:
             from tunes_player.platform.linux.audio_probe import (
-                LinuxAudioStackInfo,
                 probe_linux_audio_stack,
             )
         except ImportError:

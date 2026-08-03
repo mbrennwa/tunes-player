@@ -40,7 +40,6 @@ def _system_default_endpoint(*, description: str | None = None) -> VolumeEndpoin
         bit_perfect_potential="none",
     )
 
-
 def _wpctl_inspect_sink(sink_id: str) -> tuple[str | None, str | None]:
     """Return (node.name, node.description) for a wpctl sink id."""
     if shutil.which("wpctl") is None:
@@ -66,7 +65,6 @@ def _wpctl_inspect_sink(sink_id: str) -> tuple[str | None, str | None]:
         if desc_match:
             node_description = desc_match.group(1)
     return node_name, node_description
-
 
 def _wpctl_inspect_alsa_pcm(sink_id: str) -> tuple[int, int] | None:
     """Return (card, device) from wpctl inspect when the sink is ALSA-backed."""
@@ -96,7 +94,6 @@ def _wpctl_inspect_alsa_pcm(sink_id: str) -> tuple[int, int] | None:
         return None
     return card, device
 
-
 def resolve_alsa_hw_endpoint_id(endpoint: VolumeEndpoint) -> str | None:
     """Map a listed endpoint to ``alsa:hw:C:D`` when the stack exposes that PCM."""
     if is_alsa_endpoint_id(endpoint.id):
@@ -109,14 +106,12 @@ def resolve_alsa_hw_endpoint_id(endpoint: VolumeEndpoint) -> str | None:
     card, device = pcm
     return f"alsa:hw:{card}:{device}"
 
-
 def _parse_wpctl_sink_line(line: str) -> re.Match[str] | None:
     """Parse a sink line from ``wpctl status`` (tree drawing chars break plain regex)."""
     if "." not in line:
         return None
     cleaned = _WPCTL_TREE_CHARS.sub(" ", line)
     return _SINK_LINE.search(cleaned)
-
 
 def _parse_wpctl_status_sinks(stdout: str) -> list[VolumeEndpoint]:
     endpoints: list[VolumeEndpoint] = []
@@ -155,7 +150,6 @@ def _parse_wpctl_status_sinks(stdout: str) -> list[VolumeEndpoint]:
         )
     return endpoints
 
-
 def _alsa_volume_endpoints() -> list[VolumeEndpoint]:
     from tunes_player.platform.linux.audio_probe import list_alsa_playback_endpoints
 
@@ -171,7 +165,6 @@ def _alsa_volume_endpoints() -> list[VolumeEndpoint]:
             )
         )
     return endpoints
-
 
 def _mark_preferred_default(
     endpoints: list[VolumeEndpoint], *, configured_id: str | None
@@ -193,39 +186,11 @@ def _mark_preferred_default(
         chosen = endpoints[0].id
     return [replace(item, is_default=item.id == chosen) for item in endpoints]
 
-
 def create_volume_controller(config: AppConfig) -> VolumeController:
     merged = LinuxOutputController(config)
     if merged.list_endpoints():
         return merged
     return NullVolumeController(config)
-
-
-def mpv_playback_options(
-    *,
-    unity_gain: bool,
-    audio_device: str | None,
-    software_volume: float,
-    output_profile: object | None = None,
-) -> dict[str, object]:
-    """Build mpv constructor options for the selected output profile."""
-    from tunes_player.core.playback.mpv_cli import base_audio_options
-    from tunes_player.core.playback.output_profile import PlaybackOutputProfile
-
-    options: dict[str, object] = {}
-    profile = output_profile if isinstance(output_profile, PlaybackOutputProfile) else None
-    options.update(
-        base_audio_options(profile, use_device_output=profile is None or not profile.direct_alsa)
-    )
-    if unity_gain:
-        options["volume"] = 100
-        options["replaygain"] = "no"
-    else:
-        options["volume"] = max(0, min(100, int(round(software_volume * 100))))
-    if audio_device:
-        options["audio_device"] = audio_device
-    return options
-
 
 class _SubprocessVolumeController(ABC):
     uses_device_volume = True
@@ -318,7 +283,6 @@ class _SubprocessVolumeController(ABC):
             text=True,
         )
 
-
 class WpctlVolumeController(_SubprocessVolumeController):
     _command = "wpctl"
 
@@ -363,7 +327,6 @@ class WpctlVolumeController(_SubprocessVolumeController):
     def _mpv_device_for(self, endpoint: VolumeEndpoint) -> str | None:
         # mpv pulse output works with PipeWire via pipewire-pulse (pactl CLI not required).
         return f"pulse/{endpoint.name}"
-
 
 class PactlVolumeController(_SubprocessVolumeController):
     _command = "pactl"
@@ -424,7 +387,6 @@ class PactlVolumeController(_SubprocessVolumeController):
             if endpoint.id == endpoint_id:
                 return endpoint.name
         return self._run(["pactl", "get-default-sink"], check=True).stdout.strip()
-
 
 class LinuxOutputController:
     """ALSA devices (preferred) plus PipeWire/Pulse sinks when available."""
@@ -615,7 +577,6 @@ class LinuxOutputController:
         from tunes_player.platform.linux.alsa_mixer import alsa_card_from_endpoint_id
 
         return alsa_card_from_endpoint_id(endpoint_id)
-
 
 class NullVolumeController:
     """Software volume fallback when no sink controller is available."""

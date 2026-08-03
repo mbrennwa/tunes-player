@@ -10,7 +10,6 @@ from unittest.mock import patch
 from tunes_player.platform.linux.volume_quirks import (
     CardIdentity,
     clear_quirk_cache,
-    load_quirk_rules,
     match_quirk,
 )
 

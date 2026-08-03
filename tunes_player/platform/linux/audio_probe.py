@@ -12,7 +12,6 @@ _APLAY_CARD = re.compile(
     r"(.+?)(?:\s+\[([^\]]+)\])?\s*$"
 )
 
-
 @dataclass(frozen=True, slots=True)
 class LinuxAudioStackInfo:
     """Human-readable audio stack state for Settings."""
@@ -20,7 +19,6 @@ class LinuxAudioStackInfo:
     backend: str
     detail: str
     settings_hint: str
-
 
 def probe_linux_audio_stack() -> LinuxAudioStackInfo:
     """Inspect wpctl/pactl/aplay to explain what Tunes can use for output."""
@@ -94,17 +92,6 @@ def probe_linux_audio_stack() -> LinuxAudioStackInfo:
         ),
     )
 
-
-def alsa_card_description(card: int) -> str:
-    """Return the long or short name for an ALSA card number."""
-    for entry in _parse_aplay_playback_devices():
-        if entry[0] == card:
-            card_long = entry[2]
-            card_name = entry[1]
-            return (card_long or card_name).strip()
-    return ""
-
-
 def list_alsa_playback_endpoints() -> list[tuple[str, str, str]]:
     """Return (endpoint_id, mpv_device, description) for each ALSA playback device."""
     devices = _parse_aplay_playback_devices()
@@ -117,7 +104,6 @@ def list_alsa_playback_endpoints() -> list[tuple[str, str, str]]:
         for card, card_name, card_long, device, device_name, device_long in devices
     ]
 
-
 def _alsa_description(
     card_name: str,
     card_long: str | None,
@@ -127,7 +113,6 @@ def _alsa_description(
     card = (card_long or card_name).strip()
     dev = (device_long or device_name).strip()
     return f"{card} — {dev}"
-
 
 def _parse_aplay_playback_devices() -> list[tuple[int, str, str | None, int, str, str | None]]:
     if shutil.which("aplay") is None:

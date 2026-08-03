@@ -12,7 +12,6 @@ _TECH_SPEC_RE = re.compile(
     re.IGNORECASE,
 )
 
-
 def _parse_technical_spec(spec: object) -> tuple[int | None, int | None]:
     if not isinstance(spec, str) or not spec.strip():
         return None, None
@@ -29,7 +28,6 @@ def _parse_technical_spec(spec: object) -> tuple[int | None, int | None]:
         rate_hz if rate_hz > 0 else None,
     )
 
-
 def _best_qobuz_rate_depth(
     *,
     bit_depth: int | None,
@@ -40,7 +38,6 @@ def _best_qobuz_rate_depth(
     if depth is not None and rate_hz is not None:
         return depth, rate_hz
     return depth, rate_hz
-
 
 def _qobuz_peak_rate_depth_from_dict(item: dict[str, Any]) -> tuple[int | None, int | None]:
     depth = None
@@ -66,7 +63,6 @@ def _qobuz_peak_rate_depth_from_dict(item: dict[str, Any]) -> tuple[int | None, 
             rate_hz = spec_rate
     return _best_qobuz_rate_depth(bit_depth=depth, sample_rate_hz=rate_hz)
 
-
 def peak_rate_depth_from_qobuz_album(album: dict[str, Any]) -> tuple[int | None, int | None]:
     """Best peak rate/depth from Qobuz album/get JSON (album + track items)."""
     best_depth: int | None = None
@@ -86,11 +82,9 @@ def peak_rate_depth_from_qobuz_album(album: dict[str, Any]) -> tuple[int | None,
         return best_depth, best_rate
     return None, None
 
-
 def peak_sample_rate_from_qobuz_album(album: dict[str, Any]) -> int | None:
     _, rate_hz = peak_rate_depth_from_qobuz_album(album)
     return rate_hz
-
 
 def peak_bit_depth_from_qobuz_album(album: dict[str, Any]) -> int | None:
     depth, rate_hz = peak_rate_depth_from_qobuz_album(album)
@@ -99,7 +93,6 @@ def peak_bit_depth_from_qobuz_album(album: dict[str, Any]) -> int | None:
     if rate_hz and rate_hz > 0:
         return 24 if rate_hz > 48_000 else 16
     return None
-
 
 def _tidal_album_needs_stream_probe(album: object) -> bool:
     from tunes_player.core.backends.tidal.stream_quality import track_peak_quality
@@ -111,7 +104,6 @@ def _tidal_album_needs_stream_probe(album: object) -> bool:
             return False
     rank = track_peak_quality(album)
     return rank >= 2
-
 
 def peak_rate_depth_from_tidal_album(album: object) -> tuple[int | None, int | None]:
     """Peak lossless rate/depth from TIDAL album metadata and serialized stream probe."""
@@ -164,16 +156,13 @@ def peak_rate_depth_from_tidal_album(album: object) -> tuple[int | None, int | N
         best_depth = 24 if best_rate > 48_000 else 16
     return best_depth, best_rate
 
-
 def peak_sample_rate_from_tidal_album(album: object) -> int | None:
     _, rate_hz = peak_rate_depth_from_tidal_album(album)
     return rate_hz
 
-
 def peak_bit_depth_from_tidal_album(album: object) -> int | None:
     depth, _ = peak_rate_depth_from_tidal_album(album)
     return depth
-
 
 def _normalize_genre_label(raw: object) -> str | None:
     if not isinstance(raw, str):
@@ -188,7 +177,6 @@ def _normalize_genre_label(raw: object) -> str | None:
             return slug.title()
     return text
 
-
 def _genre_from_tidal_openapi_genre_attrs(attrs: object) -> str | None:
     if not isinstance(attrs, dict):
         return None
@@ -197,7 +185,6 @@ def _genre_from_tidal_openapi_genre_attrs(attrs: object) -> str | None:
         if label:
             return label
     return None
-
 
 def genre_from_tidal_openapi_payload(payload: object) -> str | None:
     """Parse genre from TIDAL OpenAPI v2 JSON:API (album or track) responses."""
@@ -230,7 +217,6 @@ def genre_from_tidal_openapi_payload(payload: object) -> str | None:
                                     return label
     return None
 
-
 def fetch_tidal_openapi_resource(
     session: object,
     resource: str,
@@ -258,18 +244,6 @@ def fetch_tidal_openapi_resource(
     except Exception:
         return None
 
-
-def tidal_track_openapi_attrs(session: object, track_id: object) -> dict | None:
-    payload = fetch_tidal_openapi_resource(session, "tracks", track_id)
-    if not isinstance(payload, dict):
-        return None
-    data = payload.get("data")
-    if not isinstance(data, dict):
-        return None
-    attrs = data.get("attributes")
-    return attrs if isinstance(attrs, dict) else None
-
-
 def media_tags_from_tidal_openapi_attrs(attrs: dict) -> set[str]:
     from tunes_player.core.backends.tidal.stream_quality import normalize_api_quality
 
@@ -286,26 +260,16 @@ def media_tags_from_tidal_openapi_attrs(attrs: dict) -> set[str]:
         pass
     return tags
 
-
-def genre_from_tidal_openapi_album(session: object, album_id: object) -> str | None:
-    payload = fetch_tidal_openapi_resource(session, "albums", album_id)
-    if payload is None:
-        return None
-    return genre_from_tidal_openapi_payload(payload)
-
-
 def genre_from_tidal_openapi_track(session: object, track_id: object) -> str | None:
     payload = fetch_tidal_openapi_resource(session, "tracks", track_id)
     if payload is None:
         return None
     return genre_from_tidal_openapi_payload(payload)
 
-
 def genre_from_tidal_openapi_payload_dict(payload: dict | None) -> str | None:
     if payload is None:
         return None
     return genre_from_tidal_openapi_payload(payload)
-
 
 def media_tags_from_tidal_openapi_payload(payload: dict | None) -> set[str]:
     if not isinstance(payload, dict):
@@ -317,7 +281,6 @@ def media_tags_from_tidal_openapi_payload(payload: dict | None) -> set[str]:
     if not isinstance(attrs, dict):
         return set()
     return media_tags_from_tidal_openapi_attrs(attrs)
-
 
 def genre_from_tidal_album_json(data: object) -> str | None:
     if not isinstance(data, dict):
@@ -339,7 +302,6 @@ def genre_from_tidal_album_json(data: object) -> str | None:
                     if label:
                         return label
     return None
-
 
 def genre_from_tidal_album(
     album: object,
@@ -378,7 +340,6 @@ def genre_from_tidal_album(
         return genre_from_tidal_openapi_track(session, track_id)
     return None
 
-
 def _session_supports_tidal_openapi(session: object) -> bool:
     config = getattr(session, "config", None)
     request_factory = getattr(session, "request", None)
@@ -388,7 +349,6 @@ def _session_supports_tidal_openapi(session: object) -> bool:
         and request_factory is not None
         and callable(getattr(request_factory, "request", None))
     )
-
 
 def tidal_first_track_openapi_payload(
     album: object,

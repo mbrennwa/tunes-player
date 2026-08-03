@@ -17,11 +17,9 @@ _QUALITY_RANK = {
     "HI_RES_LOSSLESS": 4,
 }
 
-
 class _TrackQualityInfo(Protocol):
     audio_quality: str | None
     media_metadata_tags: object | None
-
 
 def normalize_api_quality(quality: str | None) -> str:
     if not quality:
@@ -31,13 +29,11 @@ def normalize_api_quality(quality: str | None) -> str:
         key = key.split(".")[-1]
     return key.replace("AUDIOQUALITY.", "")
 
-
 def quality_request_value(quality: object) -> str:
     """API audioquality query value (string)."""
     if hasattr(quality, "value"):
         return str(getattr(quality, "value"))
     return str(quality)
-
 
 def subscription_allows_hi_res(payload: dict[str, Any]) -> bool:
     """Best-effort read of users/{id}/subscription JSON."""
@@ -69,7 +65,6 @@ def subscription_allows_hi_res(payload: dict[str, Any]) -> bool:
         return True
     return False
 
-
 def track_peak_quality(track: _TrackQualityInfo) -> int:
     peak = _QUALITY_RANK.get(normalize_api_quality(track.audio_quality), 0)
     tags = track.media_metadata_tags
@@ -85,16 +80,10 @@ def track_peak_quality(track: _TrackQualityInfo) -> int:
         peak = max(peak, _QUALITY_RANK["LOSSLESS"])
     return peak
 
-
-def track_supports_lossless(track: _TrackQualityInfo) -> bool:
-    return track_peak_quality(track) >= _QUALITY_RANK["LOSSLESS"]
-
-
 def session_quality_for_subscription(*, hi_res_entitled: bool) -> str:
     if hi_res_entitled:
         return "HI_RES_LOSSLESS"
     return "LOSSLESS"
-
 
 def _preference_tidal_rank_bounds(
     preference: object,
@@ -117,7 +106,6 @@ def _preference_tidal_rank_bounds(
     }
     return _QUALITY_RANK["HIGH"], max_tier_api[max_tier]
 
-
 def cap_session_quality_for_preference(
     session_quality: str,
     preference: object,
@@ -131,15 +119,6 @@ def cap_session_quality_for_preference(
         if _QUALITY_RANK[tier] <= max_rank:
             return tier
     return "HIGH"
-
-
-def cap_session_quality_for_policy(
-    session_quality: str,
-    policy: object,
-) -> str:
-    """Backward-compatible alias."""
-    return cap_session_quality_for_preference(session_quality, policy)
-
 
 def playback_quality_candidates(
     session_quality: str,
@@ -200,10 +179,8 @@ def playback_quality_candidates(
     ]
     return filtered or [_LOSSY_API_TIER]
 
-
 def payload_audio_quality(payload: dict[str, Any]) -> str:
     return normalize_api_quality(payload.get("audioQuality"))
-
 
 def payload_sample_rate_hz(payload: dict[str, Any]) -> int:
     rate = payload.get("sampleRate")
@@ -214,7 +191,6 @@ def payload_sample_rate_hz(payload: dict[str, Any]) -> int:
     except (TypeError, ValueError):
         return 0
 
-
 def payload_is_hi_res_stream(payload: dict[str, Any]) -> bool:
     """True when the negotiated stream is acoustically above CD quality."""
     from tunes_player.core.release_quality import is_acoustic_hi_res
@@ -223,7 +199,6 @@ def payload_is_hi_res_stream(payload: dict[str, Any]) -> bool:
     if quality == _LOSSY_API_TIER:
         return False
     return is_acoustic_hi_res(payload_sample_rate_hz(payload))
-
 
 def should_warn_hi_res_filter_miss(
     payload: dict[str, Any],
@@ -245,7 +220,6 @@ def should_warn_hi_res_filter_miss(
         return False
     return track_peak_quality(track) >= _QUALITY_RANK["HI_RES"]
 
-
 def should_warn_lossy_stream_fallback(
     candidates: list[str],
     resolved: str,
@@ -259,7 +233,6 @@ def should_warn_lossy_stream_fallback(
         for item in candidates
     )
 
-
 def should_retry_after_high(
     payload: dict[str, Any],
     *,
@@ -271,7 +244,6 @@ def should_retry_after_high(
     if tried == "LOSSLESS":
         return False
     return "LOSSLESS" in remaining
-
 
 def should_retry_after_sub_hi_res(
     payload: dict[str, Any],
@@ -295,7 +267,6 @@ def should_retry_after_sub_hi_res(
     if tried in ("HI_RES_LOSSLESS", "HI_RES") and remaining:
         return True
     return False
-
 
 def should_retry_after_lossless_cd(
     payload: dict[str, Any],
@@ -324,7 +295,6 @@ def should_retry_after_lossless_cd(
         tier in remaining for tier in ("HI_RES_LOSSLESS", "HI_RES")
     )
     return hi_res_remaining
-
 
 def negotiate_stream_payload(
     candidates: list[str],

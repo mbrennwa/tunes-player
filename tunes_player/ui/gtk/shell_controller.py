@@ -13,7 +13,6 @@ from tunes_player.core.shell_state import (
     SearchScope,
     ShellBase,
     ShellState,
-    apply_shell_view_filters,
     releases_from_recently_added,
 )
 
@@ -29,7 +28,6 @@ _SOURCE_FILTER_LABELS = {
     Source.QOBUZ: "Qobuz",
 }
 
-
 def format_release_count_label(
     *,
     filtered_count: int,
@@ -44,7 +42,6 @@ def format_release_count_label(
         return f"{filtered_count} of {catalog_count}"
     return str(filtered_count)
 
-
 def available_sources(service: PlayerService) -> set[Source]:
     sources: set[Source] = set()
     if service.config.config.music_folders:
@@ -54,7 +51,6 @@ def available_sources(service: PlayerService) -> set[Source]:
     if service.qobuz_is_logged_in():
         sources.add(Source.QOBUZ)
     return sources
-
 
 def all_local_empty_message(
     service: PlayerService,
@@ -73,7 +69,6 @@ def all_local_empty_message(
             "Open Settings → Sources and turn on Watch folder for your libraries."
         )
     return None
-
 
 def filter_empty_message(state: ShellState) -> str | None:
     """Explain an empty grid when the catalog still has releases."""
@@ -96,7 +91,6 @@ def filter_empty_message(state: ShellState) -> str | None:
         )
         return f"No releases from {names} in this selection."
     return None
-
 
 def empty_grid_message(
     service: PlayerService,
@@ -135,7 +129,6 @@ def empty_grid_message(
 
     return filter_empty_message(state)
 
-
 def grid_load_is_sync(state: ShellState, *, has_valid_cache: bool) -> bool:
     """Return True when the browse grid can be built synchronously on the UI thread."""
     if state.base == ShellBase.NONE:
@@ -143,7 +136,6 @@ def grid_load_is_sync(state: ShellState, *, has_valid_cache: bool) -> bool:
     if has_valid_cache:
         return True
     return state.base == ShellBase.ALL_LOCAL
-
 
 def fetch_base_releases(
     service: PlayerService,
@@ -172,33 +164,3 @@ def fetch_base_releases(
         return service.list_flagged_releases()
     return []
 
-
-def fetch_filtered_releases(
-    service: PlayerService,
-    base: ShellBase,
-    *,
-    search_query: str = "",
-    search_scope: SearchScope = SearchScope.ALL,
-    enabled_sources: frozenset[Source] | None = None,
-    enabled_genres: frozenset[str] | None = None,
-    enabled_release_types: frozenset[str] | None = None,
-    enabled_quality_tiers: frozenset[str] | None = None,
-    sort_key: str | None = None,
-    sort_descending: bool = True,
-) -> list[Release]:
-    releases = fetch_base_releases(
-        service,
-        base,
-        search_query=search_query,
-        search_scope=search_scope,
-    )
-    return apply_shell_view_filters(
-        releases,
-        enabled_sources=enabled_sources or frozenset(),
-        enabled_genres=enabled_genres or frozenset(),
-        enabled_release_types=enabled_release_types or frozenset(),
-        enabled_quality_tiers=enabled_quality_tiers or frozenset(),
-        available_sources=frozenset(available_sources(service)),
-        sort_key=sort_key,
-        sort_descending=sort_descending,
-    )

@@ -52,7 +52,6 @@ _RELEASE_ART_PLAY_MAX_SIZE = 66
 _ELLIPSIZE_NONE = 0
 _ELLIPSIZE_END = 3
 
-
 class PlaceholderView(Gtk.Box):
     def __init__(self, *, title: str, message: str) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, vexpand=True)
@@ -76,7 +75,6 @@ class PlaceholderView(Gtk.Box):
         label.set_wrap(True)
         label.set_max_width_chars(52)
         box.append(label)
-
 
 class LoadingDiscoverView(Gtk.Box):
     def __init__(self, *, message: str) -> None:
@@ -111,7 +109,6 @@ class LoadingDiscoverView(Gtk.Box):
     def _on_unmap(self, *_args: object) -> None:
         self._spinner.stop()
 
-
 def _release_art_play_layout(art_size: int) -> tuple[int, int]:
     """Return circular play button diameter and corner inset for *art_size* px artwork."""
     if art_size < 1:
@@ -120,7 +117,6 @@ def _release_art_play_layout(art_size: int) -> tuple[int, int]:
     button = max(_RELEASE_ART_PLAY_MIN_SIZE, min(_RELEASE_ART_PLAY_MAX_SIZE, button))
     inset = max(4, round(art_size * _RELEASE_ART_PLAY_INSET_RATIO))
     return button, inset
-
 
 def _release_grid_playable(release: Release) -> bool:
     """Whether the grid overlay play button should be sensitive.
@@ -134,11 +130,9 @@ def _release_grid_playable(release: Release) -> bool:
         return True
     return release.source != Source.LOCAL
 
-
 def _track_count_label(count: int) -> str:
     noun = "track" if count == 1 else "tracks"
     return f"{count} {noun}"
-
 
 def _format_release_track_count(release: Release) -> str | None:
     if release.expected_track_count and release.track_count < release.expected_track_count:
@@ -146,7 +140,6 @@ def _format_release_track_count(release: Release) -> str | None:
     if release.track_count:
         return _track_count_label(release.track_count)
     return None
-
 
 def _release_catalog_meta_line(release: Release, *extra_parts: str | None) -> str:
     """Third metadata line: tracks · source · quality (optional extra segments)."""
@@ -157,12 +150,10 @@ def _release_catalog_meta_line(release: Release, *extra_parts: str | None) -> st
         *extra_parts,
     )
 
-
 def _release_artist_line_text(release: Release) -> str:
     """Second metadata line: artist · year · genre."""
     year = str(release.year) if release.year else None
     return join_detail(release.artist_name, year, release.genre)
-
 
 def _sync_release_art_play_button(
     btn: Gtk.Button,
@@ -177,7 +168,6 @@ def _sync_release_art_play_button(
         btn.set_icon_name("media-playback-start-symbolic")
         btn.set_tooltip_text("Play release")
 
-
 def _release_completeness_label(release: Release) -> str | None:
     if release.completeness == ReleaseCompleteness.PARTIAL:
         expected = release.expected_track_count or "?"
@@ -185,7 +175,6 @@ def _release_completeness_label(release: Release) -> str | None:
     if release.completeness == ReleaseCompleteness.SYNTHETIC:
         return "Synthetic release"
     return None
-
 
 class ReleaseGridView(Gtk.ScrolledWindow):
     def __init__(
@@ -410,7 +399,6 @@ class ReleaseGridView(Gtk.ScrolledWindow):
         if grid is not None:
             GLib.idle_add(grid._sync_layout_and_notify_idle)
 
-
 class QueueSheet(Adw.Dialog):
     def __init__(self, *, service: PlayerService) -> None:
         super().__init__()
@@ -477,7 +465,6 @@ class QueueSheet(Adw.Dialog):
                 lambda _row, index=index: self._service.play_playlist_index(index),
             )
             self._list_box.append(row)
-
 
 class ReleaseDetailView(Gtk.Box):
     def __init__(
@@ -637,7 +624,6 @@ class ReleaseDetailView(Gtk.Box):
         if unsubscribe is not None:
             unsubscribe()
 
-
 def _compact_track_row(track: Track, *, index: int) -> Gtk.ListBoxRow:
     row = Gtk.ListBoxRow()
     row.track_id = track.id
@@ -679,70 +665,10 @@ def _compact_track_row(track: Track, *, index: int) -> Gtk.ListBoxRow:
 
     return row
 
-
-def _track_row(
-    track: Track,
-    *,
-    index: int | None = None,
-    on_activate: Callable[[], None] | None = None,
-) -> Gtk.ListBoxRow:
-    row = Gtk.ListBoxRow()
-    row.set_activatable(on_activate is not None)
-    if on_activate is not None:
-        row.connect("activated", lambda *_args: on_activate())
-
-    box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-    box.set_margin_top(8)
-    box.set_margin_bottom(8)
-    box.set_margin_start(12)
-    box.set_margin_end(12)
-    row.set_child(box)
-
-    if index is not None:
-        number = Gtk.Label(label=format_track_number(index), xalign=1.0)
-        number.add_css_class("dim-label")
-        number.set_width_chars(3)
-        box.append(number)
-
-    details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-    details.set_hexpand(True)
-    box.append(details)
-
-    title = Gtk.Label(label=track.title, xalign=0)
-    title.set_halign(Gtk.Align.START)
-    title.set_ellipsize(3)
-    details.append(title)
-
-    subtitle = Gtk.Label(
-        label=join_detail(track.artist_name, track.release_title),
-        xalign=0,
-    )
-    subtitle.add_css_class("dim-label")
-    subtitle.set_halign(Gtk.Align.START)
-    subtitle.set_ellipsize(3)
-    details.append(subtitle)
-
-    meta = Gtk.Label(
-        label=join_detail(
-            format_duration(track.duration_sec),
-            source_label(track.source),
-        ),
-        xalign=1.0,
-    )
-    meta.add_css_class("dim-label")
-    meta.add_css_class("caption")
-    meta.set_halign(Gtk.Align.END)
-    meta.set_valign(Gtk.Align.CENTER)
-    box.append(meta)
-
-    return row
-
-
 def _section_label(text: str) -> Gtk.Label:
     label = Gtk.Label(label=text, xalign=0)
     label.add_css_class("heading")
     return label
-
 
 class _FixedMinWidthShell(Gtk.Box):
     """Scroll child shell: fixed horizontal minimum so the window can shrink to one column."""
@@ -767,7 +693,6 @@ class _FixedMinWidthShell(Gtk.Box):
                 nat_b,
             )
         return min_w, nat_w, min_b, nat_b
-
 
 class ReleaseTileGrid(Gtk.Box):
     """Square release tiles; column count follows the viewport width."""
@@ -1044,10 +969,8 @@ class ReleaseTileGrid(Gtk.Box):
             self.remove(child)
             child = next_child
 
-
 def _reset_album_tile_size(card: Gtk.Widget) -> None:
     card.set_size_request(-1, -1)
-
 
 def _find_art_picture(root: Gtk.Widget) -> Gtk.Picture | None:
     if isinstance(root, Gtk.Picture):
@@ -1059,7 +982,6 @@ def _find_art_picture(root: Gtk.Widget) -> Gtk.Picture | None:
             return found
         child = child.get_next_sibling()
     return None
-
 
 def _bind_detail_hero_art_sync(
     header_row: Gtk.Box,
@@ -1088,7 +1010,6 @@ def _bind_detail_hero_art_sync(
         widget.connect("notify::height", sync)
     header_row.connect("map", sync)
     GLib.idle_add(sync)
-
 
 def _sync_detail_hero_art(
     header_row: Gtk.Box,
@@ -1119,7 +1040,6 @@ def _sync_detail_hero_art(
     state["pixel_size"] = edge
     art_loader.set_picture(picture, release.art_uri, pixel_size=edge)
 
-
 def _find_release_art_play_button(root: Gtk.Widget) -> Gtk.Button | None:
     if isinstance(root, Gtk.Button) and root.has_css_class("release-art-play"):
         return root
@@ -1131,13 +1051,11 @@ def _find_release_art_play_button(root: Gtk.Widget) -> Gtk.Button | None:
         child = child.get_next_sibling()
     return None
 
-
 def _apply_release_art_play_button_metrics(btn: Gtk.Button, art_size: int) -> None:
     button_px, inset = _release_art_play_layout(art_size)
     btn.set_size_request(button_px, button_px)
     btn.set_margin_start(inset)
     btn.set_margin_top(inset)
-
 
 def _apply_album_tile_size(card: Gtk.Widget, edge: int) -> None:
     if edge < 1:
@@ -1156,7 +1074,6 @@ def _apply_album_tile_size(card: Gtk.Widget, edge: int) -> None:
     if play_btn is not None:
         _apply_release_art_play_button_metrics(play_btn, edge)
 
-
 def _picked_has_css_class(widget: Gtk.Widget, x: float, y: float, css_class: str) -> bool:
     picked = widget.pick(x, y, Gtk.PickFlags.DEFAULT)
     while picked is not None:
@@ -1165,14 +1082,11 @@ def _picked_has_css_class(widget: Gtk.Widget, x: float, y: float, css_class: str
         picked = picked.get_parent()
     return False
 
-
 def _picked_is_release_art_play(widget: Gtk.Widget, x: float, y: float) -> bool:
     return _picked_has_css_class(widget, x, y, "release-art-play")
 
-
 def _picked_is_artist_link(widget: Gtk.Widget, x: float, y: float) -> bool:
     return _picked_has_css_class(widget, x, y, "artist-link")
-
 
 def _attach_album_card_activate(tile: Gtk.Widget, callback: Callable[[], None]) -> None:
     gesture = Gtk.GestureClick()
@@ -1186,7 +1100,6 @@ def _attach_album_card_activate(tile: Gtk.Widget, callback: Callable[[], None]) 
     tile.add_controller(gesture)
     tile.set_focusable(True)
     tile.set_cursor_from_name("pointer")
-
 
 def _create_release_art_play_button(
     *,
@@ -1208,7 +1121,6 @@ def _create_release_art_play_button(
     btn.connect("clicked", lambda *_args: on_play())
     return btn
 
-
 def _attach_release_art_play(
     overlay: Gtk.Overlay,
     *,
@@ -1219,7 +1131,6 @@ def _attach_release_art_play(
     btn = _create_release_art_play_button(on_play=on_play, playable=playable, art_size=art_size)
     overlay.add_overlay(btn)
     return btn
-
 
 def _square_art_with_play(
     release: Release,
@@ -1267,7 +1178,6 @@ def _square_art_with_play(
 
     return frame
 
-
 def _detail_artist_line(
     release: Release,
     *,
@@ -1298,7 +1208,6 @@ def _detail_artist_line(
     )
     return button
 
-
 def _overlay_label(text: str, *, extra_classes: tuple[str, ...] = ()) -> Gtk.Label:
     label = Gtk.Label(label=text, xalign=0.0, ellipsize=_ELLIPSIZE_END)
     label.set_halign(Gtk.Align.START)
@@ -1306,7 +1215,6 @@ def _overlay_label(text: str, *, extra_classes: tuple[str, ...] = ()) -> Gtk.Lab
     for css_class in extra_classes:
         label.add_css_class(css_class)
     return label
-
 
 def _overlay_artist_line(
     release: Release,
@@ -1335,7 +1243,6 @@ def _overlay_artist_line(
         lambda *_args: on_artist_search(release.artist_name),
     )
     return button
-
 
 def _release_card(
     release: Release,
