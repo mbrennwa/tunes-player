@@ -73,12 +73,51 @@ def _locked_db(method):
     return wrapper
 
 
+class _WriteSession:
+    """Context manager: use the long-lived write conn, or a temporary one if closed."""
+
+    def __init__(self, store: LibraryStore) -> None:
+        self._store = store
+        self._owned = False
+
+    def __enter__(self) -> sqlite3.Connection:
+        if self._store._write_connection is None:
+            self._store._write_connection = connect(self._store._db_path)
+            self._owned = True
+        return self._store._write_connection
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if not self._owned:
+            return
+        connection = self._store._write_connection
+        self._store._write_connection = None
+        if connection is not None:
+            try:
+                if exc_type is not None:
+                    connection.rollback()
+            except sqlite3.Error:
+                pass
+            try:
+                connection.close()
+            except sqlite3.Error:
+                pass
+
+
 class LibraryStore:
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
         self._lock = threading.RLock()
         self._write_connection: sqlite3.Connection | None = connect(db_path)
         self._read_connection: sqlite3.Connection | None = None
+        # When True (label sync enabled), keep soft-kept local:* label rows.
+        self._preserve_synced_label_orphans = False
+
+    def set_preserve_synced_label_orphans(self, enabled: bool) -> None:
+        self._preserve_synced_label_orphans = bool(enabled)
+
+    def _write_session(self) -> _WriteSession:
+        """Borrow the write connection, opening a temporary one if scans closed it."""
+        return _WriteSession(self)
 
     @property
     def connection(self) -> sqlite3.Connection:
@@ -157,7 +196,10 @@ class LibraryStore:
         if self._write_connection is not None:
             self._write_connection.close()
         self._write_connection = connect(self._db_path)
-        self._prune_release_label_tables(self._write_connection)
+        self._prune_release_label_tables(
+            self._write_connection,
+            preserve_local_orphans=self._preserve_synced_label_orphans,
+        )
         self._write_connection.commit()
 
     @_locked_db
@@ -600,7 +642,20 @@ class LibraryStore:
         return name.strip()
 
     @staticmethod
-    def _prune_stale_release_labels(connection: sqlite3.Connection) -> None:
+    def _prune_stale_release_labels(
+        connection: sqlite3.Connection,
+        *,
+        preserve_local_orphans: bool = False,
+    ) -> None:
+        if preserve_local_orphans:
+            connection.execute(
+                """
+                DELETE FROM release_labels
+                WHERE (release_id GLOB 'tidal:*' AND release_id NOT GLOB 'tidal:album:*')
+                   OR (release_id GLOB 'qobuz:*' AND release_id NOT GLOB 'qobuz:album:*')
+                """,
+            )
+            return
         connection.execute(
             """
             DELETE FROM release_labels
@@ -631,18 +686,30 @@ class LibraryStore:
         )
 
     @staticmethod
-    def _prune_release_label_tables(connection: sqlite3.Connection) -> None:
-        LibraryStore._prune_stale_release_labels(connection)
+    def _prune_release_label_tables(
+        connection: sqlite3.Connection,
+        *,
+        preserve_local_orphans: bool = False,
+    ) -> None:
+        LibraryStore._prune_stale_release_labels(
+            connection,
+            preserve_local_orphans=preserve_local_orphans,
+        )
         LibraryStore._prune_orphan_user_labels(connection)
 
     @_locked_db
     def prune_release_label_tables(self) -> None:
+        # During background scans the write connection is released; skip prune
+        # rather than failing label UI that only needs a read.
         if self._write_connection is None:
-            raise RuntimeError("library store write connection is closed")
+            return
 
         def attempt() -> None:
             try:
-                self._prune_release_label_tables(self._write_connection)
+                self._prune_release_label_tables(
+                    self._write_connection,
+                    preserve_local_orphans=self._preserve_synced_label_orphans,
+                )
                 self._write_connection.commit()
             except Exception:
                 try:
@@ -763,102 +830,13 @@ class LibraryStore:
 
     @_locked_db
     def ensure_user_label(self, name: str) -> str:
-        if self._write_connection is None:
-            raise RuntimeError("library store write connection is closed")
         normalized = self._normalize_label_name(name)
         if not normalized:
             raise ValueError("label name must not be empty")
 
-        def attempt() -> str:
-            try:
-                label_id = self._label_id_for_name(
-                    self._write_connection,
-                    normalized,
-                    create=True,
-                )
-                if label_id is None:
-                    raise ValueError("label name must not be empty")
-                row = self._write_connection.execute(
-                    "SELECT name FROM user_labels WHERE id = ?",
-                    (label_id,),
-                ).fetchone()
-                self._write_connection.commit()
-                return str(row["name"]) if row is not None else normalized
-            except Exception:
+        with self._write_session():
+            def attempt() -> str:
                 try:
-                    self._write_connection.rollback()
-                except sqlite3.OperationalError:
-                    pass
-                raise
-
-        def rollback_on_locked(_exc: sqlite3.OperationalError, _attempt: int) -> None:
-            try:
-                self._write_connection.rollback()
-            except sqlite3.OperationalError:
-                pass
-
-        return with_db_retry(attempt, on_locked=rollback_on_locked)
-
-    @_locked_db
-    def set_release_labels(self, release_id: str, labels: frozenset[str]) -> None:
-        if self._write_connection is None:
-            raise RuntimeError("library store write connection is closed")
-        normalized = frozenset(
-            self._normalize_label_name(label)
-            for label in labels
-            if self._normalize_label_name(label)
-        )
-
-        def attempt() -> None:
-            try:
-                self._write_connection.execute(
-                    "DELETE FROM release_labels WHERE release_id = ?",
-                    (release_id,),
-                )
-                when = time.time_ns()
-                for label in sorted(normalized, key=lambda item: item.casefold()):
-                    label_id = self._label_id_for_name(
-                        self._write_connection,
-                        label,
-                        create=True,
-                    )
-                    if label_id is None:
-                        continue
-                    self._write_connection.execute(
-                        """
-                        INSERT INTO release_labels(release_id, label_id, tagged_at_ns)
-                        VALUES (?, ?, ?)
-                        """,
-                        (release_id, label_id, when),
-                    )
-                self._prune_orphan_user_labels(self._write_connection)
-                self._write_connection.commit()
-            except Exception:
-                try:
-                    self._write_connection.rollback()
-                except sqlite3.OperationalError:
-                    pass
-                raise
-
-        def rollback_on_locked(_exc: sqlite3.OperationalError, _attempt: int) -> None:
-            try:
-                self._write_connection.rollback()
-            except sqlite3.OperationalError:
-                pass
-
-        with_db_retry(attempt, on_locked=rollback_on_locked)
-
-    @_locked_db
-    def toggle_release_label(self, release_id: str, label: str, *, on: bool) -> None:
-        if self._write_connection is None:
-            raise RuntimeError("library store write connection is closed")
-        normalized = self._normalize_label_name(label)
-        if not normalized:
-            raise ValueError("label name must not be empty")
-
-        def attempt() -> None:
-            try:
-                if on:
                     label_id = self._label_id_for_name(
                         self._write_connection,
                         normalized,
@@ -866,41 +844,446 @@ class LibraryStore:
                     )
                     if label_id is None:
                         raise ValueError("label name must not be empty")
-                    when = time.time_ns()
-                    self._write_connection.execute(
-                        """
-                        INSERT OR IGNORE INTO release_labels(release_id, label_id, tagged_at_ns)
-                        VALUES (?, ?, ?)
-                        """,
-                        (release_id, label_id, when),
-                    )
-                else:
-                    self._write_connection.execute(
-                        """
-                        DELETE FROM release_labels
-                        WHERE release_id = ?
-                          AND label_id IN (
-                              SELECT id FROM user_labels WHERE name = ? COLLATE NOCASE
-                          )
-                        """,
-                        (release_id, normalized),
-                    )
-                self._prune_orphan_user_labels(self._write_connection)
-                self._write_connection.commit()
-            except Exception:
+                    row = self._write_connection.execute(
+                        "SELECT name FROM user_labels WHERE id = ?",
+                        (label_id,),
+                    ).fetchone()
+                    self._write_connection.commit()
+                    return str(row["name"]) if row is not None else normalized
+                except Exception:
+                    try:
+                        self._write_connection.rollback()
+                    except sqlite3.OperationalError:
+                        pass
+                    raise
+
+            def rollback_on_locked(_exc: sqlite3.OperationalError, _attempt: int) -> None:
                 try:
                     self._write_connection.rollback()
                 except sqlite3.OperationalError:
                     pass
-                raise
 
-        def rollback_on_locked(_exc: sqlite3.OperationalError, _attempt: int) -> None:
-            try:
-                self._write_connection.rollback()
-            except sqlite3.OperationalError:
-                pass
+            return with_db_retry(attempt, on_locked=rollback_on_locked)
 
-        with_db_retry(attempt, on_locked=rollback_on_locked)
+    @_locked_db
+    def set_release_labels(
+        self,
+        release_id: str,
+        labels: frozenset[str],
+        *,
+        by_device: str = "",
+        mark_dirty: bool = True,
+    ) -> None:
+        normalized = frozenset(
+            self._normalize_label_name(label)
+            for label in labels
+            if self._normalize_label_name(label)
+        )
+        dirty_flag = 1 if mark_dirty else 0
+        device = str(by_device or "")
+
+        with self._write_session():
+            def attempt() -> None:
+                try:
+                    existing_rows = self._write_connection.execute(
+                        """
+                        SELECT ul.name
+                        FROM release_labels rl
+                        JOIN user_labels ul ON ul.id = rl.label_id
+                        WHERE rl.release_id = ?
+                        """,
+                        (release_id,),
+                    ).fetchall()
+                    existing = {str(row["name"]) for row in existing_rows}
+                    when = time.time_ns()
+                    for name in existing - normalized:
+                        self._write_connection.execute(
+                            """
+                            INSERT INTO release_label_tombstones(
+                                release_id, label_name, at_ns, by_device, dirty
+                            )
+                            VALUES (?, ?, ?, ?, ?)
+                            ON CONFLICT(release_id, label_name) DO UPDATE SET
+                                at_ns = excluded.at_ns,
+                                by_device = excluded.by_device,
+                                dirty = excluded.dirty
+                            """,
+                            (release_id, name, when, device, dirty_flag),
+                        )
+                    self._write_connection.execute(
+                        "DELETE FROM release_labels WHERE release_id = ?",
+                        (release_id,),
+                    )
+                    for label in sorted(normalized, key=lambda item: item.casefold()):
+                        label_id = self._label_id_for_name(
+                            self._write_connection,
+                            label,
+                            create=True,
+                        )
+                        if label_id is None:
+                            continue
+                        self._write_connection.execute(
+                            """
+                            INSERT INTO release_labels(
+                                release_id, label_id, tagged_at_ns, dirty, by_device
+                            )
+                            VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (release_id, label_id, when, dirty_flag, device),
+                        )
+                        self._write_connection.execute(
+                            """
+                            DELETE FROM release_label_tombstones
+                            WHERE release_id = ? AND label_name = ? COLLATE NOCASE
+                            """,
+                            (release_id, label),
+                        )
+                    self._prune_orphan_user_labels(self._write_connection)
+                    self._write_connection.commit()
+                except Exception:
+                    try:
+                        self._write_connection.rollback()
+                    except sqlite3.OperationalError:
+                        pass
+                    raise
+
+            def rollback_on_locked(_exc: sqlite3.OperationalError, _attempt: int) -> None:
+                try:
+                    self._write_connection.rollback()
+                except sqlite3.OperationalError:
+                    pass
+
+            with_db_retry(attempt, on_locked=rollback_on_locked)
+
+    @_locked_db
+    def toggle_release_label(
+        self,
+        release_id: str,
+        label: str,
+        *,
+        on: bool,
+        by_device: str = "",
+        mark_dirty: bool = True,
+    ) -> None:
+        normalized = self._normalize_label_name(label)
+        if not normalized:
+            raise ValueError("label name must not be empty")
+        dirty_flag = 1 if mark_dirty else 0
+        device = str(by_device or "")
+
+        with self._write_session():
+            def attempt() -> None:
+                try:
+                    when = time.time_ns()
+                    if on:
+                        label_id = self._label_id_for_name(
+                            self._write_connection,
+                            normalized,
+                            create=True,
+                        )
+                        if label_id is None:
+                            raise ValueError("label name must not be empty")
+                        self._write_connection.execute(
+                            """
+                            INSERT INTO release_labels(
+                                release_id, label_id, tagged_at_ns, dirty, by_device
+                            )
+                            VALUES (?, ?, ?, ?, ?)
+                            ON CONFLICT(release_id, label_id) DO UPDATE SET
+                                tagged_at_ns = excluded.tagged_at_ns,
+                                dirty = excluded.dirty,
+                                by_device = excluded.by_device
+                            """,
+                            (release_id, label_id, when, dirty_flag, device),
+                        )
+                        self._write_connection.execute(
+                            """
+                            DELETE FROM release_label_tombstones
+                            WHERE release_id = ? AND label_name = ? COLLATE NOCASE
+                            """,
+                            (release_id, normalized),
+                        )
+                    else:
+                        self._write_connection.execute(
+                            """
+                            INSERT INTO release_label_tombstones(
+                                release_id, label_name, at_ns, by_device, dirty
+                            )
+                            VALUES (?, ?, ?, ?, ?)
+                            ON CONFLICT(release_id, label_name) DO UPDATE SET
+                                at_ns = excluded.at_ns,
+                                by_device = excluded.by_device,
+                                dirty = excluded.dirty
+                            """,
+                            (release_id, normalized, when, device, dirty_flag),
+                        )
+                        self._write_connection.execute(
+                            """
+                            DELETE FROM release_labels
+                            WHERE release_id = ?
+                              AND label_id IN (
+                                  SELECT id FROM user_labels WHERE name = ? COLLATE NOCASE
+                              )
+                            """,
+                            (release_id, normalized),
+                        )
+                    self._prune_orphan_user_labels(self._write_connection)
+                    self._write_connection.commit()
+                except Exception:
+                    try:
+                        self._write_connection.rollback()
+                    except sqlite3.OperationalError:
+                        pass
+                    raise
+
+            def rollback_on_locked(_exc: sqlite3.OperationalError, _attempt: int) -> None:
+                try:
+                    self._write_connection.rollback()
+                except sqlite3.OperationalError:
+                    pass
+
+            with_db_retry(attempt, on_locked=rollback_on_locked)
+
+    @_locked_db
+    def export_label_sync_map(self):
+        """Return active labels ∪ tombstones as a LabelMap for sync merge."""
+        from tunes_player.core.labels_sync.merge import LabelEntry, LabelMap
+
+        def query(connection: sqlite3.Connection) -> LabelMap:
+            result: LabelMap = {}
+            active = connection.execute(
+                """
+                SELECT rl.release_id, ul.name, rl.tagged_at_ns, rl.by_device
+                FROM release_labels rl
+                JOIN user_labels ul ON ul.id = rl.label_id
+                """,
+            ).fetchall()
+            for row in active:
+                release_id = str(row["release_id"])
+                name = str(row["name"])
+                result.setdefault(release_id, {})[name] = LabelEntry(
+                    on=True,
+                    at_ns=int(row["tagged_at_ns"]),
+                    by=str(row["by_device"] or ""),
+                )
+            tombs = connection.execute(
+                """
+                SELECT release_id, label_name, at_ns, by_device
+                FROM release_label_tombstones
+                """,
+            ).fetchall()
+            for row in tombs:
+                release_id = str(row["release_id"])
+                name = str(row["label_name"])
+                entry = LabelEntry(
+                    on=False,
+                    at_ns=int(row["at_ns"]),
+                    by=str(row["by_device"] or ""),
+                )
+                existing = result.get(release_id, {}).get(name)
+                if existing is None or entry.at_ns >= existing.at_ns:
+                    result.setdefault(release_id, {})[name] = entry
+            from tunes_player.core.labels_sync.format import dumps_label_map, loads_label_map
+
+            return loads_label_map(dumps_label_map(result))
+
+        return self._with_connection(query)
+
+    @_locked_db
+    def apply_label_sync_map(
+        self,
+        label_map: dict[str, dict[str, object]],
+        *,
+        clear_dirty: bool = True,
+    ) -> None:
+        """Replace local sync-facing state with *label_map* (active ∪ tombstones)."""
+        from tunes_player.core.labels_sync.format import dumps_label_map, loads_label_map
+        from tunes_player.core.labels_sync.merge import LabelEntry
+
+        dirty_flag = 0 if clear_dirty else 1
+        normalized_map = loads_label_map(dumps_label_map(label_map))  # type: ignore[arg-type]
+
+        with self._write_session():
+            def attempt() -> None:
+                try:
+                    # Clear existing sync-facing rows, then rewrite from the merged map.
+                    self._write_connection.execute("DELETE FROM release_labels")
+                    self._write_connection.execute("DELETE FROM release_label_tombstones")
+                    for release_id, labels in normalized_map.items():
+                        for name, entry in labels.items():
+                            if not isinstance(entry, LabelEntry):
+                                continue
+                            normalized = self._normalize_label_name(str(name))
+                            if not normalized:
+                                continue
+                            if entry.on:
+                                label_id = self._label_id_for_name(
+                                    self._write_connection,
+                                    normalized,
+                                    create=True,
+                                )
+                                if label_id is None:
+                                    continue
+                                self._write_connection.execute(
+                                    """
+                                    INSERT INTO release_labels(
+                                        release_id, label_id, tagged_at_ns, dirty, by_device
+                                    )
+                                    VALUES (?, ?, ?, ?, ?)
+                                    """,
+                                    (
+                                        release_id,
+                                        label_id,
+                                        int(entry.at_ns),
+                                        dirty_flag,
+                                        str(entry.by or ""),
+                                    ),
+                                )
+                            else:
+                                self._write_connection.execute(
+                                    """
+                                    INSERT INTO release_label_tombstones(
+                                        release_id, label_name, at_ns, by_device, dirty
+                                    )
+                                    VALUES (?, ?, ?, ?, ?)
+                                    """,
+                                    (
+                                        release_id,
+                                        normalized,
+                                        int(entry.at_ns),
+                                        str(entry.by or ""),
+                                        dirty_flag,
+                                    ),
+                                )
+                    self._prune_orphan_user_labels(self._write_connection)
+                    self._write_connection.commit()
+                except Exception:
+                    try:
+                        self._write_connection.rollback()
+                    except sqlite3.OperationalError:
+                        pass
+                    raise
+
+            def rollback_on_locked(_exc: sqlite3.OperationalError, _attempt: int) -> None:
+                try:
+                    self._write_connection.rollback()
+                except sqlite3.OperationalError:
+                    pass
+
+            with_db_retry(attempt, on_locked=rollback_on_locked)
+
+    @_locked_db
+    def has_dirty_label_sync_rows(self) -> bool:
+        def query(connection: sqlite3.Connection) -> bool:
+            row = connection.execute(
+                """
+                SELECT 1 AS present FROM release_labels WHERE dirty != 0
+                UNION ALL
+                SELECT 1 AS present FROM release_label_tombstones WHERE dirty != 0
+                LIMIT 1
+                """,
+            ).fetchone()
+            return row is not None
+
+        return bool(self._with_connection(query))
+
+    @_locked_db
+    def list_dirty_label_keys(self) -> list[tuple[str, str]]:
+        def query(connection: sqlite3.Connection) -> list[tuple[str, str]]:
+            keys: list[tuple[str, str]] = []
+            active = connection.execute(
+                """
+                SELECT rl.release_id, ul.name
+                FROM release_labels rl
+                JOIN user_labels ul ON ul.id = rl.label_id
+                WHERE rl.dirty != 0
+                """,
+            ).fetchall()
+            for row in active:
+                keys.append((str(row["release_id"]), str(row["name"])))
+            tombs = connection.execute(
+                """
+                SELECT release_id, label_name
+                FROM release_label_tombstones
+                WHERE dirty != 0
+                """,
+            ).fetchall()
+            for row in tombs:
+                keys.append((str(row["release_id"]), str(row["label_name"])))
+            return keys
+
+        return self._with_connection(query)
+
+    @_locked_db
+    def mark_label_keys_dirty(self, keys: list[tuple[str, str]]) -> None:
+        if not keys:
+            return
+
+        with self._write_session():
+            def attempt() -> None:
+                try:
+                    for release_id, name in keys:
+                        self._write_connection.execute(
+                            """
+                            UPDATE release_labels
+                            SET dirty = 1
+                            WHERE release_id = ?
+                              AND label_id IN (
+                                  SELECT id FROM user_labels WHERE name = ? COLLATE NOCASE
+                              )
+                            """,
+                            (release_id, name),
+                        )
+                        self._write_connection.execute(
+                            """
+                            UPDATE release_label_tombstones
+                            SET dirty = 1
+                            WHERE release_id = ? AND label_name = ? COLLATE NOCASE
+                            """,
+                            (release_id, name),
+                        )
+                    self._write_connection.commit()
+                except Exception:
+                    try:
+                        self._write_connection.rollback()
+                    except sqlite3.OperationalError:
+                        pass
+                    raise
+
+            def rollback_on_locked(_exc: sqlite3.OperationalError, _attempt: int) -> None:
+                try:
+                    self._write_connection.rollback()
+                except sqlite3.OperationalError:
+                    pass
+
+            with_db_retry(attempt, on_locked=rollback_on_locked)
+
+    @_locked_db
+    def clear_label_sync_dirty(self) -> None:
+        with self._write_session():
+            def attempt() -> None:
+                try:
+                    self._write_connection.execute(
+                        "UPDATE release_labels SET dirty = 0 WHERE dirty != 0",
+                    )
+                    self._write_connection.execute(
+                        "UPDATE release_label_tombstones SET dirty = 0 WHERE dirty != 0",
+                    )
+                    self._write_connection.commit()
+                except Exception:
+                    try:
+                        self._write_connection.rollback()
+                    except sqlite3.OperationalError:
+                        pass
+                    raise
+
+            def rollback_on_locked(_exc: sqlite3.OperationalError, _attempt: int) -> None:
+                try:
+                    self._write_connection.rollback()
+                except sqlite3.OperationalError:
+                    pass
+
+            with_db_retry(attempt, on_locked=rollback_on_locked)
 
     @staticmethod
     def quality_hint(metadata: FileMetadata | None) -> str:

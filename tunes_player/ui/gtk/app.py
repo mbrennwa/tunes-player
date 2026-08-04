@@ -123,6 +123,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._cached_releases: list[Release] = []
         self._selection_stack: list[_SelectionSnapshot] = []
         self._prepared_for_first_show = False
+        self._grid_fingerprint: tuple[str, tuple[str, ...], str | None] | None = None
         self.set_default_size(*_DEFAULT_SIZE)
         self.set_icon_name("tunes-player")
 
@@ -1019,6 +1020,7 @@ class TunesWindow(Adw.ApplicationWindow):
             toast, message = self._async_load_error_copy(request, title=title)
             show_error_toast(self._toast_overlay, toast)
             view = PlaceholderView(title=title, message=message)
+            self._grid_fingerprint = None
             self._replace_root_page(title=title, child=view)
             self._hide_release_count_label()
             return False
@@ -1200,6 +1202,7 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _show_grid_loading(self, state: ShellState) -> None:
         title = self._grid_title(state)
+        self._grid_fingerprint = None
         self._replace_root_page(
             title=title,
             child=LoadingDiscoverView(message=self._loading_message(state)),
@@ -1241,6 +1244,29 @@ class TunesWindow(Adw.ApplicationWindow):
         title: str,
         sync_populate: bool = False,
     ) -> None:
+        fingerprint = (
+            title,
+            tuple(release.id for release in releases),
+            empty_message,
+        )
+        # Replacing the root page destroys context menus and flashes tiles.
+        # Skip when the visible release set is unchanged.
+        if (
+            fingerprint == self._grid_fingerprint
+            and self._nav_at_root()
+            and self._current_root_is_release_grid()
+        ):
+            catalog_count = (
+                len(self._cached_releases)
+                if self._cache_matches(self._shell_state)
+                else None
+            )
+            self._sync_release_count_label(
+                filtered_count=len(releases),
+                catalog_count=catalog_count,
+            )
+            return
+
         view = ReleaseGridView(
             releases=releases,
             on_release_activated=self._open_release,
@@ -1255,6 +1281,7 @@ class TunesWindow(Adw.ApplicationWindow):
             service=self._service,
             sync_populate=sync_populate,
         )
+        self._grid_fingerprint = fingerprint
         self._replace_root_page(title=title, child=view)
         catalog_count = (
             len(self._cached_releases)
@@ -1265,6 +1292,12 @@ class TunesWindow(Adw.ApplicationWindow):
             filtered_count=len(releases),
             catalog_count=catalog_count,
         )
+
+    def _current_root_is_release_grid(self) -> bool:
+        page = self._main_nav.get_visible_page()
+        if page is None or page.get_tag() != _GRID_ROOT_TAG:
+            return False
+        return isinstance(page.get_child(), ReleaseGridView)
 
     def _catalog_releases_for_message(self, state: ShellState) -> list[Release]:
         if self._cache_matches(state) and self._cached_releases:
@@ -1415,13 +1448,19 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _on_flags_changed(self) -> bool:
         state = self._shell_state
+        # Flagged view membership depends on labels — full reload.
         if state.base == ShellBase.FLAGGED:
             self._invalidate_selection_cache()
             self._reload_grid()
             return False
-        if self._cache_matches(state) and self._cached_releases:
+        # Label filter is active — refilter without leaving the selection.
+        if state.enabled_labels and self._cache_matches(state) and self._cached_releases:
             self._sync_label_filter()
             self._display_cached_selection(state)
+            return False
+        # Otherwise labels changed but the visible grid set does not depend on
+        # them. Do NOT recreate ReleaseGridView — that flashes tiles and dismisses
+        # context menus (label sync / OwnCloud file echoes were triggering this).
         return False
 
     def _on_art_updated(self) -> bool:
@@ -1560,7 +1599,8 @@ def run() -> int:
                 service.resume_interrupted_save_to_disk()
 
         def do_shutdown(self) -> None:  # noqa: N802 — GTK vfunc
-            nonlocal mpris_service, folder_monitor
+            nonlocal mpris_service, folder_monitor, label_sync_watcher
+            label_sync_watcher.stop()
             folder_monitor.stop()
             if mpris_service is not None:
                 mpris_service.stop()
@@ -1578,9 +1618,13 @@ def run() -> int:
     from tunes_player.platform.linux.mpris import create_mpris_service
 
     from tunes_player.ui.gtk.folder_monitor import FolderMonitorManager
+    from tunes_player.ui.gtk.label_sync_watcher import LabelSyncWatcher
 
     folder_monitor = FolderMonitorManager(service)
     folder_monitor.start()
+
+    label_sync_watcher = LabelSyncWatcher(service)
+    label_sync_watcher.start()
 
     mpris_service = create_mpris_service(
         service,

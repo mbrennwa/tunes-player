@@ -88,6 +88,22 @@ class ReleaseLabelStoreTests(unittest.TestCase):
         self.assertEqual(mapping["local:b"], frozenset({"jazz"}))
         self.assertEqual(mapping["local:c"], frozenset())
 
+    def test_prune_is_noop_when_write_connection_closed(self) -> None:
+        self._store.toggle_release_label("tidal:album:1", "buy", on=True)
+        self._store.close()
+        # Must not raise (scan holds the DB; label menu still needs to open).
+        self._store.prune_release_label_tables()
+        self.assertEqual(self._store.list_user_label_names(), ("buy",))
+
+    def test_toggle_works_when_write_connection_closed(self) -> None:
+        self._store.close()
+        self._store.toggle_release_label("tidal:album:2", "vinyl", on=True)
+        self.assertEqual(
+            self._store.get_release_label_names("tidal:album:2"),
+            frozenset({"vinyl"}),
+        )
+        self.assertTrue(self._store.has_dirty_label_sync_rows())
+
 
 if __name__ == "__main__":
     unittest.main()

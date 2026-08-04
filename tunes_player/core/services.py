@@ -26,6 +26,7 @@ from tunes_player.core.folder_scan_status import (
     FOLDER_SCAN_INCOMPLETE,
     log_folder_scan_failure,
 )
+from tunes_player.core.labels_sync import LabelSyncService, LabelSyncStatus
 from tunes_player.core.logging_config import diagnostics_log_path
 from tunes_player.core.home import (
     NEW_MUSIC_LOCAL_LIMIT,
@@ -206,8 +207,22 @@ class PlayerService:
         self._config_manager = config or ConfigManager()
         self._config_manager.load()
         self._store = LibraryStore(self._config_manager.database_path)
+        self._store.set_preserve_synced_label_orphans(
+            self._config_manager.config.labels_sync_enabled,
+        )
         self._volume_controller = volume_controller
         self._main_thread_hook = main_thread_hook
+        self._label_sync = LabelSyncService(
+            library_store=self._store,
+            get_enabled=lambda: self._config_manager.config.labels_sync_enabled,
+            get_folder=lambda: self._config_manager.config.labels_sync_folder,
+            set_status=self._config_manager.set_labels_sync_status,
+            on_applied=lambda: self._run_on_main_thread(self.notify_flags_changed),
+        )
+        self._label_sync.seed_status(
+            self._config_manager.config.labels_sync_last_success_at,
+            self._config_manager.config.labels_sync_last_error,
+        )
         self._listeners: list[EventCallback] = []
         self._volume = 0.72
         self._muted = False
@@ -1485,22 +1500,92 @@ class PlayerService:
         self._emit("library_updated")
 
     def list_user_labels(self) -> tuple[str, ...]:
-        self._store.prune_release_label_tables()
+        # Do not prune here — menus call this often and must stay snappy.
+        # Stale rows are cleaned on reconnect / explicit prune.
         return self._store.list_user_label_names()
 
     def get_release_labels(self, release_id: str) -> frozenset[str]:
-        return self._store.get_release_label_names(release_id)
+        return self._store.get_release_label_names(parse_catalog_release_id(release_id))
 
     def labels_for_releases(self, release_ids: list[str]) -> dict[str, frozenset[str]]:
-        return self._store.labels_for_release_ids(release_ids)
+        catalog_ids = [parse_catalog_release_id(release_id) for release_id in release_ids]
+        by_catalog = self._store.labels_for_release_ids(catalog_ids)
+        # Preserve caller keys (may include @tier suffixes) mapped to catalog labels.
+        return {
+            release_id: by_catalog.get(parse_catalog_release_id(release_id), frozenset())
+            for release_id in release_ids
+        }
 
     def set_release_labels(self, release_id: str, labels: frozenset[str]) -> None:
-        self._store.set_release_labels(release_id, labels)
+        catalog_id = parse_catalog_release_id(release_id)
+        self._store.set_release_labels(
+            catalog_id,
+            labels,
+            by_device=self._label_sync.device_id,
+            mark_dirty=True,
+        )
         self.notify_flags_changed()
+        self._label_sync.schedule_sync()
 
     def toggle_release_label(self, release_id: str, label: str, *, on: bool) -> None:
-        self._store.toggle_release_label(release_id, label, on=on)
+        catalog_id = parse_catalog_release_id(release_id)
+        self._store.toggle_release_label(
+            catalog_id,
+            label,
+            on=on,
+            by_device=self._label_sync.device_id,
+            mark_dirty=True,
+        )
         self.notify_flags_changed()
+        self._label_sync.schedule_sync()
+
+    def toggle_release_label_async(
+        self,
+        release_id: str,
+        label: str,
+        *,
+        on: bool,
+        emit_changed: bool = True,
+        on_done: Callable[[], None] | None = None,
+    ) -> None:
+        """Persist a label toggle off the GTK thread (avoids UI stalls during sync/scan).
+
+        Pass emit_changed=False while a label editor is open so flags_changed /
+        folder sync do not run until the popover closes (keeps dismiss responsive).
+        """
+        catalog_id = parse_catalog_release_id(release_id)
+        device_id = self._label_sync.device_id
+
+        def work() -> None:
+            try:
+                self._store.toggle_release_label(
+                    catalog_id,
+                    label,
+                    on=on,
+                    by_device=device_id,
+                    mark_dirty=True,
+                )
+            except Exception:
+                log.exception(
+                    "async label toggle failed release=%s label=%s on=%s",
+                    catalog_id,
+                    label,
+                    on,
+                )
+                if on_done is not None:
+                    self._run_on_main_thread(on_done)
+                return
+            if emit_changed:
+                self._run_on_main_thread(self.notify_flags_changed)
+                self._label_sync.schedule_sync()
+            if on_done is not None:
+                self._run_on_main_thread(on_done)
+
+        threading.Thread(target=work, name="label-toggle", daemon=True).start()
+
+    def schedule_labels_sync(self) -> None:
+        """Debounced push/pull after local label edits."""
+        self._label_sync.schedule_sync()
 
     def list_flagged_releases(self) -> list[Release]:
         releases: list[Release] = []
@@ -1510,9 +1595,47 @@ class PlayerService:
                 releases.append(release)
         return releases
 
+    def labels_sync_status(self) -> LabelSyncStatus:
+        return self._label_sync.status()
+
+    def labels_sync_ignore_watch_events(self) -> bool:
+        return self._label_sync.ignore_watch_events()
+
+    def labels_sync_remote_unchanged(self) -> bool:
+        return self._label_sync.remote_digest_unchanged()
+
+    def set_labels_sync_enabled(self, enabled: bool) -> None:
+        self._config_manager.set_labels_sync_enabled(enabled)
+        self._store.set_preserve_synced_label_orphans(bool(enabled))
+        self._emit("labels_sync_changed")
+        if enabled:
+            self._label_sync.schedule_sync()
+
+    def set_labels_sync_folder(self, folder: str | None) -> None:
+        self._config_manager.set_labels_sync_folder(folder)
+        self._emit("labels_sync_changed")
+        if self._config_manager.config.labels_sync_enabled:
+            self._label_sync.schedule_sync()
+
+    def sync_labels_now(self) -> bool:
+        return self._label_sync.sync_now()
+
+    def flush_labels_sync(self) -> None:
+        self._label_sync.flush()
+
+    def export_labels(self, path: str | Path) -> None:
+        self._label_sync.export_to(path)
+
+    def import_labels(self, path: str | Path) -> None:
+        self._label_sync.import_from(path)
+        self.notify_flags_changed()
+
     def notify_flags_changed(self) -> None:
         """Call after user label associations change."""
         self._emit("flags_changed")
+
+    def notify_labels_sync_changed(self) -> None:
+        self._emit("labels_sync_changed")
 
     def refresh_local_release_art_uris(self, releases: list[Release]) -> list[Release]:
         """Refresh art_uri on local releases from the library store."""
@@ -2185,6 +2308,7 @@ class PlayerService:
         )
 
     def shutdown(self) -> None:
+        self.flush_labels_sync()
         self.pause_save_to_disk_for_quit()
         monitor = self._playback_health_monitor
         self._playback_health_monitor = None

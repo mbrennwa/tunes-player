@@ -144,12 +144,58 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._download_folder_row.set_activatable_widget(self._download_folder_btn)
         downloads_group.add(self._download_folder_row)
 
+        labels_group = Adw.PreferencesGroup(
+            title="Labels",
+            description=(
+                "Share release labels across machines via a folder kept in sync "
+                "(Syncthing, Nextcloud, Drive desktop, etc.)."
+            ),
+        )
+        self._labels_sync_enabled_row = Adw.SwitchRow(
+            title="Sync labels to folder",
+            active=service.config.config.labels_sync_enabled,
+        )
+        self._labels_sync_enabled_row.connect(
+            "notify::active",
+            self._on_labels_sync_enabled_changed,
+        )
+        labels_group.add(self._labels_sync_enabled_row)
+
+        self._labels_sync_folder_row = Adw.ActionRow(title="Sync folder")
+        self._labels_sync_folder_btn = Gtk.Button(label="Choose…")
+        self._labels_sync_folder_btn.set_valign(Gtk.Align.CENTER)
+        self._labels_sync_folder_btn.connect(
+            "clicked",
+            self._on_labels_sync_folder_clicked,
+        )
+        self._labels_sync_folder_row.add_suffix(self._labels_sync_folder_btn)
+        self._labels_sync_folder_row.set_activatable_widget(self._labels_sync_folder_btn)
+        labels_group.add(self._labels_sync_folder_row)
+
+        self._labels_sync_status_row = Adw.ActionRow(title="Status")
+        labels_group.add(self._labels_sync_status_row)
+
+        export_import_row = Adw.ActionRow(title="Manual transfer")
+        export_btn = Gtk.Button(label="Export…")
+        export_btn.set_valign(Gtk.Align.CENTER)
+        export_btn.connect("clicked", self._on_labels_export_clicked)
+        import_btn = Gtk.Button(label="Import…")
+        import_btn.set_valign(Gtk.Align.CENTER)
+        import_btn.connect("clicked", self._on_labels_import_clicked)
+        transfer_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        transfer_box.append(export_btn)
+        transfer_box.append(import_btn)
+        transfer_box.set_valign(Gtk.Align.CENTER)
+        export_import_row.add_suffix(transfer_box)
+        labels_group.add(export_import_row)
+
         application_page = Adw.PreferencesPage(
             title="Application",
             icon_name="applications-system-symbolic",
         )
         application_page.add(application_group)
         application_page.add(downloads_group)
+        application_page.add(labels_group)
         application_page.add(diagnostics_group)
 
         self._tidal_status_row = Adw.ActionRow(title="")
@@ -205,6 +251,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._updating_volume_control = False
         self._reload_folders()
         self._reload_download_folder()
+        self._reload_labels_sync()
         self._reload_tidal_status()
         self._reload_qobuz_status()
         service.subscribe(lambda event: GLib.idle_add(self._on_service_event, event))
@@ -216,6 +263,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._service.refresh_output_volume_detection()
         self._sync_volume_control_row()
         self._sync_scan_ui()
+        self._reload_labels_sync()
 
     @staticmethod
     def _folder_key(folder: str) -> str:
@@ -242,6 +290,116 @@ class PreferencesWindow(Adw.PreferencesWindow):
     def _on_download_folder_chosen(self, path: Path) -> None:
         self._service.set_download_folder(str(path))
         self._reload_download_folder()
+
+    def _reload_labels_sync(self) -> None:
+        status = self._service.labels_sync_status()
+        self._labels_sync_enabled_row.set_active(status.enabled)
+        if status.folder:
+            self._labels_sync_folder_row.set_subtitle(escape_markup(status.folder))
+            self._labels_sync_folder_btn.set_label("Change…")
+        else:
+            self._labels_sync_folder_row.set_subtitle("Not set")
+            self._labels_sync_folder_btn.set_label("Choose…")
+        parts: list[str] = []
+        if status.syncing:
+            parts.append("Syncing…")
+        elif status.pending_dirty:
+            parts.append("Pending upload")
+        else:
+            parts.append("Idle")
+        if status.last_success_at:
+            from datetime import datetime
+
+            stamp = datetime.fromtimestamp(status.last_success_at).strftime(
+                "%Y-%m-%d %H:%M:%S",
+            )
+            parts.append(f"Last success: {stamp}")
+        if status.last_error:
+            parts.append("Error: " + status.last_error)
+        self._labels_sync_status_row.set_subtitle(escape_markup(" · ".join(parts)))
+
+    def _on_labels_sync_enabled_changed(self, *_args: object) -> None:
+        enabled = bool(self._labels_sync_enabled_row.get_active())
+        if enabled == self._service.config.config.labels_sync_enabled:
+            return
+        self._service.set_labels_sync_enabled(enabled)
+        self._reload_labels_sync()
+
+    def _on_labels_sync_folder_clicked(self, *_args: object) -> None:
+        dialog = Gtk.FileDialog(title="Choose Labels Sync Folder")
+        initial = self._service.config.config.labels_sync_folder
+        if initial:
+            try:
+                dialog.set_initial_folder(Gio.File.new_for_path(initial))
+            except GLib.Error:
+                pass
+        dialog.select_folder(self, None, self._on_labels_sync_folder_selected)
+
+    def _on_labels_sync_folder_selected(
+        self,
+        dialog: Gtk.FileDialog,
+        result: Gio.AsyncResult,
+    ) -> None:
+        try:
+            folder = dialog.select_folder_finish(result)
+        except GLib.Error:
+            return
+        path = folder.get_path()
+        if path is None:
+            return
+        self._service.set_labels_sync_folder(path)
+        self._reload_labels_sync()
+
+    def _on_labels_export_clicked(self, *_args: object) -> None:
+        dialog = Gtk.FileDialog(title="Export Labels")
+        dialog.set_initial_name("v1.json")
+        dialog.save(self, None, self._on_labels_export_selected)
+
+    def _on_labels_export_selected(
+        self,
+        dialog: Gtk.FileDialog,
+        result: Gio.AsyncResult,
+    ) -> None:
+        try:
+            file = dialog.save_finish(result)
+        except GLib.Error:
+            return
+        path = file.get_path()
+        if path is None:
+            return
+        try:
+            self._service.export_labels(path)
+        except OSError as exc:
+            self._show_labels_transfer_error("Export failed", str(exc))
+
+    def _on_labels_import_clicked(self, *_args: object) -> None:
+        dialog = Gtk.FileDialog(title="Import Labels")
+        dialog.open(self, None, self._on_labels_import_selected)
+
+    def _on_labels_import_selected(
+        self,
+        dialog: Gtk.FileDialog,
+        result: Gio.AsyncResult,
+    ) -> None:
+        try:
+            file = dialog.open_finish(result)
+        except GLib.Error:
+            return
+        path = file.get_path()
+        if path is None:
+            return
+        try:
+            self._service.import_labels(path)
+            self._reload_labels_sync()
+        except (OSError, ValueError) as exc:
+            self._show_labels_transfer_error("Import failed", str(exc))
+
+    def _show_labels_transfer_error(self, heading: str, body: str) -> None:
+        dialog = Adw.AlertDialog(heading=heading, body=body)
+        dialog.add_response("ok", "OK")
+        dialog.set_default_response("ok")
+        dialog.set_close_response("ok")
+        dialog.present(self)
 
     def _reload_folders(self) -> None:
         for row in self._dynamic_rows:
@@ -579,6 +737,8 @@ class PreferencesWindow(Adw.PreferencesWindow):
             self._sync_exclusive_row()
         elif event in ("scan_started", "scan_progress", "scan_finished", "scan_error"):
             self._sync_scan_ui()
+        elif event in ("labels_sync_changed", "flags_changed"):
+            self._reload_labels_sync()
         return False
 
     def _reload_tidal_status(self) -> None:

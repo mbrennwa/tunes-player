@@ -132,6 +132,10 @@ class AppConfig:
     # Destination for Save to disk (not a music Source unless the user adds it).
     download_folder: str | None = None
     shell_state: ShellState = field(default_factory=ShellState)
+    labels_sync_enabled: bool = False
+    labels_sync_folder: str | None = None
+    labels_sync_last_success_at: float | None = None
+    labels_sync_last_error: str | None = None
 
 
 class ConfigManager:
@@ -225,6 +229,26 @@ class ConfigManager:
             download_folder = (
                 _normalize_folder_path(download_raw) or str(download_raw).strip() or None
             )
+        labels_folder_raw = raw.get("labels_sync_folder")
+        labels_sync_folder = None
+        if labels_folder_raw:
+            labels_sync_folder = (
+                _normalize_folder_path(labels_folder_raw)
+                or str(labels_folder_raw).strip()
+                or None
+            )
+        last_success_raw = raw.get("labels_sync_last_success_at")
+        labels_sync_last_success_at: float | None
+        try:
+            labels_sync_last_success_at = (
+                float(last_success_raw) if last_success_raw is not None else None
+            )
+        except (TypeError, ValueError):
+            labels_sync_last_success_at = None
+        last_error_raw = raw.get("labels_sync_last_error")
+        labels_sync_last_error = (
+            str(last_error_raw).strip() if last_error_raw else None
+        ) or None
         self._config = AppConfig(
             music_folders=folders,
             music_folder_added_at=added_at,
@@ -248,6 +272,10 @@ class ConfigManager:
             ),
             download_folder=download_folder,
             shell_state=parse_shell_state(raw.get("shell_state")),
+            labels_sync_enabled=bool(raw.get("labels_sync_enabled", False)),
+            labels_sync_folder=labels_sync_folder,
+            labels_sync_last_success_at=labels_sync_last_success_at,
+            labels_sync_last_error=labels_sync_last_error,
         )
         return self._config
 
@@ -278,6 +306,10 @@ class ConfigManager:
             "new_music_within_days": self._config.new_music_within_days,
             "download_folder": self._config.download_folder,
             "shell_state": self._config.shell_state.to_dict(),
+            "labels_sync_enabled": self._config.labels_sync_enabled,
+            "labels_sync_folder": self._config.labels_sync_folder,
+            "labels_sync_last_success_at": self._config.labels_sync_last_success_at,
+            "labels_sync_last_error": self._config.labels_sync_last_error,
         }
         self._path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
@@ -415,6 +447,29 @@ class ConfigManager:
         else:
             normalized = _normalize_folder_path(folder)
             self._config.download_folder = normalized or str(folder).strip()
+        self.save()
+
+    def set_labels_sync_enabled(self, enabled: bool) -> None:
+        self._config.labels_sync_enabled = bool(enabled)
+        self.save()
+
+    def set_labels_sync_folder(self, folder: str | None) -> None:
+        if folder is None or not str(folder).strip():
+            self._config.labels_sync_folder = None
+        else:
+            normalized = _normalize_folder_path(folder)
+            self._config.labels_sync_folder = normalized or str(folder).strip()
+        self.save()
+
+    def set_labels_sync_status(
+        self,
+        last_success_at: float | None,
+        last_error: str | None,
+    ) -> None:
+        self._config.labels_sync_last_success_at = last_success_at
+        self._config.labels_sync_last_error = (
+            str(last_error).strip() if last_error else None
+        ) or None
         self.save()
 
     def set_shell_state(self, state: ShellState) -> None:
