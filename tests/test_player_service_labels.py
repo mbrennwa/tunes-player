@@ -54,6 +54,17 @@ class PlayerServiceFlaggedReleasesTests(unittest.TestCase):
 
         self.assertEqual(self._service.list_flagged_releases(), [])
 
+    def test_toggle_normalizes_quality_tile_id(self) -> None:
+        self._service.toggle_release_label("tidal:album:99@cd", "buy", on=True)
+        self.assertEqual(
+            self._service.get_release_labels("tidal:album:99@hi_res"),
+            frozenset({"buy"}),
+        )
+        self.assertEqual(
+            self._service.get_release_labels("tidal:album:99"),
+            frozenset({"buy"}),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

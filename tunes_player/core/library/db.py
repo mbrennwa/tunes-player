@@ -10,7 +10,7 @@ from typing import TypeVar
 
 T = TypeVar("T")
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 LOCK_RETRY_ATTEMPTS = 6
 LOCK_RETRY_BASE_DELAY_SEC = 0.15
@@ -111,11 +111,25 @@ CREATE TABLE IF NOT EXISTS release_labels (
     release_id TEXT NOT NULL,
     label_id INTEGER NOT NULL REFERENCES user_labels(id) ON DELETE CASCADE,
     tagged_at_ns INTEGER NOT NULL,
+    dirty INTEGER NOT NULL DEFAULT 0,
+    by_device TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (release_id, label_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_release_labels_label_id ON release_labels(label_id);
 CREATE INDEX IF NOT EXISTS idx_release_labels_release_id ON release_labels(release_id);
+
+CREATE TABLE IF NOT EXISTS release_label_tombstones (
+    release_id TEXT NOT NULL,
+    label_name TEXT NOT NULL COLLATE NOCASE,
+    at_ns INTEGER NOT NULL,
+    by_device TEXT NOT NULL DEFAULT '',
+    dirty INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (release_id, label_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_release_label_tombstones_release_id
+    ON release_label_tombstones(release_id);
 """
 
 _MIGRATION_V2 = """
@@ -175,6 +189,35 @@ CREATE INDEX IF NOT EXISTS idx_release_labels_label_id ON release_labels(label_i
 CREATE INDEX IF NOT EXISTS idx_release_labels_release_id ON release_labels(release_id);
 """
 
+_MIGRATION_V9_LABEL_SYNC = """
+CREATE TABLE IF NOT EXISTS release_label_tombstones (
+    release_id TEXT NOT NULL,
+    label_name TEXT NOT NULL COLLATE NOCASE,
+    at_ns INTEGER NOT NULL,
+    by_device TEXT NOT NULL DEFAULT '',
+    dirty INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (release_id, label_name)
+);
+CREATE INDEX IF NOT EXISTS idx_release_label_tombstones_release_id
+    ON release_label_tombstones(release_id);
+"""
+
+
+def _migrate_v9(connection: sqlite3.Connection) -> None:
+    connection.executescript(_MIGRATION_V9_LABEL_SYNC)
+    _add_column_if_missing(
+        connection,
+        "release_labels",
+        "dirty",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    _add_column_if_missing(
+        connection,
+        "release_labels",
+        "by_device",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+
 
 def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
     rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
@@ -196,6 +239,7 @@ def _ensure_repair(connection: sqlite3.Connection) -> None:
     """Idempotent repair for objects missing on mis-initialized DBs."""
     connection.executescript(_MIGRATION_V6_PLAY_HISTORY)
     connection.executescript(_MIGRATION_V8_USER_LABELS)
+    _migrate_v9(connection)
     _add_column_if_missing(connection, "tracks", "release_type_tag", "TEXT")
 
 
@@ -251,6 +295,8 @@ def _migrate(connection: sqlite3.Connection) -> None:
         _add_column_if_missing(connection, "tracks", "release_type_tag", "TEXT")
     if stored_version < 8:
         connection.executescript(_MIGRATION_V8_USER_LABELS)
+    if stored_version < 9:
+        _migrate_v9(connection)
     if stored_version < SCHEMA_VERSION:
         connection.execute(
             "UPDATE meta SET value = ? WHERE key = 'schema_version'",

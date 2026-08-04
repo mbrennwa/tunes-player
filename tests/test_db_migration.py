@@ -277,6 +277,70 @@ class DbMigrationTests(unittest.TestCase):
             self.assertIn("user_labels", tables)
             self.assertIn("release_labels", tables)
 
+    def test_v9_label_sync_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "library.db"
+            connection = sqlite3.connect(db_path)
+            connection.executescript(
+                """
+                CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO meta(key, value) VALUES ('schema_version', '8');
+                CREATE TABLE files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path TEXT NOT NULL UNIQUE,
+                    mtime_ns INTEGER NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    indexed_at_ns INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE tracks (
+                    id TEXT PRIMARY KEY,
+                    file_id INTEGER NOT NULL,
+                    album_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    artist TEXT NOT NULL,
+                    album_artist TEXT NOT NULL,
+                    album TEXT NOT NULL,
+                    is_synthetic INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE user_labels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    created_at_ns INTEGER NOT NULL
+                );
+                CREATE TABLE release_labels (
+                    release_id TEXT NOT NULL,
+                    label_id INTEGER NOT NULL,
+                    tagged_at_ns INTEGER NOT NULL,
+                    PRIMARY KEY (release_id, label_id)
+                );
+                """
+            )
+            connection.commit()
+            connection.close()
+
+            connect(db_path)
+            connection = sqlite3.connect(db_path)
+            version = int(
+                connection.execute(
+                    "SELECT value FROM meta WHERE key = 'schema_version'",
+                ).fetchone()[0],
+            )
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'",
+                ).fetchall()
+            }
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(release_labels)").fetchall()
+            }
+            connection.close()
+            self.assertEqual(version, SCHEMA_VERSION)
+            self.assertIn("release_label_tombstones", tables)
+            self.assertIn("dirty", columns)
+            self.assertIn("by_device", columns)
+
     def test_fresh_connect_creates_user_labels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "library.db"

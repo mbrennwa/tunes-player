@@ -14,6 +14,7 @@ from tunes_player.core.services import PlayerService
 
 _LIST_WIDTH = 260
 
+
 class ReleaseLabelEditor(Gtk.Popover):
     def __init__(
         self,
@@ -28,6 +29,10 @@ class ReleaseLabelEditor(Gtk.Popover):
         self._on_changed = on_changed
         self._updating = False
         self._checks: dict[str, Gtk.CheckButton] = {}
+        # Defer flags_changed + folder sync until popdown so Add/toggles stay snappy.
+        self._pending_side_effects = False
+        self._writes_in_flight = 0
+        self._closed = False
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.set_margin_top(8)
@@ -58,6 +63,7 @@ class ReleaseLabelEditor(Gtk.Popover):
         add_row.append(add_btn)
         box.append(add_row)
 
+        self.connect("closed", self._on_closed)
         self._rebuild_checks()
 
     def _rebuild_checks(self) -> None:
@@ -73,36 +79,76 @@ class ReleaseLabelEditor(Gtk.Popover):
         self._updating = True
         try:
             for label in all_labels:
-                check = Gtk.CheckButton(label=label)
-                check.set_active(label in current)
-                check.connect("toggled", self._on_check_toggled, label)
-                row = Gtk.ListBoxRow()
-                row.set_child(check)
-                self._list.append(row)
-                self._checks[label] = check
+                self._append_check(label, active=label in current)
         finally:
             self._updating = False
+
+    def _append_check(self, label: str, *, active: bool) -> None:
+        check = Gtk.CheckButton(label=label)
+        check.set_active(active)
+        check.connect("toggled", self._on_check_toggled, label)
+        row = Gtk.ListBoxRow()
+        row.set_child(check)
+        self._list.append(row)
+        self._checks[label] = check
 
     def _notify_changed(self) -> None:
         if self._on_changed is not None:
             self._on_changed()
 
+    def _flush_side_effects(self) -> None:
+        if not self._pending_side_effects:
+            return
+        if self._writes_in_flight > 0:
+            return
+        self._pending_side_effects = False
+        self._service.notify_flags_changed()
+        self._service.schedule_labels_sync()
+
+    def _persist_toggle(self, label: str, *, on: bool) -> None:
+        self._pending_side_effects = True
+        self._writes_in_flight += 1
+
+        def _on_done() -> None:
+            self._writes_in_flight = max(0, self._writes_in_flight - 1)
+            if self._closed:
+                self._flush_side_effects()
+
+        self._service.toggle_release_label_async(
+            self._release_id,
+            label,
+            on=on,
+            emit_changed=False,
+            on_done=_on_done,
+        )
+        self._notify_changed()
+
+    def _on_closed(self, *_args: object) -> None:
+        self._closed = True
+        self._flush_side_effects()
+
+    def popup(self) -> None:
+        self._closed = False
+        super().popup()
+
     def _on_check_toggled(self, check: Gtk.CheckButton, label: str) -> None:
         if self._updating:
             return
-        self._service.toggle_release_label(
-            self._release_id,
-            label,
-            on=check.get_active(),
-        )
-        self._notify_changed()
+        self._persist_toggle(label, on=check.get_active())
 
     def _on_add_clicked(self, *_args: object) -> None:
         text = self._entry.get_text().strip()
         if not text:
             return
-        self._service.toggle_release_label(self._release_id, text, on=True)
         self._entry.set_text("")
-        self._rebuild_checks()
-        self._notify_changed()
-
+        # Optimistic UI — DB write is async; sync/notify wait until popdown.
+        existing = self._checks.get(text)
+        self._updating = True
+        try:
+            if existing is None:
+                self._append_check(text, active=True)
+            else:
+                existing.set_active(True)
+        finally:
+            self._updating = False
+        self._persist_toggle(text, on=True)
