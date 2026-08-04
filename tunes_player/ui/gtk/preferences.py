@@ -352,7 +352,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
 
     def _on_labels_export_clicked(self, *_args: object) -> None:
         dialog = Gtk.FileDialog(title="Export Labels")
-        dialog.set_initial_name("v1.json")
+        dialog.set_initial_name("tunes-labels.json")
         dialog.save(self, None, self._on_labels_export_selected)
 
     def _on_labels_export_selected(

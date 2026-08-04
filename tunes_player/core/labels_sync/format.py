@@ -9,7 +9,7 @@ from tunes_player.core.labels_sync.merge import LabelEntry, LabelMap, merge_labe
 from tunes_player.core.release_quality_tiles import parse_catalog_release_id
 
 FORMAT_VERSION = 1
-SYNC_RELATIVE_PATH = "tunes-labels/v1.json"
+SYNC_RELATIVE_PATH = "tunes-labels.json"
 
 
 def _normalize_map(label_map: LabelMap) -> LabelMap:

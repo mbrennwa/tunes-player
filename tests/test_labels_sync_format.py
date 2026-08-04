@@ -34,23 +34,23 @@ class FolderRemoteStoreTests(unittest.TestCase):
     def test_put_get_and_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = FolderRemoteStore(tmp)
-            etag = store.put("tunes-labels/v1.json", b'{"format":1,"releases":{}}\n')
-            obj = store.get("tunes-labels/v1.json")
+            etag = store.put("tunes-labels.json", b'{"format":1,"releases":{}}\n')
+            obj = store.get("tunes-labels.json")
             self.assertIsNotNone(obj)
             assert obj is not None
             self.assertEqual(obj.etag, etag)
             store.put(
-                "tunes-labels/v1.json",
+                "tunes-labels.json",
                 b'{"format":1,"releases":{"a":{}}}\n',
                 if_match=etag,
             )
             with self.assertRaises(ConflictError):
                 store.put(
-                    "tunes-labels/v1.json",
+                    "tunes-labels.json",
                     b"nope",
                     if_match=etag,
                 )
-            self.assertTrue((Path(tmp) / "tunes-labels" / "v1.json").is_file())
+            self.assertTrue((Path(tmp) / "tunes-labels.json").is_file())
 
 
 if __name__ == "__main__":
