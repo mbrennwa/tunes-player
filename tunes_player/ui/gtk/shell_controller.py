@@ -137,6 +137,16 @@ def grid_load_is_sync(state: ShellState, *, has_valid_cache: bool) -> bool:
         return True
     return state.base == ShellBase.ALL_LOCAL
 
+
+def library_updated_reloads_grid(base: ShellBase) -> bool:
+    """True when a local catalog change should refresh the browse grid.
+
+    Scan flushes emit library_updated about once per second. Only All Local
+    membership depends on newly indexed local releases; reloading search or
+    streaming presets blanks the page (Loading…) and rebuilds the same tiles (#75).
+    """
+    return base == ShellBase.ALL_LOCAL
+
 def fetch_base_releases(
     service: PlayerService,
     base: ShellBase,

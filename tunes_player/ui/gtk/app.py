@@ -53,6 +53,7 @@ from tunes_player.ui.gtk.shell_controller import (
     empty_grid_message,
     fetch_base_releases,
     format_release_count_label,
+    library_updated_reloads_grid,
 )
 from tunes_player.ui.gtk.genre_filter_menu import GenreFilterMenu
 from tunes_player.ui.gtk.label_filter_menu import LabelFilterMenu
@@ -1353,6 +1354,9 @@ class TunesWindow(Adw.ApplicationWindow):
             at_root=at_root,
             on_release_grid=on_release_grid,
         )
+        # Full recreate resets Gtk.ScrolledWindow; keep the user's place when
+        # All Local grows during a scan (#75 residual scroll jump).
+        scroll_y = self._capture_root_grid_scroll_y() if on_release_grid else None
         view = ReleaseGridView(
             releases=releases,
             on_release_activated=self._open_release,
@@ -1369,6 +1373,8 @@ class TunesWindow(Adw.ApplicationWindow):
         )
         self._grid_fingerprint = fingerprint
         self._replace_root_page(title=title, child=view)
+        if scroll_y is not None:
+            self._schedule_restore_root_grid_scroll(scroll_y)
         catalog_count = (
             len(self._cached_releases)
             if self._cache_matches(self._shell_state)
@@ -1378,6 +1384,94 @@ class TunesWindow(Adw.ApplicationWindow):
             filtered_count=len(releases),
             catalog_count=catalog_count,
         )
+
+    def _capture_root_grid_scroll_y(self) -> float | None:
+        page = self._main_nav.get_visible_page()
+        if page is None or page.get_tag() != _GRID_ROOT_TAG:
+            return None
+        child = page.get_child()
+        if not isinstance(child, ReleaseGridView):
+            return None
+        vadj = child.get_vadjustment()
+        if vadj is None:
+            return None
+        return float(vadj.get_value())
+
+    def _schedule_restore_root_grid_scroll(self, scroll_y: float) -> None:
+        """Re-apply scroll after grid recreate once content has a real height.
+
+        Gtk clamps the adjustment to 0 while upper is still tiny after replace.
+        A tight GLib.idle retry loop finishes before layout, so we poll on a
+        short timer and also re-apply on notify::upper for a couple of seconds.
+        """
+        if scroll_y <= 0:
+            return
+        previous = getattr(self, "_scroll_restore_timeout_id", 0)
+        if previous:
+            GLib.source_remove(previous)
+            self._scroll_restore_timeout_id = 0
+        previous_handler = getattr(self, "_scroll_restore_upper_handler", None)
+        if previous_handler is not None:
+            vadj_old, handler_id = previous_handler
+            try:
+                vadj_old.disconnect(handler_id)
+            except Exception:
+                pass
+            self._scroll_restore_upper_handler = None
+
+        state: dict[str, object] = {"ticks": 0, "vadj": None, "handler_id": 0}
+
+        def _cleanup_handler() -> None:
+            handler_id = state.get("handler_id")
+            vadj = state.get("vadj")
+            if handler_id and vadj is not None:
+                try:
+                    vadj.disconnect(int(handler_id))
+                except Exception:
+                    pass
+            state["handler_id"] = 0
+            state["vadj"] = None
+            self._scroll_restore_upper_handler = None
+
+        def _try_apply() -> None:
+            page = self._main_nav.get_visible_page()
+            if page is None or page.get_tag() != _GRID_ROOT_TAG:
+                return
+            child = page.get_child()
+            if not isinstance(child, ReleaseGridView):
+                return
+            child.sync_tile_layout()
+            vadj = child.get_vadjustment()
+            if vadj is None:
+                return
+            if state.get("vadj") is not vadj:
+                _cleanup_handler()
+                state["vadj"] = vadj
+                handler_id = vadj.connect("notify::upper", lambda *_: _try_apply())
+                state["handler_id"] = handler_id
+                self._scroll_restore_upper_handler = (vadj, handler_id)
+            upper = float(vadj.get_upper())
+            page_size = float(vadj.get_page_size())
+            if upper < scroll_y + max(page_size, 1.0):
+                return
+            max_y = max(0.0, upper - page_size)
+            target = min(scroll_y, max_y)
+            if abs(float(vadj.get_value()) - target) > 1.0:
+                vadj.set_value(target)
+
+        def _poll() -> bool:
+            _try_apply()
+            ticks = int(state["ticks"]) + 1
+            state["ticks"] = ticks
+            # ~2s at 50ms — covers post-recreate layout and upper clamp churn.
+            if ticks >= 40:
+                self._scroll_restore_timeout_id = 0
+                _cleanup_handler()
+                return False
+            return True
+
+        _try_apply()
+        self._scroll_restore_timeout_id = GLib.timeout_add(50, _poll)
 
     def _current_root_is_release_grid(self) -> bool:
         page = self._main_nav.get_visible_page()
@@ -1592,20 +1686,31 @@ class TunesWindow(Adw.ApplicationWindow):
         return False
 
     def _on_library_updated(self) -> bool:
-        # Incremental scans (e.g. after Save to disk) can add new local releases.
-        # Always drop the selection cache; reload the grid when the user is at root.
+        # Incremental scans emit library_updated ~1s while indexing. Only All Local
+        # should refresh; reloading search/streaming blanks to Loading… (#75).
+        state = self._shell_state
+        if not library_updated_reloads_grid(state.base):
+            log_grid_event(
+                "library_updated",
+                reason="library_updated",
+                action="noop",
+                base=state.base.value,
+            )
+            return False
         self._invalidate_selection_cache()
         if not self._nav_at_root():
             log_grid_event(
                 "library_updated",
                 reason="library_updated",
                 action="cache_only_not_at_root",
+                base=state.base.value,
             )
             return False
         log_grid_event(
             "library_updated",
             reason="library_updated",
             action="reload",
+            base=state.base.value,
         )
         self._reload_grid(reason="library_updated")
         return False
