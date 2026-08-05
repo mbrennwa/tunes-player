@@ -1,10 +1,6 @@
-"""Temporary release-grid rebuild tracing for issue #75.
+"""Release-grid rebuild tracing for issue #75.
 
-ON by default so intermittent flicker can be caught without setting
-TUNES_LOG_LEVEL. Disable with TUNES_GRID_TRACE=0 (or off/false/no).
-
-Remove or flip the default to off once #75 is diagnosed and fixed.
-Do not close #75 while this default remains on.
+Off by default. Enable with TUNES_GRID_TRACE=1 (or true/yes/on).
 """
 
 from __future__ import annotations
@@ -15,18 +11,18 @@ from collections.abc import Sequence
 
 _LOG = logging.getLogger(__name__)
 
-_FALSE = frozenset({"0", "false", "no", "off"})
+_TRUE = frozenset({"1", "true", "yes", "on"})
 
 
 def grid_trace_enabled() -> bool:
     """Return whether grid rebuild tracing is active.
 
-    Default: on. Explicit TUNES_GRID_TRACE=0/false/no/off disables it.
+    Default: off. Explicit TUNES_GRID_TRACE=1/true/yes/on enables it.
     """
     raw = os.environ.get("TUNES_GRID_TRACE")
     if raw is None or not raw.strip():
-        return True
-    return raw.strip().lower() not in _FALSE
+        return False
+    return raw.strip().lower() in _TRUE
 
 
 def _ids_preview(ids: Sequence[str], *, head: int = 3, tail: int = 2) -> str:
