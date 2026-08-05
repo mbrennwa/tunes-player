@@ -95,14 +95,21 @@ class ReleaseLabelStoreTests(unittest.TestCase):
         self._store.prune_release_label_tables()
         self.assertEqual(self._store.list_user_label_names(), ("buy",))
 
-    def test_toggle_works_when_write_connection_closed(self) -> None:
+    def test_reads_work_when_write_connection_closed(self) -> None:
+        self._store.toggle_release_label("tidal:album:1", "buy", on=True)
         self._store.close()
-        self._store.toggle_release_label("tidal:album:2", "vinyl", on=True)
+        self.assertFalse(self._store.writes_available())
+        self.assertEqual(self._store.list_user_label_names(), ("buy",))
         self.assertEqual(
-            self._store.get_release_label_names("tidal:album:2"),
-            frozenset({"vinyl"}),
+            self._store.get_release_label_names("tidal:album:1"),
+            frozenset({"buy"}),
         )
-        self.assertTrue(self._store.has_dirty_label_sync_rows())
+
+    def test_toggle_raises_when_write_connection_closed(self) -> None:
+        self._store.close()
+        self.assertFalse(self._store.writes_available())
+        with self.assertRaisesRegex(RuntimeError, "write connection is closed"):
+            self._store.toggle_release_label("tidal:album:2", "vinyl", on=True)
 
 
 if __name__ == "__main__":

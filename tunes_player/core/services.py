@@ -217,6 +217,7 @@ class PlayerService:
             get_enabled=lambda: self._config_manager.config.labels_sync_enabled,
             get_folder=lambda: self._config_manager.config.labels_sync_folder,
             set_status=self._config_manager.set_labels_sync_status,
+            writes_available=self._store.writes_available,
             on_applied=lambda: self._run_on_main_thread(self.notify_flags_changed),
         )
         self._label_sync.seed_status(
@@ -293,6 +294,9 @@ class PlayerService:
         self._last_recorded_track_id: str | None = None
         self._last_recorded_at_ns = 0
         self._deferred_plays: list[_DeferredPlay] = []
+        self._deferred_label_lock = threading.Lock()
+        self._deferred_label_toggles: dict[tuple[str, str], bool] = {}
+        self._deferred_label_sets: dict[str, frozenset[str]] = {}
         self._load_generation = 0
         self._play_release_generation = 0
         self._playback_load_active = False
@@ -816,6 +820,7 @@ class PlayerService:
                         raise
                 finally:
                     self._store.reconnect()
+                    self._flush_deferred_label_ops()
         finally:
             self._catalog_reconcile_running = False
         if removed:
@@ -889,6 +894,7 @@ class PlayerService:
                 return with_db_retry(attempt)
         finally:
             self._store.reconnect()
+            self._flush_deferred_label_ops()
 
     def remove_music_folder(self, folder: str) -> int:
         """Drop a configured folder and purge its indexed tracks from the catalog."""
@@ -914,6 +920,7 @@ class PlayerService:
                 removed = scanner.purge_folder(resolved)
             finally:
                 self._store.reconnect()
+                self._flush_deferred_label_ops()
 
         self._config_manager.remove_music_folder(folder)
         self.notify_library_updated()
@@ -1452,6 +1459,7 @@ class PlayerService:
         self._current_scan_job = None
         self._store.reconnect()
         self._flush_deferred_plays()
+        self._flush_deferred_label_ops()
         if finished_folder is not None:
             coalesced = self._drain_incremental_coalesce(finished_folder)
             if coalesced is not None:
@@ -1490,6 +1498,108 @@ class PlayerService:
         if remaining:
             self._deferred_plays = remaining + self._deferred_plays
 
+    def _queue_deferred_label_toggle(self, release_id: str, label: str, *, on: bool) -> None:
+        with self._deferred_label_lock:
+            pending_set = self._deferred_label_sets.get(release_id)
+            if pending_set is not None:
+                if on:
+                    self._deferred_label_sets[release_id] = pending_set | {label}
+                else:
+                    self._deferred_label_sets[release_id] = pending_set - {label}
+                return
+            self._deferred_label_toggles[(release_id, label)] = on
+
+    def _queue_deferred_label_set(self, release_id: str, labels: frozenset[str]) -> None:
+        with self._deferred_label_lock:
+            for key in list(self._deferred_label_toggles):
+                if key[0] == release_id:
+                    del self._deferred_label_toggles[key]
+            self._deferred_label_sets[release_id] = labels
+
+    def _flush_deferred_label_ops(self) -> None:
+        """Apply label mutations queued while the store write connection was closed."""
+        if not self._store.writes_available():
+            return
+        with self._deferred_label_lock:
+            sets = self._deferred_label_sets
+            toggles = self._deferred_label_toggles
+            if not sets and not toggles:
+                pass
+            else:
+                self._deferred_label_sets = {}
+                self._deferred_label_toggles = {}
+        if not sets and not toggles:
+            self._label_sync.schedule_sync()
+            return
+        device_id = self._label_sync.device_id
+        applied = False
+        remaining_sets: dict[str, frozenset[str]] = {}
+        remaining_toggles: dict[tuple[str, str], bool] = {}
+        for release_id, labels in sets.items():
+            try:
+                self._store.set_release_labels(
+                    release_id,
+                    labels,
+                    by_device=device_id,
+                    mark_dirty=True,
+                )
+                applied = True
+            except sqlite3.OperationalError as exc:
+                if is_locked_error(exc):
+                    remaining_sets[release_id] = labels
+                    continue
+                log.warning(
+                    "Could not flush deferred label set for %s",
+                    release_id,
+                    exc_info=True,
+                )
+            except Exception:
+                log.warning(
+                    "Could not flush deferred label set for %s",
+                    release_id,
+                    exc_info=True,
+                )
+        for (release_id, label), on in toggles.items():
+            try:
+                self._store.toggle_release_label(
+                    release_id,
+                    label,
+                    on=on,
+                    by_device=device_id,
+                    mark_dirty=True,
+                )
+                applied = True
+            except sqlite3.OperationalError as exc:
+                if is_locked_error(exc):
+                    remaining_toggles[(release_id, label)] = on
+                    continue
+                log.warning(
+                    "Could not flush deferred label toggle %s/%s",
+                    release_id,
+                    label,
+                    exc_info=True,
+                )
+            except Exception:
+                log.warning(
+                    "Could not flush deferred label toggle %s/%s",
+                    release_id,
+                    label,
+                    exc_info=True,
+                )
+        if remaining_sets or remaining_toggles:
+            with self._deferred_label_lock:
+                self._deferred_label_sets = {
+                    **remaining_sets,
+                    **self._deferred_label_sets,
+                }
+                self._deferred_label_toggles = {
+                    **remaining_toggles,
+                    **self._deferred_label_toggles,
+                }
+        if applied:
+            self.notify_flags_changed()
+        self._label_sync.schedule_sync()
+
     def is_scanning(self) -> bool:
         return self._scan_queue is not None
 
@@ -1497,27 +1607,67 @@ class PlayerService:
         """Call from the GTK main thread after a scan completes."""
         if not self.is_scanning():
             self._store.reconnect()
+            self._flush_deferred_label_ops()
         self._emit("library_updated")
 
     def list_user_labels(self) -> tuple[str, ...]:
         # Do not prune here — menus call this often and must stay snappy.
         # Stale rows are cleaned on reconnect / explicit prune.
-        return self._store.list_user_label_names()
+        names = set(self._store.list_user_label_names())
+        with self._deferred_label_lock:
+            for labels in self._deferred_label_sets.values():
+                names.update(labels)
+            for (_release_id, label), on in self._deferred_label_toggles.items():
+                if on:
+                    names.add(label)
+        return tuple(sorted(names, key=lambda item: item.casefold()))
 
     def get_release_labels(self, release_id: str) -> frozenset[str]:
-        return self._store.get_release_label_names(parse_catalog_release_id(release_id))
+        catalog_id = parse_catalog_release_id(release_id)
+        labels = self._store.get_release_label_names(catalog_id)
+        with self._deferred_label_lock:
+            pending_set = self._deferred_label_sets.get(catalog_id)
+            if pending_set is not None:
+                labels = pending_set
+            for (rid, name), on in self._deferred_label_toggles.items():
+                if rid != catalog_id:
+                    continue
+                if on:
+                    labels = labels | {name}
+                else:
+                    labels = labels - {name}
+        return labels
 
     def labels_for_releases(self, release_ids: list[str]) -> dict[str, frozenset[str]]:
         catalog_ids = [parse_catalog_release_id(release_id) for release_id in release_ids]
         by_catalog = self._store.labels_for_release_ids(catalog_ids)
         # Preserve caller keys (may include @tier suffixes) mapped to catalog labels.
-        return {
-            release_id: by_catalog.get(parse_catalog_release_id(release_id), frozenset())
-            for release_id in release_ids
-        }
+        result: dict[str, frozenset[str]] = {}
+        with self._deferred_label_lock:
+            deferred_sets = dict(self._deferred_label_sets)
+            deferred_toggles = dict(self._deferred_label_toggles)
+        for release_id in release_ids:
+            catalog_id = parse_catalog_release_id(release_id)
+            labels = by_catalog.get(catalog_id, frozenset())
+            pending_set = deferred_sets.get(catalog_id)
+            if pending_set is not None:
+                labels = pending_set
+            for (rid, name), on in deferred_toggles.items():
+                if rid != catalog_id:
+                    continue
+                if on:
+                    labels = labels | {name}
+                else:
+                    labels = labels - {name}
+            result[release_id] = labels
+        return result
 
     def set_release_labels(self, release_id: str, labels: frozenset[str]) -> None:
         catalog_id = parse_catalog_release_id(release_id)
+        if not self._store.writes_available():
+            self._queue_deferred_label_set(catalog_id, labels)
+            self.notify_flags_changed()
+            return
         self._store.set_release_labels(
             catalog_id,
             labels,
@@ -1529,6 +1679,10 @@ class PlayerService:
 
     def toggle_release_label(self, release_id: str, label: str, *, on: bool) -> None:
         catalog_id = parse_catalog_release_id(release_id)
+        if not self._store.writes_available():
+            self._queue_deferred_label_toggle(catalog_id, label, on=on)
+            self.notify_flags_changed()
+            return
         self._store.toggle_release_label(
             catalog_id,
             label,
@@ -1558,13 +1712,16 @@ class PlayerService:
 
         def work() -> None:
             try:
-                self._store.toggle_release_label(
-                    catalog_id,
-                    label,
-                    on=on,
-                    by_device=device_id,
-                    mark_dirty=True,
-                )
+                if not self._store.writes_available():
+                    self._queue_deferred_label_toggle(catalog_id, label, on=on)
+                else:
+                    self._store.toggle_release_label(
+                        catalog_id,
+                        label,
+                        on=on,
+                        by_device=device_id,
+                        mark_dirty=True,
+                    )
             except Exception:
                 log.exception(
                     "async label toggle failed release=%s label=%s on=%s",
@@ -1577,7 +1734,8 @@ class PlayerService:
                 return
             if emit_changed:
                 self._run_on_main_thread(self.notify_flags_changed)
-                self._label_sync.schedule_sync()
+                if self._store.writes_available():
+                    self._label_sync.schedule_sync()
             if on_done is not None:
                 self._run_on_main_thread(on_done)
 
@@ -1651,6 +1809,7 @@ class PlayerService:
         """Call after album-art cache repair; refreshes in-place UI cover art."""
         if not self.is_scanning():
             self._store.reconnect()
+            self._flush_deferred_label_ops()
         track = self._current_track
         if track is not None and track.id.startswith("local:"):
             refreshed = self._store.get_track(track.id)

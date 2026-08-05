@@ -61,6 +61,7 @@ class LabelSyncService:
         set_status: Callable[[float | None, str | None], None] | None = None,
         device_id: str | None = None,
         on_applied: Callable[[], None] | None = None,
+        writes_available: Callable[[], bool] | None = None,
     ) -> None:
         self._store = library_store
         self._get_enabled = get_enabled
@@ -68,6 +69,7 @@ class LabelSyncService:
         self._set_status = set_status
         self._device_id = device_id or socket.gethostname() or "unknown"
         self._on_applied = on_applied
+        self._writes_available = writes_available
         self._lock = threading.RLock()
         self._syncing = False
         self._last_success_at: float | None = None
@@ -75,6 +77,7 @@ class LabelSyncService:
         self._debounce_timer: threading.Timer | None = None
         self._ignore_watch_until = 0.0
         self._last_remote_digest: str | None = None
+        self._sync_deferred_for_write = False
 
     def seed_status(
         self,
@@ -112,11 +115,14 @@ class LabelSyncService:
             syncing=self._syncing,
             last_success_at=self._last_success_at,
             last_error=self._last_error,
-            pending_dirty=pending,
+            pending_dirty=pending or self._sync_deferred_for_write,
         )
 
     def schedule_sync(self) -> None:
         if not self._get_enabled() or self._normalized_folder() is None:
+            return
+        if self._writes_available is not None and not self._writes_available():
+            self._sync_deferred_for_write = True
             return
         with self._lock:
             if self._debounce_timer is not None:
@@ -135,7 +141,7 @@ class LabelSyncService:
                 pending_timer = True
             else:
                 pending_timer = False
-        if pending_timer or self._should_sync():
+        if pending_timer or self._sync_deferred_for_write or self._should_sync():
             self.sync_now()
 
     def sync_now(self) -> bool:
@@ -146,6 +152,11 @@ class LabelSyncService:
         if folder is None:
             self._record_error("Labels sync folder is not set")
             return False
+        if self._writes_available is not None and not self._writes_available():
+            # Library scan/art/reconcile owns the DB; retry after reconnect.
+            self._sync_deferred_for_write = True
+            return False
+        self._sync_deferred_for_write = False
         # Fast path: OwnCloud/Gio often re-touches an unchanged file.
         try:
             dirty = bool(self._store.has_dirty_label_sync_rows())

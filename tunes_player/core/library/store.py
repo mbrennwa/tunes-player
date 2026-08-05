@@ -74,33 +74,19 @@ def _locked_db(method):
 
 
 class _WriteSession:
-    """Context manager: use the long-lived write conn, or a temporary one if closed."""
+    """Context manager for the long-lived write connection (no competing temp writer)."""
 
     def __init__(self, store: LibraryStore) -> None:
         self._store = store
-        self._owned = False
 
     def __enter__(self) -> sqlite3.Connection:
-        if self._store._write_connection is None:
-            self._store._write_connection = connect(self._store._db_path)
-            self._owned = True
-        return self._store._write_connection
+        connection = self._store._write_connection
+        if connection is None:
+            raise RuntimeError("library store write connection is closed")
+        return connection
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        if not self._owned:
-            return
-        connection = self._store._write_connection
-        self._store._write_connection = None
-        if connection is not None:
-            try:
-                if exc_type is not None:
-                    connection.rollback()
-            except sqlite3.Error:
-                pass
-            try:
-                connection.close()
-            except sqlite3.Error:
-                pass
+        return None
 
 
 class LibraryStore:
@@ -115,8 +101,13 @@ class LibraryStore:
     def set_preserve_synced_label_orphans(self, enabled: bool) -> None:
         self._preserve_synced_label_orphans = bool(enabled)
 
+    def writes_available(self) -> bool:
+        """False while a scan/art/reconcile handoff has closed the write connection."""
+        with self._lock:
+            return self._write_connection is not None
+
     def _write_session(self) -> _WriteSession:
-        """Borrow the write connection, opening a temporary one if scans closed it."""
+        """Borrow the long-lived write connection; raises if it was closed for a handoff."""
         return _WriteSession(self)
 
     @property
