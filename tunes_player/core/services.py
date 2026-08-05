@@ -1751,6 +1751,10 @@ class PlayerService:
         self._label_sync.schedule_sync()
 
     def list_labelled_releases(self) -> list[Release]:
+        return list(self.list_labelled_browse()[0])
+
+    def list_labelled_browse(self) -> tuple[list[Release], tuple[str, ...]]:
+        """Return (resolved releases, labelled ids that could not be loaded)."""
         store_ids = self._store.list_labelled_release_ids()
         with self._deferred_label_lock:
             deferred_ids = set(self._deferred_label_sets)
@@ -1767,16 +1771,20 @@ class PlayerService:
             ordered_ids.append(release_id)
 
         releases: list[Release] = []
+        unavailable: list[str] = []
         for release_id in ordered_ids:
             try:
                 # Grid browse only needs summaries; full track lists are loaded on play.
                 release = self.get_release_summary(release_id)
             except Exception:
                 log.exception("skip labelled release that failed to load: %s", release_id)
+                unavailable.append(release_id)
                 continue
-            if release is not None:
+            if release is None:
+                unavailable.append(release_id)
+            else:
                 releases.append(release)
-        return releases
+        return releases, tuple(unavailable)
 
     def labels_sync_status(self) -> LabelSyncStatus:
         return self._label_sync.status()

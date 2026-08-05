@@ -81,5 +81,11 @@ def configure_logging(state_dir: Path, *, legacy_data_dir: Path | None = None) -
             file=sys.stderr,
         )
 
+    # tidalapi logs WARNING for expected misses (e.g. "Album '2' is unavailable")
+    # before raising ObjectNotFound. Those are not app errors; keep them off stderr
+    # unless TUNES_LOG_LEVEL=DEBUG (then leave third-party loggers alone).
+    if level > logging.DEBUG:
+        logging.getLogger("tidalapi").setLevel(logging.ERROR)
+
     _LOG.debug("Logging configured: %s (level=%s)", log_path, level_name)
     return log_path

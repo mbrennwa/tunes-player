@@ -57,6 +57,9 @@ class PlayerServiceLabelledReleasesTests(unittest.TestCase):
         self._service.get_release_summary = MagicMock(return_value=None)
 
         self.assertEqual(self._service.list_labelled_releases(), [])
+        releases, unavailable = self._service.list_labelled_browse()
+        self.assertEqual(releases, [])
+        self.assertEqual(unavailable, ("tidal:missing",))
 
     def test_list_labelled_releases_skips_release_that_raises(self) -> None:
         ok_id = "local:album:ok"
@@ -68,9 +71,10 @@ class PlayerServiceLabelledReleasesTests(unittest.TestCase):
             side_effect=[RuntimeError("gone"), _local_release(ok_id)],
         )
 
-        labelled = self._service.list_labelled_releases()
+        releases, unavailable = self._service.list_labelled_browse()
 
-        self.assertEqual([release.id for release in labelled], [ok_id])
+        self.assertEqual([release.id for release in releases], [ok_id])
+        self.assertEqual(unavailable, ("tidal:album:99",))
 
     def test_toggle_normalizes_quality_tile_id(self) -> None:
         self._service.toggle_release_label("tidal:album:99@cd", "buy", on=True)

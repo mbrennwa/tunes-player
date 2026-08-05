@@ -53,6 +53,7 @@ from tunes_player.ui.gtk.shell_controller import (
     empty_grid_message,
     fetch_base_releases,
     format_release_count_label,
+    format_unavailable_count_label,
     library_updated_reloads_grid,
 )
 from tunes_player.ui.gtk.genre_filter_menu import GenreFilterMenu
@@ -61,6 +62,7 @@ from tunes_player.ui.gtk.quality_multi_switch import QualityMultiSwitch
 from tunes_player.ui.gtk.release_sort_switch import ReleaseSortSwitch
 from tunes_player.ui.gtk.release_type_multi_switch import ReleaseTypeMultiSwitch
 from tunes_player.ui.gtk.source_multi_switch import SourceMultiSwitch
+from tunes_player.ui.gtk.unavailable_labelled_dialog import UnavailableLabelledDialog
 from tunes_player.ui.gtk.util import escape_markup, load_app_css
 from tunes_player.ui.gtk.views import (
     LoadingDiscoverView,
@@ -123,6 +125,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._sort_switch: ReleaseSortSwitch | None = None
         self._cached_selection_key: tuple[str, str] | None = None
         self._cached_releases: list[Release] = []
+        self._labelled_unavailable_ids: tuple[str, ...] = ()
         self._selection_stack: list[_SelectionSnapshot] = []
         self._prepared_for_first_show = False
         self._grid_fingerprint: tuple[str, tuple[str, ...], str | None] | None = None
@@ -339,14 +342,36 @@ class TunesWindow(Adw.ApplicationWindow):
         self._sort_slot.set_margin_start(24)
         filter_row.append(self._sort_slot)
 
+        self._release_count_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self._release_count_box.set_hexpand(True)
+        self._release_count_box.set_halign(Gtk.Align.END)
+        self._release_count_box.set_valign(Gtk.Align.CENTER)
+        self._release_count_box.set_visible(False)
+        self._release_count_box.add_css_class("shell-release-count-box")
+
         self._release_count_label = Gtk.Label(label="", xalign=1)
         self._release_count_label.add_css_class("shell-source-heading")
         self._release_count_label.add_css_class("shell-release-count")
-        self._release_count_label.set_hexpand(True)
         self._release_count_label.set_halign(Gtk.Align.END)
         self._release_count_label.set_valign(Gtk.Align.CENTER)
-        self._release_count_label.set_visible(False)
-        filter_row.append(self._release_count_label)
+        self._release_count_box.append(self._release_count_label)
+
+        self._unavailable_sep = Gtk.Label(label=" · ", xalign=1)
+        self._unavailable_sep.add_css_class("shell-source-heading")
+        self._unavailable_sep.add_css_class("shell-release-count")
+        self._unavailable_sep.set_visible(False)
+        self._release_count_box.append(self._unavailable_sep)
+
+        self._unavailable_btn = Gtk.Button(label="")
+        self._unavailable_btn.add_css_class("flat")
+        self._unavailable_btn.add_css_class("shell-release-count")
+        self._unavailable_btn.add_css_class("shell-unavailable-count")
+        self._unavailable_btn.set_valign(Gtk.Align.CENTER)
+        self._unavailable_btn.set_visible(False)
+        self._unavailable_btn.connect("clicked", self._on_unavailable_clicked)
+        self._release_count_box.append(self._unavailable_btn)
+
+        filter_row.append(self._release_count_box)
 
         controls.append(filter_row)
 
@@ -928,9 +953,16 @@ class TunesWindow(Adw.ApplicationWindow):
         return self._service.expand_releases_with_cache(releases)
 
     def _load_releases_for_state(self, state: ShellState) -> list[Release]:
+        if state.base == ShellBase.LABELLED:
+            # Always live-resolve so unavailable labelled ids stay accurate.
+            releases, unavailable = self._service.list_labelled_browse()
+            self._labelled_unavailable_ids = unavailable
+            return releases
         restored = self._restore_persisted_releases(state)
         if restored is not None:
+            self._labelled_unavailable_ids = ()
             return restored
+        self._labelled_unavailable_ids = ()
         return fetch_base_releases(
             self._service,
             state.base,
@@ -1284,25 +1316,55 @@ class TunesWindow(Adw.ApplicationWindow):
         catalog_count: int | None = None,
     ) -> None:
         if self._shell_state.base == ShellBase.NONE:
-            self._release_count_label.set_visible(False)
+            self._release_count_box.set_visible(False)
             return
-        self._release_count_label.set_visible(True)
+        self._release_count_box.set_visible(True)
         self._release_count_label.set_label(
             format_release_count_label(
                 filtered_count=filtered_count,
                 catalog_count=catalog_count,
             )
         )
+        unavailable_n = (
+            len(self._labelled_unavailable_ids)
+            if self._shell_state.base == ShellBase.LABELLED
+            else 0
+        )
+        show_unavailable = unavailable_n > 0
+        self._unavailable_sep.set_visible(show_unavailable)
+        self._unavailable_btn.set_visible(show_unavailable)
+        if show_unavailable:
+            self._unavailable_btn.set_label(format_unavailable_count_label(unavailable_n))
 
     def _sync_release_count_loading(self) -> None:
         if self._shell_state.base == ShellBase.NONE:
-            self._release_count_label.set_visible(False)
+            self._release_count_box.set_visible(False)
             return
-        self._release_count_label.set_visible(True)
+        self._release_count_box.set_visible(True)
         self._release_count_label.set_label("Loading…")
+        self._unavailable_sep.set_visible(False)
+        self._unavailable_btn.set_visible(False)
 
     def _hide_release_count_label(self) -> None:
-        self._release_count_label.set_visible(False)
+        self._release_count_box.set_visible(False)
+
+    def _on_unavailable_clicked(self, *_args: object) -> None:
+        if self._shell_state.base != ShellBase.LABELLED:
+            return
+        if not self._labelled_unavailable_ids:
+            return
+        dialog = UnavailableLabelledDialog(
+            service=self._service,
+            release_ids=self._labelled_unavailable_ids,
+            on_changed=self._on_unavailable_labels_changed,
+        )
+        dialog.present(self)
+
+    def _on_unavailable_labels_changed(self) -> None:
+        # Label removals emit flags_changed → Labelled reload; keep a local refresh
+        # if the dialog closed after clearing the last row.
+        if self._shell_state.base == ShellBase.LABELLED:
+            self._reload_grid(reason="unavailable_labels_changed")
 
     def _show_grid(
         self,

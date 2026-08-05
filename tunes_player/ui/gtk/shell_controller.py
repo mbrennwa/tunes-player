@@ -42,6 +42,13 @@ def format_release_count_label(
         return f"{filtered_count} of {catalog_count}"
     return str(filtered_count)
 
+
+def format_unavailable_count_label(unavailable_count: int) -> str:
+    """Clickable Labelled-status suffix when some tagged releases failed to load."""
+    if unavailable_count <= 0:
+        return ""
+    return f"{unavailable_count} unavailable"
+
 def available_sources(service: PlayerService) -> set[Source]:
     sources: set[Source] = set()
     if service.config.config.music_folders:

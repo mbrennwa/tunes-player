@@ -176,11 +176,28 @@ button.artist-link:hover label {
   opacity: 0.92;
 }
 
+.shell-controls .shell-filter-row .shell-release-count-box {
+  margin-left: 12px;
+  min-width: 0;
+}
+
 .shell-controls .shell-filter-row .shell-release-count {
   font-size: 0.75em;
   opacity: 0.65;
   min-width: 0;
-  margin-left: 12px;
+}
+
+.shell-controls .shell-filter-row .shell-unavailable-count {
+  font-size: 0.75em;
+  opacity: 0.85;
+  min-height: 18px;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+}
+
+.shell-controls .shell-filter-row .shell-unavailable-count label {
+  text-decoration-line: underline;
 }
 
 .shell-source-multi .shell-sort-direction-btn {
