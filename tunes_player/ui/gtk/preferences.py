@@ -18,6 +18,10 @@ from tunes_player.core.folder_scan_status import (
     FOLDER_SCAN_INCOMPLETE,
     format_folder_last_scan_line,
 )
+from tunes_player.core.labels_sync import (
+    looks_like_known_sync_folder,
+    unrecognized_sync_folder_advisory,
+)
 from tunes_player.core.logging_config import diagnostics_log_path
 from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.save_to_disk_menu import (
@@ -28,6 +32,7 @@ from tunes_player.ui.gtk.util import escape_markup, open_external_uri, read_clip
 
 _FOLDER_WATCH_LABEL = "Watch folder"
 _QOBUZ_CRED_AUTOSAVE_MS = 500
+_UNRECOGNIZED_SYNC_TOAST_SEC = 8
 _VOLUME_MODE_SUBTITLES = {
     "hardware": "Device hardware volume control",
     "software": "Software volume control in Tunes",
@@ -316,7 +321,25 @@ class PreferencesWindow(Adw.PreferencesWindow):
             parts.append(f"Last success: {stamp}")
         if status.last_error:
             parts.append("Error: " + status.last_error)
+        if (
+            status.enabled
+            and status.folder
+            and not looks_like_known_sync_folder(status.folder)
+        ):
+            parts.append(unrecognized_sync_folder_advisory())
         self._labels_sync_status_row.set_subtitle(escape_markup(" · ".join(parts)))
+
+    def _maybe_toast_unrecognized_sync_folder(self) -> None:
+        status = self._service.labels_sync_status()
+        if not (
+            status.enabled
+            and status.folder
+            and not looks_like_known_sync_folder(status.folder)
+        ):
+            return
+        toast = Adw.Toast.new(unrecognized_sync_folder_advisory())
+        toast.set_timeout(_UNRECOGNIZED_SYNC_TOAST_SEC)
+        self.add_toast(toast)
 
     def _on_labels_sync_enabled_changed(self, *_args: object) -> None:
         enabled = bool(self._labels_sync_enabled_row.get_active())
@@ -324,6 +347,8 @@ class PreferencesWindow(Adw.PreferencesWindow):
             return
         self._service.set_labels_sync_enabled(enabled)
         self._reload_labels_sync()
+        if enabled:
+            self._maybe_toast_unrecognized_sync_folder()
 
     def _on_labels_sync_folder_clicked(self, *_args: object) -> None:
         dialog = Gtk.FileDialog(title="Choose Labels Sync Folder")
@@ -349,6 +374,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
             return
         self._service.set_labels_sync_folder(path)
         self._reload_labels_sync()
+        self._maybe_toast_unrecognized_sync_folder()
 
     def _on_labels_export_clicked(self, *_args: object) -> None:
         dialog = Gtk.FileDialog(title="Export Labels")
