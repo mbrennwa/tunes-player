@@ -1,4 +1,4 @@
-"""Right-click release label editor popover."""
+"""Release label editor presented as an Adw.Dialog (not a nested popover)."""
 
 from __future__ import annotations
 
@@ -6,16 +6,23 @@ from collections.abc import Callable
 
 import gi
 
+gi.require_version("Adw", "1")
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Gtk  # noqa: E402
+from gi.repository import Adw, Gtk  # noqa: E402
 
 from tunes_player.core.services import PlayerService
 
-_LIST_WIDTH = 260
+_LIST_WIDTH = 280
 
 
-class ReleaseLabelEditor(Gtk.Popover):
+class ReleaseLabelEditor(Adw.Dialog):
+    """Edit labels for one release.
+
+    Uses a dialog instead of a popover so it is not auto-hidden by the
+    right-click action menu that opens it (GTK4 popover-on-popover grab).
+    """
+
     def __init__(
         self,
         *,
@@ -29,27 +36,36 @@ class ReleaseLabelEditor(Gtk.Popover):
         self._on_changed = on_changed
         self._updating = False
         self._checks: dict[str, Gtk.CheckButton] = {}
-        # Defer flags_changed + folder sync until popdown so Add/toggles stay snappy.
+        # Defer flags_changed until close so Add/toggles stay snappy.
         self._pending_side_effects = False
         self._writes_in_flight = 0
         self._closed = False
 
+        self.set_title("Labels")
+        self.set_content_width(_LIST_WIDTH + 48)
+        self.set_content_height(360)
+
+        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        toolbar.add_top_bar(header)
+        self.set_child(toolbar)
+
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.set_margin_top(8)
         box.set_margin_bottom(8)
-        box.set_margin_start(10)
-        box.set_margin_end(10)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
         box.set_size_request(_LIST_WIDTH, -1)
-        self.set_child(box)
 
-        heading = Gtk.Label(label="Labels")
-        heading.add_css_class("heading")
-        heading.set_halign(Gtk.Align.START)
-        box.append(heading)
-
+        scrolled = Gtk.ScrolledWindow(
+            vexpand=True,
+            hscrollbar_policy=Gtk.PolicyType.NEVER,
+        )
         self._list = Gtk.ListBox()
         self._list.set_selection_mode(Gtk.SelectionMode.NONE)
-        box.append(self._list)
+        self._list.add_css_class("boxed-list")
+        scrolled.set_child(self._list)
+        box.append(scrolled)
 
         add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self._entry = Gtk.Entry()
@@ -63,8 +79,19 @@ class ReleaseLabelEditor(Gtk.Popover):
         add_row.append(add_btn)
         box.append(add_row)
 
+        toolbar.set_content(box)
+
         self.connect("closed", self._on_closed)
         self._rebuild_checks()
+
+    def present_for(self, parent: Gtk.Widget | None = None) -> None:
+        """Show (or re-show) the editor for the current release id."""
+        self._closed = False
+        self._rebuild_checks()
+        self.present(parent)
+
+    def set_release_id(self, release_id: str) -> None:
+        self._release_id = release_id
 
     def _rebuild_checks(self) -> None:
         child = self._list.get_first_child()
@@ -127,10 +154,6 @@ class ReleaseLabelEditor(Gtk.Popover):
         self._closed = True
         self._flush_side_effects()
 
-    def popup(self) -> None:
-        self._closed = False
-        super().popup()
-
     def _on_check_toggled(self, check: Gtk.CheckButton, label: str) -> None:
         if self._updating:
             return
@@ -141,7 +164,7 @@ class ReleaseLabelEditor(Gtk.Popover):
         if not text:
             return
         self._entry.set_text("")
-        # Optimistic UI — DB write is async; sync/notify wait until popdown.
+        # Optimistic UI — DB write is async; notify waits until dialog close.
         existing = self._checks.get(text)
         self._updating = True
         try:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -26,6 +27,8 @@ from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.errors import show_error_toast
 from tunes_player.ui.gtk.release_label_menu import ReleaseLabelEditor
 
+log = logging.getLogger(__name__)
+
 STREAMING_SOURCES = frozenset({Source.TIDAL, Source.QOBUZ})
 
 
@@ -47,21 +50,24 @@ def attach_release_context_menu(
     on_label_changed: Callable[[], None] | None = None,
 ) -> None:
     """Secondary-click: Save to disk… (streaming) + Labels…"""
-    label_popover: ReleaseLabelEditor | None = None
+    label_dialog: ReleaseLabelEditor | None = None
 
     def _open_labels() -> None:
-        nonlocal label_popover
-        if label_popover is None:
-            label_popover = ReleaseLabelEditor(
-                service=service,
-                release_id=release_id,
-                on_changed=on_label_changed,
-            )
-            label_popover.set_parent(widget)
-        else:
-            label_popover._release_id = release_id
-            label_popover._rebuild_checks()
-        label_popover.popup()
+        nonlocal label_dialog
+        try:
+            if label_dialog is None:
+                label_dialog = ReleaseLabelEditor(
+                    service=service,
+                    release_id=release_id,
+                    on_changed=on_label_changed,
+                )
+            else:
+                label_dialog.set_release_id(release_id)
+            # Dialog presentation is independent of the action popover grab,
+            # so Labels… is not auto-dismissed with the context menu.
+            label_dialog.present_for(_find_window(widget) or widget)
+        except Exception:
+            log.exception("Failed to open Labels editor for %s", release_id)
 
     gesture = Gtk.GestureClick()
     gesture.set_button(Gdk.BUTTON_SECONDARY)

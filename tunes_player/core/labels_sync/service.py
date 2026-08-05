@@ -25,6 +25,7 @@ from tunes_player.core.grid_trace import log_grid_event
 logger = logging.getLogger(__name__)
 
 _DEBOUNCE_SEC = 1.0
+_WRITE_RETRY_SEC = 2.0
 _MAX_PUT_RETRIES = 3
 _WATCH_SUPPRESS_SEC = 5.0
 
@@ -75,6 +76,7 @@ class LabelSyncService:
         self._last_success_at: float | None = None
         self._last_error: str | None = None
         self._debounce_timer: threading.Timer | None = None
+        self._write_retry_timer: threading.Timer | None = None
         self._ignore_watch_until = 0.0
         self._last_remote_digest: str | None = None
         self._sync_deferred_for_write = False
@@ -122,8 +124,12 @@ class LabelSyncService:
         if not self._get_enabled() or self._normalized_folder() is None:
             return
         if self._writes_available is not None and not self._writes_available():
+            # Library scan owns the DB; retry once writes are possible again.
             self._sync_deferred_for_write = True
+            self._arm_write_retry()
             return
+        self._sync_deferred_for_write = False
+        self._cancel_write_retry()
         with self._lock:
             if self._debounce_timer is not None:
                 self._debounce_timer.cancel()
@@ -141,6 +147,7 @@ class LabelSyncService:
                 pending_timer = True
             else:
                 pending_timer = False
+        self._cancel_write_retry()
         if pending_timer or self._sync_deferred_for_write or self._should_sync():
             self.sync_now()
 
@@ -155,8 +162,10 @@ class LabelSyncService:
         if self._writes_available is not None and not self._writes_available():
             # Library scan/art/reconcile owns the DB; retry after reconnect.
             self._sync_deferred_for_write = True
+            self._arm_write_retry()
             return False
         self._sync_deferred_for_write = False
+        self._cancel_write_retry()
         # Fast path: OwnCloud/Gio often re-touches an unchanged file.
         try:
             dirty = bool(self._store.has_dirty_label_sync_rows())
@@ -195,6 +204,28 @@ class LabelSyncService:
         finally:
             with self._lock:
                 self._syncing = False
+
+    def _arm_write_retry(self) -> None:
+        with self._lock:
+            if self._write_retry_timer is not None:
+                return
+            timer = threading.Timer(_WRITE_RETRY_SEC, self._write_retry_run)
+            timer.daemon = True
+            self._write_retry_timer = timer
+            timer.start()
+
+    def _cancel_write_retry(self) -> None:
+        with self._lock:
+            if self._write_retry_timer is not None:
+                self._write_retry_timer.cancel()
+                self._write_retry_timer = None
+
+    def _write_retry_run(self) -> None:
+        with self._lock:
+            self._write_retry_timer = None
+        if not self._sync_deferred_for_write:
+            return
+        self.schedule_sync()
 
     def export_to(self, path: Path | str) -> None:
         target = Path(path)

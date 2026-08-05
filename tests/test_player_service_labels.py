@@ -23,7 +23,7 @@ def _local_release(release_id: str) -> Release:
     )
 
 
-class PlayerServiceFlaggedReleasesTests(unittest.TestCase):
+class PlayerServiceLabelledReleasesTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         config = ConfigManager(Path(self._tmp.name) / "config.json")
@@ -34,25 +34,43 @@ class PlayerServiceFlaggedReleasesTests(unittest.TestCase):
         self._service.shutdown()
         self._tmp.cleanup()
 
-    def test_list_flagged_releases_resolves_local_ids(self) -> None:
+    def test_list_labelled_releases_resolves_local_ids(self) -> None:
         release_id = "local:album:test"
-        self._service._store.list_flagged_release_ids = MagicMock(
+        self._service._store.list_labelled_release_ids = MagicMock(
             return_value=(release_id,),
         )
-        self._service.get_release = MagicMock(return_value=_local_release(release_id))
+        self._service.get_release_labels = MagicMock(return_value=frozenset({"buy"}))
+        self._service.get_release_summary = MagicMock(
+            return_value=_local_release(release_id),
+        )
 
-        flagged = self._service.list_flagged_releases()
+        labelled = self._service.list_labelled_releases()
 
-        self.assertEqual([release.id for release in flagged], [release_id])
-        self._service.get_release.assert_called_once_with(release_id)
+        self.assertEqual([release.id for release in labelled], [release_id])
+        self._service.get_release_summary.assert_called_once_with(release_id)
 
-    def test_list_flagged_releases_skips_missing_release(self) -> None:
-        self._service._store.list_flagged_release_ids = MagicMock(
+    def test_list_labelled_releases_skips_missing_release(self) -> None:
+        self._service._store.list_labelled_release_ids = MagicMock(
             return_value=("tidal:missing",),
         )
-        self._service.get_release = MagicMock(return_value=None)
+        self._service.get_release_labels = MagicMock(return_value=frozenset({"buy"}))
+        self._service.get_release_summary = MagicMock(return_value=None)
 
-        self.assertEqual(self._service.list_flagged_releases(), [])
+        self.assertEqual(self._service.list_labelled_releases(), [])
+
+    def test_list_labelled_releases_skips_release_that_raises(self) -> None:
+        ok_id = "local:album:ok"
+        self._service._store.list_labelled_release_ids = MagicMock(
+            return_value=("tidal:album:99", ok_id),
+        )
+        self._service.get_release_labels = MagicMock(return_value=frozenset({"buy"}))
+        self._service.get_release_summary = MagicMock(
+            side_effect=[RuntimeError("gone"), _local_release(ok_id)],
+        )
+
+        labelled = self._service.list_labelled_releases()
+
+        self.assertEqual([release.id for release in labelled], [ok_id])
 
     def test_toggle_normalizes_quality_tile_id(self) -> None:
         self._service.toggle_release_label("tidal:album:99@cd", "buy", on=True)

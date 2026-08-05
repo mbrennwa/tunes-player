@@ -83,13 +83,13 @@ _PRESET_LABELS = {
     ShellBase.NEW_MUSIC: "New Releases",
     ShellBase.SUGGESTION: "Suggest Music",
     ShellBase.ALL_LOCAL: "All Local",
-    ShellBase.FLAGGED: "Flagged",
+    ShellBase.LABELLED: "Labelled",
 }
 _LOADING_MESSAGES = {
     ShellBase.NEW_MUSIC: "Loading new releases…",
     ShellBase.SUGGESTION: "Finding suggestions...",
     ShellBase.ALL_LOCAL: "Loading local library…",
-    ShellBase.FLAGGED: "Loading flagged releases…",
+    ShellBase.LABELLED: "Loading labelled releases…",
 }
 _CATALOG_ENRICH_CONCURRENCY = 2
 
@@ -278,10 +278,10 @@ class TunesWindow(Adw.ApplicationWindow):
         self._suggestion_btn.connect("toggled", self._on_suggestion_toggled)
         search_row.append(self._suggestion_btn)
 
-        self._flagged_btn = Gtk.ToggleButton(label="Flagged")
-        self._flagged_btn.add_css_class("shell-preset-btn")
-        self._flagged_btn.connect("toggled", self._on_flagged_toggled)
-        search_row.append(self._flagged_btn)
+        self._labelled_btn = Gtk.ToggleButton(label="Labelled")
+        self._labelled_btn.add_css_class("shell-preset-btn")
+        self._labelled_btn.connect("toggled", self._on_labelled_toggled)
+        search_row.append(self._labelled_btn)
 
         self._all_local_btn = Gtk.ToggleButton(label="All Local")
         self._all_local_btn.add_css_class("shell-preset-btn")
@@ -503,7 +503,7 @@ class TunesWindow(Adw.ApplicationWindow):
             self._new_music_btn.set_active(state.base == ShellBase.NEW_MUSIC)
             self._suggestion_btn.set_active(state.base == ShellBase.SUGGESTION)
             self._all_local_btn.set_active(state.base == ShellBase.ALL_LOCAL)
-            self._flagged_btn.set_active(state.base == ShellBase.FLAGGED)
+            self._labelled_btn.set_active(state.base == ShellBase.LABELLED)
         finally:
             self._updating_preset = False
 
@@ -515,7 +515,7 @@ class TunesWindow(Adw.ApplicationWindow):
             ShellBase.NEW_MUSIC,
             ShellBase.SUGGESTION,
             ShellBase.ALL_LOCAL,
-            ShellBase.FLAGGED,
+            ShellBase.LABELLED,
         ):
             if self._search_entry.get_text():
                 self._search_entry.set_text("")
@@ -774,12 +774,12 @@ class TunesWindow(Adw.ApplicationWindow):
         elif self._shell_state.base == ShellBase.ALL_LOCAL:
             button.set_active(True)
 
-    def _on_flagged_toggled(self, button: Gtk.ToggleButton) -> None:
+    def _on_labelled_toggled(self, button: Gtk.ToggleButton) -> None:
         if getattr(self, "_updating_preset", False):
             return
         if button.get_active():
-            self._activate_preset(ShellBase.FLAGGED)
-        elif self._shell_state.base == ShellBase.FLAGGED:
+            self._activate_preset(ShellBase.LABELLED)
+        elif self._shell_state.base == ShellBase.LABELLED:
             button.set_active(True)
 
     def _commit_selection_change(
@@ -1244,10 +1244,10 @@ class TunesWindow(Adw.ApplicationWindow):
                 "Could not load your local library.",
                 "Could not load All Local. Try again in a moment.",
             )
-        if request.base == ShellBase.FLAGGED:
+        if request.base == ShellBase.LABELLED:
             return (
-                "Could not load flagged releases.",
-                "Could not load Flagged. Try again in a moment.",
+                "Could not load labelled releases.",
+                "Could not load Labelled. Try again in a moment.",
             )
         return (
             f"Could not load {title}. Check your connection and sign-in.",
@@ -1628,15 +1628,15 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _on_flags_changed(self) -> bool:
         state = self._shell_state
-        # Flagged view membership depends on labels — full reload.
-        if state.base == ShellBase.FLAGGED:
+        # Labelled view membership depends on labels — full reload.
+        if state.base == ShellBase.LABELLED:
             log_grid_event(
                 "flags_changed",
-                reason="flags_changed_flagged",
+                reason="flags_changed_labelled",
                 action="reload",
             )
             self._invalidate_selection_cache()
-            self._reload_grid(reason="flags_changed_flagged")
+            self._reload_grid(reason="flags_changed_labelled")
             return False
         # Label filter is active — refilter without leaving the selection.
         if state.enabled_labels and self._cache_matches(state) and self._cached_releases:
