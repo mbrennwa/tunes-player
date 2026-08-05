@@ -53,6 +53,7 @@ from tunes_player.ui.gtk.shell_controller import (
     empty_grid_message,
     fetch_base_releases,
     format_release_count_label,
+    library_updated_reloads_grid,
 )
 from tunes_player.ui.gtk.genre_filter_menu import GenreFilterMenu
 from tunes_player.ui.gtk.label_filter_menu import LabelFilterMenu
@@ -1592,20 +1593,31 @@ class TunesWindow(Adw.ApplicationWindow):
         return False
 
     def _on_library_updated(self) -> bool:
-        # Incremental scans (e.g. after Save to disk) can add new local releases.
-        # Always drop the selection cache; reload the grid when the user is at root.
+        # Incremental scans emit library_updated ~1s while indexing. Only All Local
+        # should refresh; reloading search/streaming blanks to Loading… (#75).
+        state = self._shell_state
+        if not library_updated_reloads_grid(state.base):
+            log_grid_event(
+                "library_updated",
+                reason="library_updated",
+                action="noop",
+                base=state.base.value,
+            )
+            return False
         self._invalidate_selection_cache()
         if not self._nav_at_root():
             log_grid_event(
                 "library_updated",
                 reason="library_updated",
                 action="cache_only_not_at_root",
+                base=state.base.value,
             )
             return False
         log_grid_event(
             "library_updated",
             reason="library_updated",
             action="reload",
+            base=state.base.value,
         )
         self._reload_grid(reason="library_updated")
         return False

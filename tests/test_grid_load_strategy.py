@@ -5,7 +5,10 @@ from __future__ import annotations
 import unittest
 
 from tunes_player.core.shell_state import ShellBase, ShellState
-from tunes_player.ui.gtk.shell_controller import grid_load_is_sync
+from tunes_player.ui.gtk.shell_controller import (
+    grid_load_is_sync,
+    library_updated_reloads_grid,
+)
 
 
 class GridLoadStrategyTests(unittest.TestCase):
@@ -30,6 +33,22 @@ class GridLoadStrategyTests(unittest.TestCase):
     def test_search_without_cache_is_async(self) -> None:
         state = ShellState(base=ShellBase.SEARCH, search_query="artist")
         self.assertFalse(grid_load_is_sync(state, has_valid_cache=False))
+
+
+class LibraryUpdatedReloadPolicyTests(unittest.TestCase):
+    def test_all_local_reloads(self) -> None:
+        self.assertTrue(library_updated_reloads_grid(ShellBase.ALL_LOCAL))
+
+    def test_non_local_bases_do_not_reload(self) -> None:
+        for base in (
+            ShellBase.NONE,
+            ShellBase.SEARCH,
+            ShellBase.NEW_MUSIC,
+            ShellBase.SUGGESTION,
+            ShellBase.FLAGGED,
+        ):
+            with self.subTest(base=base):
+                self.assertFalse(library_updated_reloads_grid(base))
 
 
 if __name__ == "__main__":
