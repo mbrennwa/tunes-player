@@ -6,7 +6,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tunes_player.core.labels_sync.format import SYNC_RELATIVE_PATH, loads_label_map
+from tunes_player.core.labels_sync.format import (
+    SYNC_RELATIVE_PATH,
+    dumps_label_map,
+    loads_label_map,
+    shard_relative_path,
+)
+from tunes_player.core.labels_sync.merge import LabelEntry
 from tunes_player.core.labels_sync.service import LabelSyncService
 from tunes_player.core.library.store import LibraryStore
 from tunes_player.core.release_quality_tiles import parse_catalog_release_id
@@ -22,11 +28,13 @@ class LabelSyncServiceTests(unittest.TestCase):
         self._store = LibraryStore(self._db_path)
         self._store.set_preserve_synced_label_orphans(True)
         self._enabled = True
+        self._device_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         self._service = LabelSyncService(
             library_store=self._store,
             get_enabled=lambda: self._enabled,
             get_folder=lambda: str(self._sync_folder),
-            device_id="testhost",
+            device_id=self._device_a,
+            by_name="testhost",
         )
 
     def tearDown(self) -> None:
@@ -53,26 +61,114 @@ class LabelSyncServiceTests(unittest.TestCase):
             mark_dirty=True,
         )
         self.assertTrue(self._service.sync_now())
-        sync_file = self._sync_folder / SYNC_RELATIVE_PATH
-        self.assertTrue(sync_file.is_file())
-        remote = loads_label_map(sync_file.read_bytes())
+        shard_a = self._sync_folder / shard_relative_path(self._device_a)
+        self.assertTrue(shard_a.is_file())
+        self.assertFalse((self._sync_folder / SYNC_RELATIVE_PATH).is_file())
+        remote = loads_label_map(shard_a.read_bytes())
         self.assertTrue(remote["tidal:album:42"]["buy"].on)
 
         other_db = Path(self._tmp.name) / "other.db"
         other_store = LibraryStore(other_db)
         other_store.set_preserve_synced_label_orphans(True)
+        device_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         other = LabelSyncService(
             library_store=other_store,
             get_enabled=lambda: True,
             get_folder=lambda: str(self._sync_folder),
-            device_id="otherhost",
+            device_id=device_b,
+            by_name="otherhost",
         )
         self.assertTrue(other.sync_now())
         self.assertEqual(
             other_store.get_release_label_names("tidal:album:42"),
             frozenset({"buy"}),
         )
+        shard_b = self._sync_folder / shard_relative_path(device_b)
+        self.assertTrue(shard_b.is_file())
         other_store.close()
+
+    def test_two_devices_write_distinct_shards(self) -> None:
+        self._store.toggle_release_label(
+            "tidal:album:1",
+            "buy",
+            on=True,
+            by_device="testhost",
+            mark_dirty=True,
+        )
+        self.assertTrue(self._service.sync_now())
+
+        other_store = LibraryStore(Path(self._tmp.name) / "other2.db")
+        other_store.set_preserve_synced_label_orphans(True)
+        device_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        other = LabelSyncService(
+            library_store=other_store,
+            get_enabled=lambda: True,
+            get_folder=lambda: str(self._sync_folder),
+            device_id=device_b,
+            by_name="otherhost",
+        )
+        other_store.toggle_release_label(
+            "tidal:album:1",
+            "vinyl",
+            on=True,
+            by_device="otherhost",
+            mark_dirty=True,
+        )
+        self.assertTrue(other.sync_now())
+        self.assertTrue(self._service.sync_now())
+
+        self.assertEqual(
+            self._store.get_release_label_names("tidal:album:1"),
+            frozenset({"buy", "vinyl"}),
+        )
+        self.assertEqual(
+            other_store.get_release_label_names("tidal:album:1"),
+            frozenset({"buy", "vinyl"}),
+        )
+        names = {p.name for p in self._sync_folder.iterdir() if p.is_file()}
+        self.assertEqual(
+            names,
+            {
+                shard_relative_path(self._device_a),
+                shard_relative_path(device_b),
+            },
+        )
+        other_store.close()
+
+    def test_legacy_single_file_absorbed(self) -> None:
+        legacy = {
+            "tidal:album:99": {
+                "buy": LabelEntry(on=True, at_ns=1_000, by="old"),
+            }
+        }
+        (self._sync_folder / SYNC_RELATIVE_PATH).write_bytes(dumps_label_map(legacy))
+        self.assertTrue(self._service.sync_now())
+        self.assertEqual(
+            self._store.get_release_label_names("tidal:album:99"),
+            frozenset({"buy"}),
+        )
+        shard = self._sync_folder / shard_relative_path(self._device_a)
+        self.assertTrue(shard.is_file())
+        # Legacy left in place; not rewritten as the live store.
+        self.assertTrue((self._sync_folder / SYNC_RELATIVE_PATH).is_file())
+
+    def test_conflict_sibling_merged(self) -> None:
+        conflict = {
+            "tidal:album:7": {
+                "keep": LabelEntry(on=True, at_ns=5_000, by="peer"),
+            }
+        }
+        conflict_name = "tunes-labels (conflicted copy 2026-08-05 123456).json"
+        (self._sync_folder / conflict_name).write_bytes(dumps_label_map(conflict))
+        self.assertTrue(self._service.sync_now())
+        self.assertEqual(
+            self._store.get_release_label_names("tidal:album:7"),
+            frozenset({"keep"}),
+        )
+        shard = loads_label_map(
+            (self._sync_folder / shard_relative_path(self._device_a)).read_bytes()
+        )
+        self.assertTrue(shard["tidal:album:7"]["keep"].on)
 
     def test_export_import(self) -> None:
         self._store.toggle_release_label(
@@ -89,7 +185,8 @@ class LabelSyncServiceTests(unittest.TestCase):
             library_store=blank,
             get_enabled=lambda: False,
             get_folder=lambda: None,
-            device_id="blank",
+            device_id="cccccccccccccccccccccccccccccccc",
+            by_name="blank",
         )
         blank_service.import_from(export_path)
         self.assertEqual(

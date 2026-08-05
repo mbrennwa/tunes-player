@@ -3,19 +3,26 @@ set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
 
-if [[ ! -d .venv ]] || [[ ! -f .venv/bin/tunes-player ]]; then
+venv_needs_recreate() {
+  [[ ! -d .venv ]] && return 0
+  [[ ! -f .venv/bin/tunes-player ]] && return 0
+  local tunes_shebang
+  tunes_shebang="$(head -1 .venv/bin/tunes-player)"
+  if [[ "$tunes_shebang" != "#!$ROOT/.venv/bin/python" \
+    && "$tunes_shebang" != "#!$ROOT/.venv/bin/python3" ]]; then
+    return 0
+  fi
+  # Isolated venvs (e.g. created for tests) cannot see system PyGObject.
+  if ! .venv/bin/python3 -c 'import tunes_player, gi' 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+if venv_needs_recreate; then
   rm -rf .venv
   python3 -m venv .venv --system-site-packages
   .venv/bin/pip install -e .
-else
-  tunes_shebang="$(head -1 .venv/bin/tunes-player)"
-  if [[ "$tunes_shebang" != "#!$ROOT/.venv/bin/python" \
-    && "$tunes_shebang" != "#!$ROOT/.venv/bin/python3" ]] \
-    || ! .venv/bin/python3 -c 'import tunes_player' 2>/dev/null; then
-    rm -rf .venv
-    python3 -m venv .venv --system-site-packages
-    .venv/bin/pip install -e .
-  fi
 fi
 
 install_desktop_integration() {

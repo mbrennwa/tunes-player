@@ -140,7 +140,7 @@ class LabelSyncWriteGateTests(unittest.TestCase):
         self.assertTrue(self._service.status().pending_dirty)
 
     def test_schedule_sync_retries_when_writes_become_available(self) -> None:
-        from tunes_player.core.labels_sync.format import SYNC_RELATIVE_PATH
+        from tunes_player.core.labels_sync.format import shard_relative_path
 
         self._store.toggle_release_label("tidal:album:1", "buy", on=True)
         self._writes_ok = False
@@ -149,7 +149,7 @@ class LabelSyncWriteGateTests(unittest.TestCase):
         self._writes_ok = True
         # Drive the write-retry path without waiting on the real timer.
         self._service._write_retry_run()
-        sync_file = self._sync_folder / SYNC_RELATIVE_PATH
+        sync_file = self._sync_folder / shard_relative_path("testhost")
         # Allow debounce timer from schedule_sync inside _write_retry_run.
         self._service.flush()
         self.assertTrue(sync_file.is_file())
