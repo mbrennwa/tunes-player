@@ -14,20 +14,22 @@ from tunes_player.core.grid_trace import (
 
 
 class GridTraceTests(unittest.TestCase):
-    def test_enabled_by_default(self) -> None:
+    def test_disabled_by_default(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TUNES_GRID_TRACE", None)
-            self.assertTrue(grid_trace_enabled())
+            self.assertFalse(grid_trace_enabled())
 
     def test_disabled_explicitly(self) -> None:
-        for value in ("0", "false", "no", "off", "OFF"):
+        for value in ("0", "false", "no", "off", "OFF", ""):
             with self.subTest(value=value):
                 with mock.patch.dict(os.environ, {"TUNES_GRID_TRACE": value}):
                     self.assertFalse(grid_trace_enabled())
 
     def test_enabled_explicitly(self) -> None:
-        with mock.patch.dict(os.environ, {"TUNES_GRID_TRACE": "1"}):
-            self.assertTrue(grid_trace_enabled())
+        for value in ("1", "true", "yes", "on", "ON"):
+            with self.subTest(value=value):
+                with mock.patch.dict(os.environ, {"TUNES_GRID_TRACE": value}):
+                    self.assertTrue(grid_trace_enabled())
 
     def test_log_show_grid_marks_spurious_same_ids(self) -> None:
         ids = ("a", "b", "c")
@@ -46,7 +48,8 @@ class GridTraceTests(unittest.TestCase):
         self.assertTrue(any("spurious_rebuild=True" in line for line in cm.output))
 
     def test_log_grid_event_respects_disable(self) -> None:
-        with mock.patch.dict(os.environ, {"TUNES_GRID_TRACE": "0"}):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TUNES_GRID_TRACE", None)
             with self.assertRaises(AssertionError):
                 with self.assertLogs("tunes_player.core.grid_trace", level="INFO"):
                     log_grid_event("flags_changed", reason="flags_changed_noop")
