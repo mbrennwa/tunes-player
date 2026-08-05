@@ -20,6 +20,7 @@ from tunes_player.core.labels_sync.format import (
 )
 from tunes_player.core.labels_sync.merge import LabelMap, merge_label_maps
 from tunes_player.core.labels_sync.store_protocol import ConflictError
+from tunes_player.core.grid_trace import log_grid_event
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +169,12 @@ class LabelSyncService:
                     self._last_error = None
                     self._persist_status()
                 if result.changed and self._on_applied is not None:
+                    log_grid_event(
+                        "label_sync_applied",
+                        reason="sync_now",
+                        changed=True,
+                        folder=folder,
+                    )
                     self._on_applied()
             return result.ok
         except Exception as exc:
@@ -198,6 +205,12 @@ class LabelSyncService:
         local = self._store.export_label_sync_map()
         merged = merge_label_maps(local, remote)
         self._store.apply_label_sync_map(merged, clear_dirty=False)
+        log_grid_event(
+            "label_sync_applied",
+            reason="import_from",
+            changed=True,
+            path=str(source),
+        )
         if self._on_applied is not None:
             self._on_applied()
         self.schedule_sync()

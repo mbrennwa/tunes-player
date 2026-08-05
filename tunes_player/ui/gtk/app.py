@@ -68,6 +68,7 @@ from tunes_player.ui.gtk.views import (
     ReleaseDetailView,
     ReleaseGridView,
 )
+from tunes_player.core.grid_trace import log_grid_event, log_show_grid_decision
 from tunes_player.ui.gtk.release_grid import RELEASE_GRID_VIEW_MARGIN, release_grid_min_content_width
 
 _APP_WINDOW_TITLE = "Tunes Player"
@@ -153,7 +154,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._prepared_for_first_show = True
         if self.get_realized() and not self.get_mapped():
             self._apply_startup_window_size(*_DEFAULT_SIZE)
-        self._reload_grid()
+        self._reload_grid(reason="prepare_first_show")
         self._ensure_startup_window_size()
         self._sync_visible_grid_layout()
         self._startup_playback_probe()
@@ -445,10 +446,15 @@ class TunesWindow(Adw.ApplicationWindow):
             sort_descending=state.sort_descending,
         )
 
-    def _display_cached_selection(self, state: ShellState | None = None) -> None:
+    def _display_cached_selection(
+        self,
+        state: ShellState | None = None,
+        *,
+        reason: str = "display_cached_selection",
+    ) -> None:
         state = state or self._effective_shell_state()
         if not self._cache_matches(state):
-            self._reload_grid()
+            self._reload_grid(reason=f"{reason}/cache_miss")
             return
         releases = self._filtered_from_cache(state)
         self._show_grid(
@@ -456,6 +462,7 @@ class TunesWindow(Adw.ApplicationWindow):
             empty_message=self._empty_message(state, releases),
             title=self._grid_title(state),
             sync_populate=True,
+            reason=reason,
         )
 
     def _set_shell_state(
@@ -483,9 +490,9 @@ class TunesWindow(Adw.ApplicationWindow):
         if reload:
             if identity_changed:
                 self._invalidate_selection_cache()
-                self._reload_grid()
+                self._reload_grid(reason="shell_identity_changed")
             else:
-                self._display_cached_selection(state)
+                self._display_cached_selection(state, reason="shell_state_filters")
         self._sync_header_with_nav()
 
     def _sync_shell_controls(self) -> None:
@@ -551,7 +558,7 @@ class TunesWindow(Adw.ApplicationWindow):
         if self._sort_switch is not None:
             self._sort_switch.set_sort_state(sort_key, sort_descending)
         self._schedule_persist()
-        self._display_cached_selection()
+        self._display_cached_selection(reason="sort_changed")
 
     def _sync_release_type_multi(self) -> None:
         show = bool(self._cached_releases)
@@ -583,7 +590,7 @@ class TunesWindow(Adw.ApplicationWindow):
         if self._release_type_multi is not None:
             self._release_type_multi.set_enabled_release_types(enabled_release_types)
         self._schedule_persist()
-        self._display_cached_selection()
+        self._display_cached_selection(reason="release_type_filter")
 
     def _sync_quality_filter(self) -> None:
         available = quality_tiers_in_selection(self._cached_releases)
@@ -621,7 +628,7 @@ class TunesWindow(Adw.ApplicationWindow):
         if self._quality_filter_multi is not None:
             self._quality_filter_multi.set_enabled_quality_tiers(enabled_quality_tiers)
         self._schedule_persist()
-        self._display_cached_selection()
+        self._display_cached_selection(reason="quality_filter")
 
     def _enabled_quality_tiers_for_playback(self) -> frozenset[str]:
         return self._shell_state.enabled_quality_tiers
@@ -658,7 +665,7 @@ class TunesWindow(Adw.ApplicationWindow):
         if self._genre_filter is not None:
             self._genre_filter.set_enabled_genres(enabled_genres)
         self._schedule_persist()
-        self._display_cached_selection()
+        self._display_cached_selection(reason="genre_filter")
 
     def _sync_label_filter(self) -> None:
         labels_by_id = self._labels_by_id_for(self._cached_releases)
@@ -693,7 +700,7 @@ class TunesWindow(Adw.ApplicationWindow):
         if self._label_filter is not None:
             self._label_filter.set_enabled_labels(enabled_labels)
         self._schedule_persist()
-        self._display_cached_selection()
+        self._display_cached_selection(reason="label_filter")
 
     def _rebuild_source_filters(self) -> None:
         sources = available_sources(self._service)
@@ -740,7 +747,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._shell_state = replace(state, enabled_sources=enabled_sources)
         self._sync_source_multi()
         self._schedule_persist()
-        self._display_cached_selection()
+        self._display_cached_selection(reason="source_filter")
 
     def _on_new_music_toggled(self, button: Gtk.ToggleButton) -> None:
         if getattr(self, "_updating_preset", False):
@@ -930,7 +937,13 @@ class TunesWindow(Adw.ApplicationWindow):
             search_scope=state.search_scope,
         )
 
-    def _show_grid_for_state(self, state: ShellState, releases: list[Release]) -> None:
+    def _show_grid_for_state(
+        self,
+        state: ShellState,
+        releases: list[Release],
+        *,
+        reason: str,
+    ) -> None:
         self._store_selection_cache(state, releases)
         filtered = self._filtered_from_cache(self._shell_state)
         self._show_grid(
@@ -938,14 +951,19 @@ class TunesWindow(Adw.ApplicationWindow):
             empty_message=self._empty_message(self._shell_state, filtered),
             title=self._grid_title(self._shell_state),
             sync_populate=True,
+            reason=reason,
         )
         self._schedule_persist()
         self._start_catalog_quality_enrich(self._load_token)
 
-    def _try_show_grid_sync(self, state: ShellState) -> bool:
+    def _try_show_grid_sync(self, state: ShellState, *, reason: str) -> bool:
         restored = self._restore_persisted_releases(state)
         if restored is not None:
-            self._show_grid_for_state(state, restored)
+            self._show_grid_for_state(
+                state,
+                restored,
+                reason=f"{reason}/persisted_cache",
+            )
             return True
         if state.base == ShellBase.ALL_LOCAL:
             releases = fetch_base_releases(
@@ -954,12 +972,17 @@ class TunesWindow(Adw.ApplicationWindow):
                 search_query=state.search_query,
                 search_scope=state.search_scope,
             )
-            self._show_grid_for_state(state, releases)
+            self._show_grid_for_state(
+                state,
+                releases,
+                reason=f"{reason}/all_local_sync",
+            )
             return True
         return False
 
-    def _reload_grid(self) -> bool:
+    def _reload_grid(self, *, reason: str = "reload_grid") -> bool:
         state = self._effective_shell_state()
+        log_grid_event("reload_grid", reason=reason, base=state.base.value)
 
         if state.base == ShellBase.NONE:
             self._store_selection_cache(state, [])
@@ -968,13 +991,14 @@ class TunesWindow(Adw.ApplicationWindow):
                 empty_message=self._empty_message(state, []),
                 title=self._grid_title(state),
                 sync_populate=True,
+                reason=f"{reason}/none_preset",
             )
             return False
 
-        if self._try_show_grid_sync(state):
+        if self._try_show_grid_sync(state, reason=reason):
             return False
 
-        self._start_async_load(state)
+        self._start_async_load(state, reason=reason)
         return False
 
     def _async_load_matches(self, request: ShellState) -> bool:
@@ -988,18 +1012,32 @@ class TunesWindow(Adw.ApplicationWindow):
             )
         return True
 
-    def _start_async_load(self, state: ShellState) -> None:
+    def _start_async_load(self, state: ShellState, *, reason: str) -> None:
         self._load_token += 1
         token = self._load_token
-        self._show_grid_loading(state)
+        self._show_grid_loading(state, reason=f"{reason}/async_start")
 
         def work() -> None:
             try:
                 releases = self._load_releases_for_state(state)
-                GLib.idle_add(self._finish_async_load, token, state, releases, None)
+                GLib.idle_add(
+                    self._finish_async_load,
+                    token,
+                    state,
+                    releases,
+                    None,
+                    reason,
+                )
             except Exception as exc:
                 log.exception("Shell load failed for %s", state.base.value)
-                GLib.idle_add(self._finish_async_load, token, state, None, exc)
+                GLib.idle_add(
+                    self._finish_async_load,
+                    token,
+                    state,
+                    None,
+                    exc,
+                    reason,
+                )
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1009,6 +1047,7 @@ class TunesWindow(Adw.ApplicationWindow):
         request: ShellState,
         releases: list | None,
         error: BaseException | None,
+        reason: str = "async_load",
     ) -> bool:
         if token != self._load_token:
             return False
@@ -1020,6 +1059,13 @@ class TunesWindow(Adw.ApplicationWindow):
             toast, message = self._async_load_error_copy(request, title=title)
             show_error_toast(self._toast_overlay, toast)
             view = PlaceholderView(title=title, message=message)
+            log_grid_event(
+                "fingerprint_clear",
+                reason=f"{reason}/async_error",
+                previous_n=(
+                    len(self._grid_fingerprint[1]) if self._grid_fingerprint else 0
+                ),
+            )
             self._grid_fingerprint = None
             self._replace_root_page(title=title, child=view)
             self._hide_release_count_label()
@@ -1032,6 +1078,7 @@ class TunesWindow(Adw.ApplicationWindow):
             releases=filtered,
             empty_message=self._empty_message(self._shell_state, filtered),
             title=title,
+            reason=f"{reason}/async_finish",
         )
         self._schedule_persist()
         self._start_catalog_quality_enrich(token)
@@ -1154,7 +1201,18 @@ class TunesWindow(Adw.ApplicationWindow):
             release.id for release in self._filtered_from_cache(self._shell_state)
         )
         if visible_ids_after != visible_ids_before:
+            log_grid_event(
+                "catalog_enrich_visible_ids_changed",
+                reason="quality_enrich",
+                before_n=len(visible_ids_before),
+                after_n=len(visible_ids_after),
+            )
             return self._refresh_grid_after_quality_expand()
+        log_grid_event(
+            "catalog_enrich_visible_ids_unchanged",
+            reason="quality_enrich",
+            n=len(visible_ids_after),
+        )
         return False
 
     def _refresh_grid_after_quality_expand(self) -> bool:
@@ -1164,6 +1222,7 @@ class TunesWindow(Adw.ApplicationWindow):
             releases=filtered,
             empty_message=self._empty_message(self._shell_state, filtered),
             title=title,
+            reason="quality_enrich_visible_ids_changed",
         )
         self._schedule_persist()
         return False
@@ -1200,8 +1259,16 @@ class TunesWindow(Adw.ApplicationWindow):
         title = _PRESET_LABELS.get(state.base, "Tunes")
         return _LOADING_MESSAGES.get(state.base, f"Loading {title}…")
 
-    def _show_grid_loading(self, state: ShellState) -> None:
+    def _show_grid_loading(self, state: ShellState, *, reason: str) -> None:
         title = self._grid_title(state)
+        log_grid_event(
+            "fingerprint_clear",
+            reason=reason,
+            previous_n=(
+                len(self._grid_fingerprint[1]) if self._grid_fingerprint else 0
+            ),
+            title=title,
+        )
         self._grid_fingerprint = None
         self._replace_root_page(
             title=title,
@@ -1243,19 +1310,30 @@ class TunesWindow(Adw.ApplicationWindow):
         empty_message: str | None,
         title: str,
         sync_populate: bool = False,
+        reason: str = "show_grid",
     ) -> None:
         fingerprint = (
             title,
             tuple(release.id for release in releases),
             empty_message,
         )
+        at_root = self._nav_at_root()
+        on_release_grid = self._current_root_is_release_grid()
         # Replacing the root page destroys context menus and flashes tiles.
         # Skip when the visible release set is unchanged.
         if (
             fingerprint == self._grid_fingerprint
-            and self._nav_at_root()
-            and self._current_root_is_release_grid()
+            and at_root
+            and on_release_grid
         ):
+            log_show_grid_decision(
+                reason=reason,
+                action="skip",
+                fingerprint=fingerprint,
+                previous=self._grid_fingerprint,
+                at_root=at_root,
+                on_release_grid=on_release_grid,
+            )
             catalog_count = (
                 len(self._cached_releases)
                 if self._cache_matches(self._shell_state)
@@ -1267,6 +1345,14 @@ class TunesWindow(Adw.ApplicationWindow):
             )
             return
 
+        log_show_grid_decision(
+            reason=reason,
+            action="recreate",
+            fingerprint=fingerprint,
+            previous=self._grid_fingerprint,
+            at_root=at_root,
+            on_release_grid=on_release_grid,
+        )
         view = ReleaseGridView(
             releases=releases,
             on_release_activated=self._open_release,
@@ -1413,7 +1499,7 @@ class TunesWindow(Adw.ApplicationWindow):
             self._store_selection_cache(snapshot.state, releases)
         else:
             self._invalidate_selection_cache()
-        self._display_cached_selection()
+        self._display_cached_selection(reason="restore_selection_history")
         self._schedule_persist()
         self._sync_header_with_nav()
 
@@ -1450,20 +1536,38 @@ class TunesWindow(Adw.ApplicationWindow):
         state = self._shell_state
         # Flagged view membership depends on labels — full reload.
         if state.base == ShellBase.FLAGGED:
+            log_grid_event(
+                "flags_changed",
+                reason="flags_changed_flagged",
+                action="reload",
+            )
             self._invalidate_selection_cache()
-            self._reload_grid()
+            self._reload_grid(reason="flags_changed_flagged")
             return False
         # Label filter is active — refilter without leaving the selection.
         if state.enabled_labels and self._cache_matches(state) and self._cached_releases:
+            log_grid_event(
+                "flags_changed",
+                reason="flags_changed_label_filter",
+                action="refilter",
+                label_count=len(state.enabled_labels),
+            )
             self._sync_label_filter()
-            self._display_cached_selection(state)
+            self._display_cached_selection(state, reason="flags_changed_label_filter")
             return False
         # Otherwise labels changed but the visible grid set does not depend on
         # them. Do NOT recreate ReleaseGridView — that flashes tiles and dismisses
         # context menus (label sync / OwnCloud file echoes were triggering this).
+        log_grid_event(
+            "flags_changed",
+            reason="flags_changed_noop",
+            action="noop",
+            base=state.base.value,
+        )
         return False
 
     def _on_art_updated(self) -> bool:
+        log_grid_event("art_updated", reason="art_updated", action="refresh_artwork")
         if self._cached_releases:
             self._cached_releases = self._service.refresh_local_release_art_uris(
                 self._cached_releases
@@ -1476,10 +1580,15 @@ class TunesWindow(Adw.ApplicationWindow):
         return False
 
     def _on_sources_or_library_changed(self) -> bool:
+        log_grid_event(
+            "sources_changed",
+            reason="sources_or_library_changed",
+            action="reload",
+        )
         self._rebuild_source_filters()
         self._sync_shell_controls()
         self._invalidate_selection_cache(clear_persisted=True)
-        self._reload_grid()
+        self._reload_grid(reason="sources_changed")
         return False
 
     def _on_library_updated(self) -> bool:
@@ -1487,8 +1596,18 @@ class TunesWindow(Adw.ApplicationWindow):
         # Always drop the selection cache; reload the grid when the user is at root.
         self._invalidate_selection_cache()
         if not self._nav_at_root():
+            log_grid_event(
+                "library_updated",
+                reason="library_updated",
+                action="cache_only_not_at_root",
+            )
             return False
-        self._reload_grid()
+        log_grid_event(
+            "library_updated",
+            reason="library_updated",
+            action="reload",
+        )
+        self._reload_grid(reason="library_updated")
         return False
 
     def _open_queue_sheet(self, *_args: object) -> None:

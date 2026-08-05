@@ -144,6 +144,10 @@ will work for Qt signals later).
   moved once on startup. Override verbosity with `TUNES_LOG_LEVEL=DEBUG`.
 - Optional stderr mirroring: `TUNES_LOG_STDERR=1` (otherwise stderr is WARNING+).
 - Optional position poll spam: `TUNES_POSITION_POLL_LOG=1`.
+- Temporary release-grid rebuild tracing for #75 (`tunes_player.core.grid_trace`):
+  **on by default** (INFO lines prefixed `grid_trace`). Disable with
+  `TUNES_GRID_TRACE=0`. Do not close #75 until this default is flipped off or the
+  helper is removed after diagnosis.
 - Playback health monitor (#67): enabled by default. A daemon thread
   (`tunes-playback-health`) compares GTK-published mpv samples
   (`time-pos`, `core-idle`, `paused-for-cache`, `ao`, …) with PipeWire/Pulse sink
