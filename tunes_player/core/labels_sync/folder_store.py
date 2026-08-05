@@ -33,6 +33,20 @@ class FolderRemoteStore:
             raise ValueError(f"invalid remote path: {path!r}")
         return self._root / relative
 
+    def list_names(self) -> list[str]:
+        """Return non-recursive filenames under the store root."""
+        if not self._root.is_dir():
+            return []
+        names: list[str] = []
+        try:
+            for entry in self._root.iterdir():
+                if entry.is_file():
+                    names.append(entry.name)
+        except OSError:
+            return []
+        names.sort()
+        return names
+
     def get(self, path: str) -> RemoteObject | None:
         target = self._resolve(path)
         if not target.is_file():

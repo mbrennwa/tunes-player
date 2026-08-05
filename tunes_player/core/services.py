@@ -6,6 +6,7 @@ import concurrent.futures
 import logging
 import multiprocessing
 import os
+import socket
 import sqlite3
 import threading
 import time
@@ -217,6 +218,8 @@ class PlayerService:
             get_enabled=lambda: self._config_manager.config.labels_sync_enabled,
             get_folder=lambda: self._config_manager.config.labels_sync_folder,
             set_status=self._config_manager.set_labels_sync_status,
+            device_id=self._config_manager.ensure_labels_sync_device_id(),
+            by_name=socket.gethostname() or "unknown",
             writes_available=self._store.writes_available,
             on_applied=lambda: self._run_on_main_thread(self.notify_flags_changed),
         )
@@ -1531,7 +1534,7 @@ class PlayerService:
         if not sets and not toggles:
             self._label_sync.schedule_sync()
             return
-        device_id = self._label_sync.device_id
+        device_id = self._label_sync.by_name
         applied = False
         remaining_sets: dict[str, frozenset[str]] = {}
         remaining_toggles: dict[tuple[str, str], bool] = {}
@@ -1671,7 +1674,7 @@ class PlayerService:
         self._store.set_release_labels(
             catalog_id,
             labels,
-            by_device=self._label_sync.device_id,
+            by_device=self._label_sync.by_name,
             mark_dirty=True,
         )
         self.notify_flags_changed()
@@ -1687,7 +1690,7 @@ class PlayerService:
             catalog_id,
             label,
             on=on,
-            by_device=self._label_sync.device_id,
+            by_device=self._label_sync.by_name,
             mark_dirty=True,
         )
         self.notify_flags_changed()
@@ -1709,7 +1712,7 @@ class PlayerService:
         Folder sync is still scheduled as soon as the DB write lands.
         """
         catalog_id = parse_catalog_release_id(release_id)
-        device_id = self._label_sync.device_id
+        device_id = self._label_sync.by_name
 
         def work() -> None:
             try:

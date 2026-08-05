@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
@@ -134,6 +135,7 @@ class AppConfig:
     shell_state: ShellState = field(default_factory=ShellState)
     labels_sync_enabled: bool = False
     labels_sync_folder: str | None = None
+    labels_sync_device_id: str | None = None
     labels_sync_last_success_at: float | None = None
     labels_sync_last_error: str | None = None
 
@@ -249,6 +251,10 @@ class ConfigManager:
         labels_sync_last_error = (
             str(last_error_raw).strip() if last_error_raw else None
         ) or None
+        device_id_raw = raw.get("labels_sync_device_id")
+        labels_sync_device_id = (
+            str(device_id_raw).strip() if device_id_raw else None
+        ) or None
         self._config = AppConfig(
             music_folders=folders,
             music_folder_added_at=added_at,
@@ -274,6 +280,7 @@ class ConfigManager:
             shell_state=parse_shell_state(raw.get("shell_state")),
             labels_sync_enabled=bool(raw.get("labels_sync_enabled", False)),
             labels_sync_folder=labels_sync_folder,
+            labels_sync_device_id=labels_sync_device_id,
             labels_sync_last_success_at=labels_sync_last_success_at,
             labels_sync_last_error=labels_sync_last_error,
         )
@@ -308,6 +315,7 @@ class ConfigManager:
             "shell_state": self._config.shell_state.to_dict(),
             "labels_sync_enabled": self._config.labels_sync_enabled,
             "labels_sync_folder": self._config.labels_sync_folder,
+            "labels_sync_device_id": self._config.labels_sync_device_id,
             "labels_sync_last_success_at": self._config.labels_sync_last_success_at,
             "labels_sync_last_error": self._config.labels_sync_last_error,
         }
@@ -460,6 +468,16 @@ class ConfigManager:
             normalized = _normalize_folder_path(folder)
             self._config.labels_sync_folder = normalized or str(folder).strip()
         self.save()
+
+    def ensure_labels_sync_device_id(self) -> str:
+        """Return a stable per-install id, creating and persisting one if needed."""
+        current = self._config.labels_sync_device_id
+        if current and str(current).strip():
+            return str(current).strip()
+        new_id = uuid.uuid4().hex
+        self._config.labels_sync_device_id = new_id
+        self.save()
+        return new_id
 
     def set_labels_sync_status(
         self,

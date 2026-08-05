@@ -13,6 +13,9 @@ class RemoteObject:
 
 
 class RemoteStore(Protocol):
+    def list_names(self) -> list[str]:
+        """Return non-recursive filenames under the store root."""
+
     def get(self, path: str) -> RemoteObject | None:
         """Return object bytes and etag, or None if missing."""
 

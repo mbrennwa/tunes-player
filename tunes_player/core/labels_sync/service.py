@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import socket
 import threading
@@ -16,10 +17,12 @@ from tunes_player.core.labels_sync.folder_store import FolderRemoteStore
 from tunes_player.core.labels_sync.format import (
     SYNC_RELATIVE_PATH,
     dumps_label_map,
+    is_label_sync_document,
     loads_label_map,
+    shard_relative_path,
 )
 from tunes_player.core.labels_sync.merge import LabelMap, merge_label_maps
-from tunes_player.core.labels_sync.store_protocol import ConflictError
+from tunes_player.core.labels_sync.store_protocol import ConflictError, RemoteObject
 from tunes_player.core.grid_trace import log_grid_event
 
 logger = logging.getLogger(__name__)
@@ -51,7 +54,7 @@ def _digest_bytes(data: bytes) -> str:
 
 
 class LabelSyncService:
-    """Merge local SQLite label state with a folder-backed JSON document."""
+    """Merge local SQLite label state with folder-backed per-device JSON shards."""
 
     def __init__(
         self,
@@ -61,6 +64,7 @@ class LabelSyncService:
         get_folder: Callable[[], str | None],
         set_status: Callable[[float | None, str | None], None] | None = None,
         device_id: str | None = None,
+        by_name: str | None = None,
         on_applied: Callable[[], None] | None = None,
         writes_available: Callable[[], bool] | None = None,
     ) -> None:
@@ -68,7 +72,10 @@ class LabelSyncService:
         self._get_enabled = get_enabled
         self._get_folder = get_folder
         self._set_status = set_status
-        self._device_id = device_id or socket.gethostname() or "unknown"
+        # Stable install UUID for the shard filename (required for continuous sync).
+        self._device_id = (device_id or "").strip() or "unknown"
+        # Hostname (or similar) stamped into SQLite / JSON ``by`` for humans.
+        self._by_name = (by_name or socket.gethostname() or "unknown").strip() or "unknown"
         self._on_applied = on_applied
         self._writes_available = writes_available
         self._lock = threading.RLock()
@@ -91,14 +98,20 @@ class LabelSyncService:
 
     @property
     def device_id(self) -> str:
+        """Per-install UUID used as the shard filename key."""
         return self._device_id
+
+    @property
+    def by_name(self) -> str:
+        """Human-readable device name for audit ``by`` / ``by_device`` fields."""
+        return self._by_name
 
     def ignore_watch_events(self) -> bool:
         """True shortly after a local write so Gio/OwnCloud echo does not re-sync."""
         return time.monotonic() < self._ignore_watch_until
 
     def remote_digest_unchanged(self) -> bool:
-        """True when the on-disk sync file matches the last successfully synced digest."""
+        """True when on-disk sync documents match the last successfully synced digest."""
         if self._last_remote_digest is None:
             return False
         current = self._read_remote_digest()
@@ -152,7 +165,7 @@ class LabelSyncService:
             self.sync_now()
 
     def sync_now(self) -> bool:
-        """Pull remote, merge with local, push, apply. Returns True on success."""
+        """Pull remote shards, merge with local, push our shard, apply. Returns True on success."""
         if not self._get_enabled():
             return False
         folder = self._normalized_folder()
@@ -280,20 +293,35 @@ class LabelSyncService:
             return None
         return str(path)
 
-    def _sync_file_path(self) -> Path | None:
+    def _shard_relative_path(self) -> str:
+        return shard_relative_path(self._device_id)
+
+    def _read_remote_digest(self) -> str | None:
         folder = self._normalized_folder()
         if folder is None:
             return None
-        return Path(folder) / SYNC_RELATIVE_PATH
-
-    def _read_remote_digest(self) -> str | None:
-        path = self._sync_file_path()
-        if path is None or not path.is_file():
-            return None
         try:
-            return _digest_bytes(path.read_bytes())
+            return self._digest_for_store(FolderRemoteStore(folder))
         except OSError:
             return None
+
+    def _digest_for_store(self, remote_store: FolderRemoteStore) -> str:
+        names = [
+            name
+            for name in remote_store.list_names()
+            if is_label_sync_document(name)
+        ]
+        names.sort()
+        digest = hashlib.sha256()
+        for name in names:
+            obj = remote_store.get(name)
+            if obj is None:
+                continue
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(_digest_bytes(obj.data).encode("ascii"))
+            digest.update(b"\0")
+        return digest.hexdigest()
 
     def _note_local_write(self) -> None:
         self._ignore_watch_until = time.monotonic() + _WATCH_SUPPRESS_SEC
@@ -302,36 +330,73 @@ class LabelSyncService:
     def _maps_equal(left: LabelMap, right: LabelMap) -> bool:
         return dumps_label_map(left) == dumps_label_map(right)
 
+    def _load_remote_union(
+        self,
+        remote_store: FolderRemoteStore,
+    ) -> tuple[LabelMap, RemoteObject | None]:
+        """Fold all label-sync documents; return union and this install's shard object."""
+        shard_path = self._shard_relative_path()
+        our_obj: RemoteObject | None = None
+        remote_map: LabelMap = {}
+        for name in remote_store.list_names():
+            if not is_label_sync_document(name):
+                continue
+            try:
+                obj = remote_store.get(name)
+            except OSError:
+                raise
+            if obj is None:
+                continue
+            if name == shard_path:
+                our_obj = obj
+            try:
+                loaded = loads_label_map(obj.data)
+            except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                logger.warning(
+                    "skipping unreadable labels sync document %s: %s",
+                    name,
+                    exc,
+                )
+                continue
+            remote_map = merge_label_maps(remote_map, loaded)
+        return remote_map, our_obj
+
     def _sync_with_store(self, remote_store: FolderRemoteStore) -> _SyncResult:
+        shard_path = self._shard_relative_path()
         for attempt in range(_MAX_PUT_RETRIES):
             try:
-                remote_obj = remote_store.get(SYNC_RELATIVE_PATH)
-                remote_map: LabelMap = (
-                    loads_label_map(remote_obj.data) if remote_obj is not None else {}
-                )
+                remote_map, our_obj = self._load_remote_union(remote_store)
+                our_map: LabelMap = {}
+                if our_obj is not None:
+                    try:
+                        our_map = loads_label_map(our_obj.data)
+                    except (
+                        ValueError,
+                        TypeError,
+                        UnicodeDecodeError,
+                        json.JSONDecodeError,
+                    ):
+                        our_map = {}
                 local_map: LabelMap = self._store.export_label_sync_map()
                 merged = merge_label_maps(local_map, remote_map)
                 payload = dumps_label_map(merged)
                 # Compare maps, not raw bytes — cloud clients may rewrite formatting.
-                remote_unchanged = self._maps_equal(remote_map, merged)
+                shard_unchanged = self._maps_equal(our_map, merged)
                 local_unchanged = self._maps_equal(local_map, merged)
                 dirty = bool(self._store.has_dirty_label_sync_rows())
 
-                if remote_unchanged and local_unchanged:
+                if shard_unchanged and local_unchanged:
                     if dirty:
                         self._store.clear_label_sync_dirty()
-                    if remote_obj is not None:
-                        self._last_remote_digest = _digest_bytes(remote_obj.data)
-                    else:
-                        self._last_remote_digest = _digest_bytes(payload)
+                    self._last_remote_digest = self._digest_for_store(remote_store)
                     return _SyncResult(ok=True, changed=False)
 
-                if not remote_unchanged:
-                    if_match = remote_obj.etag if remote_obj is not None else None
+                if not shard_unchanged:
+                    if_match = our_obj.etag if our_obj is not None else None
                     self._note_local_write()
                     try:
                         remote_store.put(
-                            SYNC_RELATIVE_PATH,
+                            shard_path,
                             payload,
                             if_match=if_match,
                         )
@@ -340,7 +405,7 @@ class LabelSyncService:
                             self._record_error("Labels sync conflict; too many retries")
                             return _SyncResult(ok=False, changed=False)
                         continue
-                    self._last_remote_digest = _digest_bytes(payload)
+                    self._last_remote_digest = self._digest_for_store(remote_store)
 
                 changed = False
                 if not local_unchanged:
@@ -348,19 +413,15 @@ class LabelSyncService:
                     changed = True
                 elif dirty:
                     self._store.clear_label_sync_dirty()
-                if remote_unchanged and remote_obj is not None:
-                    self._last_remote_digest = _digest_bytes(remote_obj.data)
+                if shard_unchanged:
+                    self._last_remote_digest = self._digest_for_store(remote_store)
                 return _SyncResult(ok=True, changed=changed)
             except OSError as exc:
                 try:
-                    remote_obj = remote_store.get(SYNC_RELATIVE_PATH)
+                    remote_map, _our_obj = self._load_remote_union(remote_store)
                 except OSError:
                     self._record_error(str(exc))
                     return _SyncResult(ok=False, changed=False)
-                if remote_obj is None:
-                    self._record_error(str(exc))
-                    return _SyncResult(ok=False, changed=False)
-                remote_map = loads_label_map(remote_obj.data)
                 local_map = self._store.export_label_sync_map()
                 dirty_keys = self._dirty_key_set()
                 merged = merge_label_maps(local_map, remote_map)
@@ -368,7 +429,10 @@ class LabelSyncService:
                 if changed:
                     self._store.apply_label_sync_map(merged, clear_dirty=True)
                     self._restore_dirty_keys(dirty_keys, local_map, merged)
-                self._last_remote_digest = _digest_bytes(remote_obj.data)
+                try:
+                    self._last_remote_digest = self._digest_for_store(remote_store)
+                except OSError:
+                    pass
                 self._record_error(str(exc))
                 return _SyncResult(ok=False, changed=changed)
         return _SyncResult(ok=False, changed=False)

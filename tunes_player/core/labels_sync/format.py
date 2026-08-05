@@ -3,13 +3,31 @@
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 from typing import Any
 
 from tunes_player.core.labels_sync.merge import LabelEntry, LabelMap, merge_label_entries
 from tunes_player.core.release_quality_tiles import parse_catalog_release_id
 
 FORMAT_VERSION = 1
+# Manual export/import default name and legacy single-file sync document.
 SYNC_RELATIVE_PATH = "tunes-labels.json"
+_SAFE_DEVICE_ID = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def shard_relative_path(device_id: str) -> str:
+    """Return this install's sync shard filename under the sync folder."""
+    safe = _SAFE_DEVICE_ID.sub("", str(device_id).strip())
+    if not safe:
+        raise ValueError("invalid device_id for labels sync shard")
+    return f"tunes-labels.{safe}.json"
+
+
+def is_label_sync_document(name: str) -> bool:
+    """True for legacy, per-device shards, and cloud conflict sibling names."""
+    base = Path(name).name
+    return base.endswith(".json") and base.startswith("tunes-labels")
 
 
 def _normalize_map(label_map: LabelMap) -> LabelMap:
