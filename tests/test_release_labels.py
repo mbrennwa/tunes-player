@@ -72,13 +72,13 @@ class ReleaseLabelStoreTests(unittest.TestCase):
             frozenset({"new", "fresh"}),
         )
 
-    def test_list_flagged_release_ids_orders_by_latest_tag(self) -> None:
+    def test_list_labelled_release_ids_orders_by_latest_tag(self) -> None:
         self._store.toggle_release_label("local:a", "one", on=True)
         self._store.toggle_release_label("local:b", "two", on=True)
         self._store.toggle_release_label("local:a", "three", on=True)
-        flagged = self._store.list_flagged_release_ids()
-        self.assertEqual(flagged[0], "local:a")
-        self.assertIn("local:b", flagged)
+        labelled = self._store.list_labelled_release_ids()
+        self.assertEqual(labelled[0], "local:a")
+        self.assertIn("local:b", labelled)
 
     def test_labels_for_release_ids_batch_lookup(self) -> None:
         self._store.toggle_release_label("local:a", "rock", on=True)

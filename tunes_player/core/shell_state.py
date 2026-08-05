@@ -30,7 +30,7 @@ class ShellBase(str, Enum):
     NEW_MUSIC = "new_music"
     SUGGESTION = "suggestion"
     ALL_LOCAL = "all_local"
-    FLAGGED = "flagged"
+    LABELLED = "labelled"
 
 
 class SearchScope(str, Enum):
@@ -136,8 +136,12 @@ class ShellState:
             return cls()
         base_raw = raw.get("base", ShellBase.NONE.value)
         base = ShellBase.NONE
-        if isinstance(base_raw, str) and base_raw in _VALID_BASES:
-            base = ShellBase(base_raw)
+        if isinstance(base_raw, str):
+            # Legacy Flagged preset (#95) → Labelled.
+            if base_raw == "flagged":
+                base_raw = ShellBase.LABELLED.value
+            if base_raw in _VALID_BASES:
+                base = ShellBase(base_raw)
         query = raw.get("search_query", "")
         search_query = query.strip() if isinstance(query, str) else ""
         search_scope = SearchScope.ALL

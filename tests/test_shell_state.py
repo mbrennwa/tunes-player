@@ -451,11 +451,19 @@ class TestGenreSelectionHelpers(unittest.TestCase):
 
     def test_enabled_labels_roundtrip(self) -> None:
         state = ShellState(
-            base=ShellBase.FLAGGED,
+            base=ShellBase.LABELLED,
             enabled_labels=frozenset({"buy", "listen"}),
         )
         restored = ShellState.from_dict(state.to_dict())
         self.assertEqual(restored, state)
+
+    def test_legacy_flagged_base_migrates_to_labelled(self) -> None:
+        restored = ShellState.from_dict(
+            {"base": "flagged", "enabled_labels": ["buy"]},
+        )
+        self.assertEqual(restored.base, ShellBase.LABELLED)
+        self.assertEqual(restored.enabled_labels, frozenset({"buy"}))
+        self.assertEqual(restored.to_dict()["base"], "labelled")
 
 
 class TestRefreshLocalPeakQualityTiers(unittest.TestCase):
@@ -734,7 +742,7 @@ class TestShellStateConfigPersistence(unittest.TestCase):
             manager = ConfigManager(path)
             manager.load()
             state = ShellState(
-                base=ShellBase.FLAGGED,
+                base=ShellBase.LABELLED,
                 enabled_labels=frozenset({"buy", "listen"}),
             )
             manager.set_shell_state(state)

@@ -59,6 +59,18 @@ def _quiet_tidalapi_page_warnings():
     finally:
         page_log.setLevel(previous)
 
+
+@contextlib.contextmanager
+def _quiet_tidalapi_missing_object_warnings():
+    """tidalapi.session logs WARNING before re-raising ObjectNotFound (expected misses)."""
+    session_log = logging.getLogger("tidalapi.session")
+    previous = session_log.level
+    session_log.setLevel(logging.ERROR)
+    try:
+        yield
+    finally:
+        session_log.setLevel(previous)
+
 _STREAM_CACHE_TTL_SEC = 120
 _STREAM_RETRY_ATTEMPTS = 4
 _NEW_RELEASE_TITLE_HINTS = (
@@ -179,6 +191,14 @@ def _classify_session_error(exc: BaseException) -> _SessionErrorKind:
     return _SessionErrorKind.UNKNOWN
 
 
+def _is_object_not_found(exc: BaseException) -> bool:
+    try:
+        from tidalapi.exceptions import ObjectNotFound
+    except ImportError:
+        return False
+    return isinstance(exc, ObjectNotFound)
+
+
 def tidalapi_available() -> bool:
     try:
         import tidalapi  # noqa: F401
@@ -201,6 +221,7 @@ class TidalClient:
         self._oauth_error: str | None = None
         self._hi_res_entitled: bool | None = None
         self._stream_cache: dict[tuple[int, str], tuple[dict[str, Any], float]] = {}
+        self._missing_album_ids: set[str] = set()
         self._session_lock = threading.RLock()
 
     @property
@@ -675,7 +696,9 @@ class TidalClient:
         if numeric is None:
             return None
         session = self._require_login()
-        album = session.album(numeric)
+        album = self._album_or_none(session, numeric)
+        if album is None:
+            return None
         return convert.release_from_tidal(session, album)
 
     def get_release(self, release_id: str) -> Release | None:
@@ -683,8 +706,16 @@ class TidalClient:
         if numeric is None:
             return None
         session = self._require_login()
-        album = session.album(numeric)
-        tracks = list(album.tracks())
+        album = self._album_or_none(session, numeric)
+        if album is None:
+            return None
+        try:
+            tracks = list(album.tracks())
+        except Exception as exc:
+            if _is_object_not_found(exc):
+                self._missing_album_ids.add(numeric)
+                return None
+            raise
         duration = sum(float(t.duration or 0) for t in tracks)
         release = convert.release_from_tidal(
             session,
@@ -703,11 +734,33 @@ class TidalClient:
         if numeric is None:
             return []
         session = self._require_login()
-        album = session.album(numeric)
+        album = self._album_or_none(session, numeric)
+        if album is None:
+            return []
+        try:
+            items = list(album.tracks())
+        except Exception as exc:
+            if _is_object_not_found(exc):
+                self._missing_album_ids.add(numeric)
+                return []
+            raise
         tracks: list[Track] = []
-        for item in album.tracks():
+        for item in items:
             tracks.append(convert.track_from_tidal(session, item, album=album))
         return tracks
+
+    def _album_or_none(self, session: tidalapi.Session, numeric: str) -> Any | None:
+        if numeric in self._missing_album_ids:
+            return None
+        with _quiet_tidalapi_missing_object_warnings():
+            try:
+                album = session.album(numeric)
+            except Exception as exc:
+                if _is_object_not_found(exc):
+                    self._missing_album_ids.add(numeric)
+                    return None
+                raise
+        return album
 
     def get_track(self, track_id: str) -> Track | None:
         numeric = tidal_ids.parse_prefixed_id(track_id, "track")

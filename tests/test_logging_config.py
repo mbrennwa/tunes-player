@@ -30,6 +30,7 @@ class LoggingConfigTests(unittest.TestCase):
         for handler in list(app_logger.handlers):
             handler.close()
         app_logger.handlers.clear()
+        logging.getLogger("tidalapi").setLevel(logging.NOTSET)
 
     def test_configure_logging_uses_rotating_file_handler(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -47,6 +48,14 @@ class LoggingConfigTests(unittest.TestCase):
             self.assertEqual(handler.backupCount, LOG_BACKUP_COUNT)
             self.assertEqual(LOG_MAX_BYTES, 5 * 1024 * 1024)
             self.assertEqual(LOG_BACKUP_COUNT, 3)
+
+    def test_configure_logging_quiets_tidalapi_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            configure_logging(Path(tmp))
+            self.assertEqual(
+                logging.getLogger("tidalapi").getEffectiveLevel(),
+                logging.ERROR,
+            )
 
     def test_migrate_legacy_diagnostics_log_moves_file_and_backups(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

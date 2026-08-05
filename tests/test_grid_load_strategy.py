@@ -45,7 +45,7 @@ class LibraryUpdatedReloadPolicyTests(unittest.TestCase):
             ShellBase.SEARCH,
             ShellBase.NEW_MUSIC,
             ShellBase.SUGGESTION,
-            ShellBase.FLAGGED,
+            ShellBase.LABELLED,
         ):
             with self.subTest(base=base):
                 self.assertFalse(library_updated_reloads_grid(base))

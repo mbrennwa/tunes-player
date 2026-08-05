@@ -53,6 +53,7 @@ from tunes_player.ui.gtk.shell_controller import (
     empty_grid_message,
     fetch_base_releases,
     format_release_count_label,
+    format_unavailable_count_label,
     library_updated_reloads_grid,
 )
 from tunes_player.ui.gtk.genre_filter_menu import GenreFilterMenu
@@ -61,6 +62,7 @@ from tunes_player.ui.gtk.quality_multi_switch import QualityMultiSwitch
 from tunes_player.ui.gtk.release_sort_switch import ReleaseSortSwitch
 from tunes_player.ui.gtk.release_type_multi_switch import ReleaseTypeMultiSwitch
 from tunes_player.ui.gtk.source_multi_switch import SourceMultiSwitch
+from tunes_player.ui.gtk.unavailable_labelled_dialog import UnavailableLabelledDialog
 from tunes_player.ui.gtk.util import escape_markup, load_app_css
 from tunes_player.ui.gtk.views import (
     LoadingDiscoverView,
@@ -83,13 +85,13 @@ _PRESET_LABELS = {
     ShellBase.NEW_MUSIC: "New Releases",
     ShellBase.SUGGESTION: "Suggest Music",
     ShellBase.ALL_LOCAL: "All Local",
-    ShellBase.FLAGGED: "Flagged",
+    ShellBase.LABELLED: "Labelled",
 }
 _LOADING_MESSAGES = {
     ShellBase.NEW_MUSIC: "Loading new releases…",
     ShellBase.SUGGESTION: "Finding suggestions...",
     ShellBase.ALL_LOCAL: "Loading local library…",
-    ShellBase.FLAGGED: "Loading flagged releases…",
+    ShellBase.LABELLED: "Loading labelled releases…",
 }
 _CATALOG_ENRICH_CONCURRENCY = 2
 
@@ -123,6 +125,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._sort_switch: ReleaseSortSwitch | None = None
         self._cached_selection_key: tuple[str, str] | None = None
         self._cached_releases: list[Release] = []
+        self._labelled_unavailable_ids: tuple[str, ...] = ()
         self._selection_stack: list[_SelectionSnapshot] = []
         self._prepared_for_first_show = False
         self._grid_fingerprint: tuple[str, tuple[str, ...], str | None] | None = None
@@ -278,10 +281,10 @@ class TunesWindow(Adw.ApplicationWindow):
         self._suggestion_btn.connect("toggled", self._on_suggestion_toggled)
         search_row.append(self._suggestion_btn)
 
-        self._flagged_btn = Gtk.ToggleButton(label="Flagged")
-        self._flagged_btn.add_css_class("shell-preset-btn")
-        self._flagged_btn.connect("toggled", self._on_flagged_toggled)
-        search_row.append(self._flagged_btn)
+        self._labelled_btn = Gtk.ToggleButton(label="Labelled")
+        self._labelled_btn.add_css_class("shell-preset-btn")
+        self._labelled_btn.connect("toggled", self._on_labelled_toggled)
+        search_row.append(self._labelled_btn)
 
         self._all_local_btn = Gtk.ToggleButton(label="All Local")
         self._all_local_btn.add_css_class("shell-preset-btn")
@@ -339,14 +342,36 @@ class TunesWindow(Adw.ApplicationWindow):
         self._sort_slot.set_margin_start(24)
         filter_row.append(self._sort_slot)
 
+        self._release_count_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self._release_count_box.set_hexpand(True)
+        self._release_count_box.set_halign(Gtk.Align.END)
+        self._release_count_box.set_valign(Gtk.Align.CENTER)
+        self._release_count_box.set_visible(False)
+        self._release_count_box.add_css_class("shell-release-count-box")
+
         self._release_count_label = Gtk.Label(label="", xalign=1)
         self._release_count_label.add_css_class("shell-source-heading")
         self._release_count_label.add_css_class("shell-release-count")
-        self._release_count_label.set_hexpand(True)
         self._release_count_label.set_halign(Gtk.Align.END)
         self._release_count_label.set_valign(Gtk.Align.CENTER)
-        self._release_count_label.set_visible(False)
-        filter_row.append(self._release_count_label)
+        self._release_count_box.append(self._release_count_label)
+
+        self._unavailable_sep = Gtk.Label(label=" · ", xalign=1)
+        self._unavailable_sep.add_css_class("shell-source-heading")
+        self._unavailable_sep.add_css_class("shell-release-count")
+        self._unavailable_sep.set_visible(False)
+        self._release_count_box.append(self._unavailable_sep)
+
+        self._unavailable_btn = Gtk.Button(label="")
+        self._unavailable_btn.add_css_class("flat")
+        self._unavailable_btn.add_css_class("shell-release-count")
+        self._unavailable_btn.add_css_class("shell-unavailable-count")
+        self._unavailable_btn.set_valign(Gtk.Align.CENTER)
+        self._unavailable_btn.set_visible(False)
+        self._unavailable_btn.connect("clicked", self._on_unavailable_clicked)
+        self._release_count_box.append(self._unavailable_btn)
+
+        filter_row.append(self._release_count_box)
 
         controls.append(filter_row)
 
@@ -503,7 +528,7 @@ class TunesWindow(Adw.ApplicationWindow):
             self._new_music_btn.set_active(state.base == ShellBase.NEW_MUSIC)
             self._suggestion_btn.set_active(state.base == ShellBase.SUGGESTION)
             self._all_local_btn.set_active(state.base == ShellBase.ALL_LOCAL)
-            self._flagged_btn.set_active(state.base == ShellBase.FLAGGED)
+            self._labelled_btn.set_active(state.base == ShellBase.LABELLED)
         finally:
             self._updating_preset = False
 
@@ -515,7 +540,7 @@ class TunesWindow(Adw.ApplicationWindow):
             ShellBase.NEW_MUSIC,
             ShellBase.SUGGESTION,
             ShellBase.ALL_LOCAL,
-            ShellBase.FLAGGED,
+            ShellBase.LABELLED,
         ):
             if self._search_entry.get_text():
                 self._search_entry.set_text("")
@@ -774,12 +799,12 @@ class TunesWindow(Adw.ApplicationWindow):
         elif self._shell_state.base == ShellBase.ALL_LOCAL:
             button.set_active(True)
 
-    def _on_flagged_toggled(self, button: Gtk.ToggleButton) -> None:
+    def _on_labelled_toggled(self, button: Gtk.ToggleButton) -> None:
         if getattr(self, "_updating_preset", False):
             return
         if button.get_active():
-            self._activate_preset(ShellBase.FLAGGED)
-        elif self._shell_state.base == ShellBase.FLAGGED:
+            self._activate_preset(ShellBase.LABELLED)
+        elif self._shell_state.base == ShellBase.LABELLED:
             button.set_active(True)
 
     def _commit_selection_change(
@@ -928,9 +953,16 @@ class TunesWindow(Adw.ApplicationWindow):
         return self._service.expand_releases_with_cache(releases)
 
     def _load_releases_for_state(self, state: ShellState) -> list[Release]:
+        if state.base == ShellBase.LABELLED:
+            # Always live-resolve so unavailable labelled ids stay accurate.
+            releases, unavailable = self._service.list_labelled_browse()
+            self._labelled_unavailable_ids = unavailable
+            return releases
         restored = self._restore_persisted_releases(state)
         if restored is not None:
+            self._labelled_unavailable_ids = ()
             return restored
+        self._labelled_unavailable_ids = ()
         return fetch_base_releases(
             self._service,
             state.base,
@@ -1244,10 +1276,10 @@ class TunesWindow(Adw.ApplicationWindow):
                 "Could not load your local library.",
                 "Could not load All Local. Try again in a moment.",
             )
-        if request.base == ShellBase.FLAGGED:
+        if request.base == ShellBase.LABELLED:
             return (
-                "Could not load flagged releases.",
-                "Could not load Flagged. Try again in a moment.",
+                "Could not load labelled releases.",
+                "Could not load Labelled. Try again in a moment.",
             )
         return (
             f"Could not load {title}. Check your connection and sign-in.",
@@ -1284,25 +1316,55 @@ class TunesWindow(Adw.ApplicationWindow):
         catalog_count: int | None = None,
     ) -> None:
         if self._shell_state.base == ShellBase.NONE:
-            self._release_count_label.set_visible(False)
+            self._release_count_box.set_visible(False)
             return
-        self._release_count_label.set_visible(True)
+        self._release_count_box.set_visible(True)
         self._release_count_label.set_label(
             format_release_count_label(
                 filtered_count=filtered_count,
                 catalog_count=catalog_count,
             )
         )
+        unavailable_n = (
+            len(self._labelled_unavailable_ids)
+            if self._shell_state.base == ShellBase.LABELLED
+            else 0
+        )
+        show_unavailable = unavailable_n > 0
+        self._unavailable_sep.set_visible(show_unavailable)
+        self._unavailable_btn.set_visible(show_unavailable)
+        if show_unavailable:
+            self._unavailable_btn.set_label(format_unavailable_count_label(unavailable_n))
 
     def _sync_release_count_loading(self) -> None:
         if self._shell_state.base == ShellBase.NONE:
-            self._release_count_label.set_visible(False)
+            self._release_count_box.set_visible(False)
             return
-        self._release_count_label.set_visible(True)
+        self._release_count_box.set_visible(True)
         self._release_count_label.set_label("Loading…")
+        self._unavailable_sep.set_visible(False)
+        self._unavailable_btn.set_visible(False)
 
     def _hide_release_count_label(self) -> None:
-        self._release_count_label.set_visible(False)
+        self._release_count_box.set_visible(False)
+
+    def _on_unavailable_clicked(self, *_args: object) -> None:
+        if self._shell_state.base != ShellBase.LABELLED:
+            return
+        if not self._labelled_unavailable_ids:
+            return
+        dialog = UnavailableLabelledDialog(
+            service=self._service,
+            release_ids=self._labelled_unavailable_ids,
+            on_changed=self._on_unavailable_labels_changed,
+        )
+        dialog.present(self)
+
+    def _on_unavailable_labels_changed(self) -> None:
+        # Label removals emit flags_changed → Labelled reload; keep a local refresh
+        # if the dialog closed after clearing the last row.
+        if self._shell_state.base == ShellBase.LABELLED:
+            self._reload_grid(reason="unavailable_labels_changed")
 
     def _show_grid(
         self,
@@ -1628,15 +1690,15 @@ class TunesWindow(Adw.ApplicationWindow):
 
     def _on_flags_changed(self) -> bool:
         state = self._shell_state
-        # Flagged view membership depends on labels — full reload.
-        if state.base == ShellBase.FLAGGED:
+        # Labelled view membership depends on labels — full reload.
+        if state.base == ShellBase.LABELLED:
             log_grid_event(
                 "flags_changed",
-                reason="flags_changed_flagged",
+                reason="flags_changed_labelled",
                 action="reload",
             )
             self._invalidate_selection_cache()
-            self._reload_grid(reason="flags_changed_flagged")
+            self._reload_grid(reason="flags_changed_labelled")
             return False
         # Label filter is active — refilter without leaving the selection.
         if state.enabled_labels and self._cache_matches(state) and self._cached_releases:

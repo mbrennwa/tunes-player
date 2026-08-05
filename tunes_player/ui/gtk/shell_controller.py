@@ -42,6 +42,13 @@ def format_release_count_label(
         return f"{filtered_count} of {catalog_count}"
     return str(filtered_count)
 
+
+def format_unavailable_count_label(unavailable_count: int) -> str:
+    """Clickable Labelled-status suffix when some tagged releases failed to load."""
+    if unavailable_count <= 0:
+        return ""
+    return f"{unavailable_count} unavailable"
+
 def available_sources(service: PlayerService) -> set[Source]:
     sources: set[Source] = set()
     if service.config.config.music_folders:
@@ -118,9 +125,9 @@ def empty_grid_message(
             "TIDAL or Qobuz in Settings → Sources."
         )
 
-    if state.base == ShellBase.FLAGGED:
+    if state.base == ShellBase.LABELLED:
         return (
-            "No flagged releases yet.\n"
+            "No labelled releases yet.\n"
             "Right-click a release tile to add a label."
         )
 
@@ -170,7 +177,7 @@ def fetch_base_releases(
         if not service.config.config.music_folders:
             return []
         return service.list_releases()
-    if base == ShellBase.FLAGGED:
-        return service.list_flagged_releases()
+    if base == ShellBase.LABELLED:
+        return service.list_labelled_releases()
     return []
 

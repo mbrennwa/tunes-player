@@ -1705,13 +1705,15 @@ class PlayerService:
         """Persist a label toggle off the GTK thread (avoids UI stalls during sync/scan).
 
         Pass emit_changed=False while a label editor is open so flags_changed /
-        folder sync do not run until the popover closes (keeps dismiss responsive).
+        grid refresh do not run until the popover closes (keeps dismiss responsive).
+        Folder sync is still scheduled as soon as the DB write lands.
         """
         catalog_id = parse_catalog_release_id(release_id)
         device_id = self._label_sync.device_id
 
         def work() -> None:
             try:
+                wrote = False
                 if not self._store.writes_available():
                     self._queue_deferred_label_toggle(catalog_id, label, on=on)
                 else:
@@ -1722,6 +1724,7 @@ class PlayerService:
                         by_device=device_id,
                         mark_dirty=True,
                     )
+                    wrote = True
             except Exception:
                 log.exception(
                     "async label toggle failed release=%s label=%s on=%s",
@@ -1734,8 +1737,10 @@ class PlayerService:
                 return
             if emit_changed:
                 self._run_on_main_thread(self.notify_flags_changed)
-                if self._store.writes_available():
-                    self._label_sync.schedule_sync()
+            # Push to the sync folder soon after the DB write, even while the
+            # label editor is still open (UI refresh stays gated on emit_changed).
+            if wrote:
+                self._label_sync.schedule_sync()
             if on_done is not None:
                 self._run_on_main_thread(on_done)
 
@@ -1745,13 +1750,41 @@ class PlayerService:
         """Debounced push/pull after local label edits."""
         self._label_sync.schedule_sync()
 
-    def list_flagged_releases(self) -> list[Release]:
+    def list_labelled_releases(self) -> list[Release]:
+        return list(self.list_labelled_browse()[0])
+
+    def list_labelled_browse(self) -> tuple[list[Release], tuple[str, ...]]:
+        """Return (resolved releases, labelled ids that could not be loaded)."""
+        store_ids = self._store.list_labelled_release_ids()
+        with self._deferred_label_lock:
+            deferred_ids = set(self._deferred_label_sets)
+            deferred_ids.update(release_id for release_id, _label in self._deferred_label_toggles)
+        ordered_ids: list[str] = []
+        seen: set[str] = set()
+        for release_id in (*store_ids, *sorted(deferred_ids)):
+            if release_id in seen:
+                continue
+            seen.add(release_id)
+            # Include deferred toggles/sets so Labelled matches the label editor.
+            if not self.get_release_labels(release_id):
+                continue
+            ordered_ids.append(release_id)
+
         releases: list[Release] = []
-        for release_id in self._store.list_flagged_release_ids():
-            release = self.get_release(release_id)
-            if release is not None:
+        unavailable: list[str] = []
+        for release_id in ordered_ids:
+            try:
+                # Grid browse only needs summaries; full track lists are loaded on play.
+                release = self.get_release_summary(release_id)
+            except Exception:
+                log.exception("skip labelled release that failed to load: %s", release_id)
+                unavailable.append(release_id)
+                continue
+            if release is None:
+                unavailable.append(release_id)
+            else:
                 releases.append(release)
-        return releases
+        return releases, tuple(unavailable)
 
     def labels_sync_status(self) -> LabelSyncStatus:
         return self._label_sync.status()
@@ -2495,6 +2528,12 @@ class PlayerService:
                 break
         if engine is not None:
             engine.quit()
+        try:
+            if not self._store.writes_available():
+                self._store.reconnect()
+            self._flush_deferred_label_ops()
+        except Exception:
+            log.exception("Failed to flush deferred labels on shutdown")
         self._store.close()
 
     def is_saving_to_disk(self) -> bool:

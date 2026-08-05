@@ -780,7 +780,7 @@ class LibraryStore:
         return self._with_connection(query)
 
     @_locked_db
-    def list_flagged_release_ids(self) -> tuple[str, ...]:
+    def list_labelled_release_ids(self) -> tuple[str, ...]:
         def query(connection: sqlite3.Connection) -> tuple[str, ...]:
             rows = connection.execute(
                 """
