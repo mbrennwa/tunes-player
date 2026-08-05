@@ -1398,32 +1398,80 @@ class TunesWindow(Adw.ApplicationWindow):
         return float(vadj.get_value())
 
     def _schedule_restore_root_grid_scroll(self, scroll_y: float) -> None:
+        """Re-apply scroll after grid recreate once content has a real height.
+
+        Gtk clamps the adjustment to 0 while upper is still tiny after replace.
+        A tight GLib.idle retry loop finishes before layout, so we poll on a
+        short timer and also re-apply on notify::upper for a couple of seconds.
+        """
         if scroll_y <= 0:
             return
-        attempts = {"n": 0}
+        previous = getattr(self, "_scroll_restore_timeout_id", 0)
+        if previous:
+            GLib.source_remove(previous)
+            self._scroll_restore_timeout_id = 0
+        previous_handler = getattr(self, "_scroll_restore_upper_handler", None)
+        if previous_handler is not None:
+            vadj_old, handler_id = previous_handler
+            try:
+                vadj_old.disconnect(handler_id)
+            except Exception:
+                pass
+            self._scroll_restore_upper_handler = None
 
-        def restore() -> bool:
+        state: dict[str, object] = {"ticks": 0, "vadj": None, "handler_id": 0}
+
+        def _cleanup_handler() -> None:
+            handler_id = state.get("handler_id")
+            vadj = state.get("vadj")
+            if handler_id and vadj is not None:
+                try:
+                    vadj.disconnect(int(handler_id))
+                except Exception:
+                    pass
+            state["handler_id"] = 0
+            state["vadj"] = None
+            self._scroll_restore_upper_handler = None
+
+        def _try_apply() -> None:
             page = self._main_nav.get_visible_page()
             if page is None or page.get_tag() != _GRID_ROOT_TAG:
-                return False
+                return
             child = page.get_child()
             if not isinstance(child, ReleaseGridView):
-                return False
+                return
             child.sync_tile_layout()
             vadj = child.get_vadjustment()
             if vadj is None:
-                return False
+                return
+            if state.get("vadj") is not vadj:
+                _cleanup_handler()
+                state["vadj"] = vadj
+                handler_id = vadj.connect("notify::upper", lambda *_: _try_apply())
+                state["handler_id"] = handler_id
+                self._scroll_restore_upper_handler = (vadj, handler_id)
             upper = float(vadj.get_upper())
             page_size = float(vadj.get_page_size())
-            # Layout may not have measured content yet after recreate.
-            if upper < scroll_y + max(page_size, 1.0) and attempts["n"] < 12:
-                attempts["n"] += 1
-                return True
+            if upper < scroll_y + max(page_size, 1.0):
+                return
             max_y = max(0.0, upper - page_size)
-            vadj.set_value(min(scroll_y, max_y))
-            return False
+            target = min(scroll_y, max_y)
+            if abs(float(vadj.get_value()) - target) > 1.0:
+                vadj.set_value(target)
 
-        GLib.idle_add(restore)
+        def _poll() -> bool:
+            _try_apply()
+            ticks = int(state["ticks"]) + 1
+            state["ticks"] = ticks
+            # ~2s at 50ms — covers post-recreate layout and upper clamp churn.
+            if ticks >= 40:
+                self._scroll_restore_timeout_id = 0
+                _cleanup_handler()
+                return False
+            return True
+
+        _try_apply()
+        self._scroll_restore_timeout_id = GLib.timeout_add(50, _poll)
 
     def _current_root_is_release_grid(self) -> bool:
         page = self._main_nav.get_visible_page()
