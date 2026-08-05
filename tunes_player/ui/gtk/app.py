@@ -1354,6 +1354,9 @@ class TunesWindow(Adw.ApplicationWindow):
             at_root=at_root,
             on_release_grid=on_release_grid,
         )
+        # Full recreate resets Gtk.ScrolledWindow; keep the user's place when
+        # All Local grows during a scan (#75 residual scroll jump).
+        scroll_y = self._capture_root_grid_scroll_y() if on_release_grid else None
         view = ReleaseGridView(
             releases=releases,
             on_release_activated=self._open_release,
@@ -1370,6 +1373,8 @@ class TunesWindow(Adw.ApplicationWindow):
         )
         self._grid_fingerprint = fingerprint
         self._replace_root_page(title=title, child=view)
+        if scroll_y is not None:
+            self._schedule_restore_root_grid_scroll(scroll_y)
         catalog_count = (
             len(self._cached_releases)
             if self._cache_matches(self._shell_state)
@@ -1379,6 +1384,46 @@ class TunesWindow(Adw.ApplicationWindow):
             filtered_count=len(releases),
             catalog_count=catalog_count,
         )
+
+    def _capture_root_grid_scroll_y(self) -> float | None:
+        page = self._main_nav.get_visible_page()
+        if page is None or page.get_tag() != _GRID_ROOT_TAG:
+            return None
+        child = page.get_child()
+        if not isinstance(child, ReleaseGridView):
+            return None
+        vadj = child.get_vadjustment()
+        if vadj is None:
+            return None
+        return float(vadj.get_value())
+
+    def _schedule_restore_root_grid_scroll(self, scroll_y: float) -> None:
+        if scroll_y <= 0:
+            return
+        attempts = {"n": 0}
+
+        def restore() -> bool:
+            page = self._main_nav.get_visible_page()
+            if page is None or page.get_tag() != _GRID_ROOT_TAG:
+                return False
+            child = page.get_child()
+            if not isinstance(child, ReleaseGridView):
+                return False
+            child.sync_tile_layout()
+            vadj = child.get_vadjustment()
+            if vadj is None:
+                return False
+            upper = float(vadj.get_upper())
+            page_size = float(vadj.get_page_size())
+            # Layout may not have measured content yet after recreate.
+            if upper < scroll_y + max(page_size, 1.0) and attempts["n"] < 12:
+                attempts["n"] += 1
+                return True
+            max_y = max(0.0, upper - page_size)
+            vadj.set_value(min(scroll_y, max_y))
+            return False
+
+        GLib.idle_add(restore)
 
     def _current_root_is_release_grid(self) -> bool:
         page = self._main_nav.get_visible_page()
