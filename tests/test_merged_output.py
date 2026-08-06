@@ -17,7 +17,7 @@ from tunes_player.platform.linux.audio import (
 
 
 class MergedOutputTests(unittest.TestCase):
-    def test_preferred_default_is_first_alsa(self) -> None:
+    def test_preferred_default_prefers_pipewire_default_over_alsa(self) -> None:
         endpoints = [
             VolumeEndpoint(
                 id="alsa:hw:0:0",
@@ -26,7 +26,7 @@ class MergedOutputTests(unittest.TestCase):
                 bit_perfect_potential="direct",
             ),
             VolumeEndpoint(
-                id="48",
+                id="pw:alsa_output.pci",
                 name="alsa_output.pci",
                 description="PW sink",
                 is_default=True,
@@ -34,10 +34,50 @@ class MergedOutputTests(unittest.TestCase):
             ),
         ]
         marked = _mark_preferred_default(endpoints, configured_id=None)
+        self.assertFalse(marked[0].is_default)
+        self.assertTrue(marked[1].is_default)
+
+    def test_preferred_default_falls_back_to_first_alsa(self) -> None:
+        endpoints = [
+            VolumeEndpoint(
+                id="alsa:hw:1:0",
+                name="hw:1,0",
+                description="USB DAC",
+                bit_perfect_potential="direct",
+            ),
+            VolumeEndpoint(
+                id="pw:speakers",
+                name="speakers",
+                description="Speakers",
+                is_default=False,
+                bit_perfect_potential="none",
+            ),
+        ]
+        marked = _mark_preferred_default(endpoints, configured_id=None)
         self.assertTrue(marked[0].is_default)
         self.assertFalse(marked[1].is_default)
 
-    def test_merged_controller_lists_alsa_before_sinks(self) -> None:
+    def test_preferred_default_honors_saved_id(self) -> None:
+        endpoints = [
+            VolumeEndpoint(
+                id="alsa:hw:0:0",
+                name="hw:0,0",
+                description="DAC",
+                bit_perfect_potential="direct",
+            ),
+            VolumeEndpoint(
+                id="pw:speakers",
+                name="speakers",
+                description="Speakers",
+                is_default=True,
+                bit_perfect_potential="none",
+            ),
+        ]
+        marked = _mark_preferred_default(endpoints, configured_id="alsa:hw:0:0")
+        self.assertTrue(marked[0].is_default)
+        self.assertFalse(marked[1].is_default)
+
+    def test_merged_controller_prefers_pw_default_over_alsa(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = ConfigManager(Path(tmp) / "config.json")
             config.load()
@@ -52,7 +92,7 @@ class MergedOutputTests(unittest.TestCase):
             ]
             sinks = [
                 VolumeEndpoint(
-                    id="99",
+                    id="pw:pw-sink",
                     name="pw-sink",
                     description="PW",
                     is_default=True,
@@ -65,8 +105,30 @@ class MergedOutputTests(unittest.TestCase):
             ):
                 listed = controller.list_endpoints()
             self.assertEqual(listed[0].id, "alsa:hw:0:0")
-            self.assertEqual(listed[1].id, "99")
-            self.assertTrue(listed[0].is_default)
+            self.assertEqual(listed[1].id, "pw:pw-sink")
+            self.assertFalse(listed[0].is_default)
+            self.assertTrue(listed[1].is_default)
+
+    def test_alsa_volume_endpoints_omits_claimed_keeps_unclaimed(self) -> None:
+        from tunes_player.platform.linux import audio as linux_audio
+
+        listed = [
+            ("alsa:hw:1:0", "hw:1,0", "Primary"),
+            ("alsa:hw:1:1", "hw:1,1", "Secondary"),
+            ("alsa:hw:2:0", "hw:2,0", "USB DAC"),
+        ]
+        with (
+            patch(
+                "tunes_player.platform.linux.audio_probe.list_alsa_playback_endpoints",
+                return_value=listed,
+            ),
+            patch(
+                "tunes_player.platform.linux.pipewire_claimed_alsa.pipewire_claimed_alsa_pcms",
+                return_value={(1, 0), (1, 1)},
+            ),
+        ):
+            endpoints = linux_audio._alsa_volume_endpoints()
+        self.assertEqual([e.id for e in endpoints], ["alsa:hw:2:0"])
 
     def test_uses_device_volume_when_alsa_mixer_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

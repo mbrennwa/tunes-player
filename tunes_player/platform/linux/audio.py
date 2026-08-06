@@ -26,10 +26,11 @@ _WPCTL_VOLUME = re.compile(r"Volume:\s*([\d.]+)", re.IGNORECASE)
 log = logging.getLogger(__name__)
 _PACTL_SINK_SHORT = re.compile(r"^(?P<id>\d+)\s+(?P<name>\S+)\s+(?P<desc>.+)$")
 _WPCTL_TREE_CHARS = re.compile(r"[│├└─]")
-_NODE_NAME = re.compile(r'^\s*node\.name\s*=\s*"([^"]+)"')
-_NODE_DESCRIPTION = re.compile(r'^\s*node\.description\s*=\s*"([^"]+)"')
-_ALSA_CARD = re.compile(r'^\s*alsa\.card\s*=\s*"(\d+)"')
-_ALSA_DEVICE = re.compile(r'^\s*alsa\.device\s*=\s*"(\d+)"')
+# wpctl inspect marks some properties with a leading "*".
+_NODE_NAME = re.compile(r'^\s*\*?\s*node\.name\s*=\s*"([^"]+)"')
+_NODE_DESCRIPTION = re.compile(r'^\s*\*?\s*node\.description\s*=\s*"([^"]+)"')
+_ALSA_CARD = re.compile(r'^\s*\*?\s*alsa\.card\s*=\s*"(\d+)"')
+_ALSA_DEVICE = re.compile(r'^\s*\*?\s*alsa\.device\s*=\s*"(\d+)"')
 
 def _system_default_endpoint(*, description: str | None = None) -> VolumeEndpoint:
     return VolumeEndpoint(
@@ -114,19 +115,31 @@ def _parse_wpctl_sink_line(line: str) -> re.Match[str] | None:
     return _SINK_LINE.search(cleaned)
 
 def _parse_wpctl_status_sinks(stdout: str) -> list[VolumeEndpoint]:
+    """Parse Audio Sinks plus Filters ``[Audio/Sink]`` (e.g. software-DSP Speakers)."""
     endpoints: list[VolumeEndpoint] = []
-    in_sinks = False
+    # "sinks" | "filters" | None (skip Sources / other Audio subsections)
+    section: str | None = None
     for line in stdout.splitlines():
-        if line.rstrip().endswith("Sinks:"):
-            in_sinks = True
+        stripped = line.rstrip()
+        if stripped.endswith("Sinks:"):
+            section = "sinks"
             continue
-        if not in_sinks:
+        if stripped.endswith("Filters:"):
+            section = "filters"
             continue
-        if line.rstrip().endswith("Sources:") or line.rstrip().endswith("Source outputs:"):
-            break
-        if _WPCTL_TREE_CHARS.search(line) and line.rstrip().endswith(":"):
-            if endpoints:
-                break
+        if stripped.endswith("Sources:") or stripped.endswith("Source outputs:"):
+            if section == "sinks":
+                section = None
+            continue
+        if stripped.endswith("Streams:") or stripped.endswith("Devices:"):
+            if section == "filters" or stripped.endswith("Streams:"):
+                section = None
+            continue
+        if section is None:
+            continue
+        if _WPCTL_TREE_CHARS.search(line) and stripped.endswith(":"):
+            continue
+        if section == "filters" and "[Audio/Sink]" not in line:
             continue
         match = _parse_wpctl_sink_line(line)
         if match is None:
@@ -151,10 +164,26 @@ def _parse_wpctl_status_sinks(stdout: str) -> list[VolumeEndpoint]:
     return endpoints
 
 def _alsa_volume_endpoints() -> list[VolumeEndpoint]:
+    from tunes_player.platform.linux.alsa_mixer import (
+        alsa_card_from_endpoint_id,
+        alsa_device_from_endpoint_id,
+    )
     from tunes_player.platform.linux.audio_probe import list_alsa_playback_endpoints
+    from tunes_player.platform.linux.pipewire_claimed_alsa import (
+        pipewire_claimed_alsa_pcms,
+    )
 
+    claimed = pipewire_claimed_alsa_pcms()
     endpoints: list[VolumeEndpoint] = []
     for endpoint_id, mpv_name, description in list_alsa_playback_endpoints():
+        card = alsa_card_from_endpoint_id(endpoint_id)
+        device = alsa_device_from_endpoint_id(endpoint_id)
+        if (
+            card is not None
+            and device is not None
+            and (card, device) in claimed
+        ):
+            continue
         endpoints.append(
             VolumeEndpoint(
                 id=endpoint_id,
@@ -169,19 +198,22 @@ def _alsa_volume_endpoints() -> list[VolumeEndpoint]:
 def _mark_preferred_default(
     endpoints: list[VolumeEndpoint], *, configured_id: str | None
 ) -> list[VolumeEndpoint]:
-    """Prefer saved id, else first ALSA (bit-perfect path), else PipeWire default."""
+    """Prefer saved id, else PipeWire/Pulse default, else first unclaimed ALSA."""
     if not endpoints:
         return endpoints
     chosen: str | None = None
     if configured_id and any(item.id == configured_id for item in endpoints):
         chosen = configured_id
-    elif any(is_alsa_endpoint_id(item.id) for item in endpoints):
-        chosen = next(item.id for item in endpoints if is_alsa_endpoint_id(item.id))
     else:
         for item in endpoints:
             if item.is_default:
                 chosen = item.id
                 break
+        if chosen is None:
+            for item in endpoints:
+                if is_alsa_endpoint_id(item.id):
+                    chosen = item.id
+                    break
     if chosen is None:
         chosen = endpoints[0].id
     return [replace(item, is_default=item.id == chosen) for item in endpoints]
@@ -523,7 +555,9 @@ class LinuxOutputController:
             if item.name == configured or item.description == configured:
                 self._config.output_sink_id = item.id
                 return item.id
-        return configured
+        # Stale id (missing from live list after migration attempts).
+        self._config.output_sink_id = None
+        return None
 
     def get_active_endpoint_id(self) -> str | None:
         endpoints = self.list_endpoints()

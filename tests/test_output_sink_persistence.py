@@ -64,6 +64,35 @@ class OutputSinkPersistenceTests(unittest.TestCase):
             )
             self.assertTrue(endpoints[0].is_default)
 
+    def test_clears_stale_saved_id_and_prefers_pw_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ConfigManager(Path(tmp) / "config.json")
+            config.load()
+            config.config.output_sink_id = pipewire_endpoint_id(
+                "Built-in Audio Headphones"
+            )
+            controller = LinuxOutputController(config.config)
+            sinks = [
+                VolumeEndpoint(
+                    id=pipewire_endpoint_id("audio_effect.j413-convolver"),
+                    name="audio_effect.j413-convolver",
+                    description="MacBook Air J413 Speakers",
+                    is_default=True,
+                    control_id="97",
+                )
+            ]
+            with (
+                patch.object(controller, "_alsa_volume_endpoints", return_value=[]),
+                patch.object(controller, "_list_sink_endpoints", return_value=sinks),
+            ):
+                endpoints = controller.list_endpoints()
+            self.assertIsNone(config.config.output_sink_id)
+            self.assertEqual(
+                endpoints[0].id,
+                pipewire_endpoint_id("audio_effect.j413-convolver"),
+            )
+            self.assertTrue(endpoints[0].is_default)
+
 
 if __name__ == "__main__":
     unittest.main()

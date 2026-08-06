@@ -332,13 +332,19 @@ is scoped to **direct ALSA hardware**, not the default PipeWire/Pulse sink path.
 
 | Path | Bit-perfect (sample-accurate) | What Tunes guarantees |
 |------|-------------------------------|---------------------|
-| **ALSA `alsa:hw:…`** (listed first in Settings) | Yes, when file format matches hardware caps and device volume is used | Per-track rate/format via mpv; optional **Exclusive device access**; honest resample labels |
-| **PipeWire / Pulse sink** (default for most desktops) | **No** — not a roadmap priority | Unity gain in mpv (no soft volume); **sink volume**; UI note **via PipeWire** |
+| **ALSA `alsa:hw:…`** (unclaimed PCMs only) | Yes, when file format matches hardware caps and device volume is used | Per-track rate/format via mpv; optional **Exclusive device access**; honest resample labels |
+| **PipeWire / Pulse sink** (incl. filter-chain Speakers; preferred default when PW manages audio) | **No** — not a roadmap priority | Unity gain in mpv (no soft volume); **sink volume**; UI note **via PipeWire** |
+
+ALSA bit-perfect rows are listed only for PCMs **not** already owned by the PipeWire
+graph (typical USB DAC). When WirePlumber claims or transforms a PCM (DSP /
+`hide-parent` filter graphs, normal ALSA sinks, etc.), Tunes offers the PW/filter sink
+instead of dual-listing silent `alsa:hw:…` twins. Default preference is saved id (if
+still live) → PipeWire/Pulse default → first unclaimed ALSA — not “any ALSA wins.”
 
 PipeWire is the normal **mixed desktop** path (Discord, notifications, other apps).
 Mixing and sink rate policy happen outside Tunes, so strict bit-perfect is already
 impossible there. Users who want sample-accurate local FLAC/WAV should pick the **ALSA
-hardware** entry for their DAC, not the PipeWire sink with the same name.
+hardware** entry for an **unclaimed** DAC, not the PipeWire sink for the same device.
 
 **Engine (mpv) — constraints on the unity-gain / ALSA paths:**
 
