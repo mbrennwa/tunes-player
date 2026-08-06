@@ -27,6 +27,21 @@ Audio
  │  *  101. Microphone                         [vol: 0.74]
 """
 
+_WPCTL_ASAHI_FILTERS_SAMPLE = """PipeWire 'pipewire-0' [1.0.0, user@asahi, cookie:1]
+
+Audio
+ ├─ Devices:
+ │      40. Apple Silicon MacBook Air           [alsa]
+ ├─ Sinks:
+ │      54. Built-in Audio Headphones           [vol: 0.40]
+ ├─ Sources:
+ │  *   55. Built-in Audio Analog Stereo        [vol: 1.00]
+ ├─ Filters:
+ │  *   97. MacBook Air J413 Speakers           [Audio/Sink]
+ │      98. some-source-filter                  [Audio/Source]
+ └─ Streams:
+"""
+
 
 class WpctlParsingTests(unittest.TestCase):
     def test_parse_sink_line_with_tree_chars(self) -> None:
@@ -59,6 +74,55 @@ class WpctlParsingTests(unittest.TestCase):
         self.assertTrue(endpoints[0].is_default)
         self.assertEqual(endpoints[1].id, "pw:alsa_output.pci.hdmi-stereo")
         self.assertEqual(endpoints[1].bit_perfect_potential, "capable")
+
+    def test_parse_filters_audio_sink_after_sources(self) -> None:
+        def fake_inspect(sink_id: str) -> tuple[str | None, str | None]:
+            mapping = {
+                "54": (
+                    "alsa_output.platform-sound.analog-stereo",
+                    "Built-in Audio Headphones",
+                ),
+                "97": ("audio_effect.j413-convolver", "MacBook Air J413 Speakers"),
+                "98": ("audio_effect.j413-mic", "Mic Filter"),
+            }
+            return mapping.get(sink_id, (None, None))
+
+        with patch(
+            "tunes_player.platform.linux.audio._wpctl_inspect_sink",
+            side_effect=fake_inspect,
+        ):
+            endpoints = _parse_wpctl_status_sinks(_WPCTL_ASAHI_FILTERS_SAMPLE)
+        self.assertEqual(len(endpoints), 2)
+        self.assertEqual(endpoints[0].id, "pw:alsa_output.platform-sound.analog-stereo")
+        self.assertFalse(endpoints[0].is_default)
+        self.assertEqual(endpoints[1].id, "pw:audio_effect.j413-convolver")
+        self.assertEqual(endpoints[1].description, "MacBook Air J413 Speakers")
+        self.assertEqual(endpoints[1].control_id, "97")
+        self.assertTrue(endpoints[1].is_default)
+
+    def test_wpctl_inspect_reads_star_prefixed_props(self) -> None:
+        from tunes_player.platform.linux.audio import _wpctl_inspect_sink
+
+        inspect_out = """id 97, type PipeWire:Interface:Node
+  * client.id = "92"
+  * media.class = "Audio/Sink"
+  * node.description = "MacBook Air J413 Speakers"
+  * node.name = "audio_effect.j413-convolver"
+"""
+        with (
+            patch("shutil.which", return_value="/usr/bin/wpctl"),
+            patch(
+                "subprocess.run",
+                return_value=type(
+                    "R",
+                    (),
+                    {"returncode": 0, "stdout": inspect_out, "stderr": ""},
+                )(),
+            ),
+        ):
+            name, desc = _wpctl_inspect_sink("97")
+        self.assertEqual(name, "audio_effect.j413-convolver")
+        self.assertEqual(desc, "MacBook Air J413 Speakers")
 
     def test_null_controller_lists_system_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
