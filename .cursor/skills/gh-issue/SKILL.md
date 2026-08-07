@@ -46,20 +46,21 @@ If the issue number is missing and not clear from conversation, ask once.
 
 ## Phase: Plan
 
-**Goal:** Agreed implementation plan on a dedicated branch. Prefer Plan mode when available.
+**Goal:** Agreed implementation plan on a dedicated branch.
 
-1. Confirm the chosen approach from discussion
-2. Update the GH issue with analysis + discussion details (before or right as planning starts):
+1. Switch to Plan mode immediately via `SwitchMode` (`target_mode_id: "plan"`). Do not ask the user whether to switch — just switch, then continue.
+2. Confirm the chosen approach from discussion
+3. Update the GH issue with analysis + discussion details (before or right as planning starts):
    - Comment via `gh issue comment <n> --body "$(cat <<'EOF' … EOF)"`
    - Include: root-cause summary, options considered, chosen approach (and why), key discussion decisions, remaining open questions
    - Do not close the issue
-3. Ensure `main` is current; create/checkout `issue-<n>/<short-slug>`
-4. Write a concise plan:
+4. Ensure `main` is current; create/checkout `issue-<n>/<short-slug>`
+5. Write a concise plan:
    - Scope / non-goals
    - Steps (ordered)
    - Files likely touched
    - Test plan (what the user should verify manually)
-5. Stop for refinement. Do not implement until the user says `implement` (or clearly approves).
+6. Stop for refinement. Do not implement until the user says `implement` (or clearly approves).
 
 ## Phase: Implement
 
