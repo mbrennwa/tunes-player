@@ -2326,7 +2326,7 @@ class PlayerService:
         return self._volume_mode() in ("hardware", "software")
 
     def _on_device_volume_level(self, level: float) -> None:
-        """Inbound device/stack volume (subscribe foundation for #104)."""
+        """Inbound device/stack volume from VolumeController.subscribe()."""
         if self._volume_suppress_inbound_depth > 0:
             return
         clamped = max(0.0, min(1.0, level))
@@ -2583,6 +2583,14 @@ class PlayerService:
         self._volume_controller_unsubscribe = None
         if unsub is not None:
             unsub()
+        controller = self._volume_controller
+        if controller is not None:
+            close = getattr(controller, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    log.debug("Volume controller close failed", exc_info=True)
         with self._volume_apply_lock:
             self._volume_pending = None
         try:

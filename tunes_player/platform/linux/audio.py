@@ -271,7 +271,7 @@ class _SubprocessVolumeController(ABC):
         return self._subscriptions.subscribe(listener)
 
     def notify_external_level(self, level: float) -> None:
-        """Report an inbound stack volume change (foundation for #104)."""
+        """Report an inbound stack volume change (from StackVolumeWatcher)."""
         self._subscriptions.notify(level)
 
     def list_endpoints(self) -> list[VolumeEndpoint]:
@@ -450,6 +450,34 @@ class LinuxOutputController:
             if pactl.available():
                 self._sink_backend = pactl
         self._software_level = 0.72
+        from tunes_player.platform.linux.volume_watch import StackVolumeWatcher
+
+        self._stack_watcher = StackVolumeWatcher(
+            should_watch=lambda: self.uses_device_volume,
+            read_level=self.get_level,
+            on_external=self.notify_external_level,
+            watch_mode=self._stack_watch_mode,
+        )
+        self._stack_watcher.start()
+
+    def _stack_watch_mode(self):
+        """Prefer pactl events for PipeWire/Pulse; poll for ALSA hardware mixers."""
+        from tunes_player.platform.linux.volume_watch import WatchMode
+
+        active = self.get_active_endpoint_id()
+        mode: WatchMode
+        if active is not None and is_alsa_endpoint_id(active):
+            mode = "poll"
+        elif self._sink_backend is not None and shutil.which("pactl") is not None:
+            mode = "events"
+        else:
+            mode = "poll"
+        return mode
+
+    def close(self) -> None:
+        watcher = getattr(self, "_stack_watcher", None)
+        if watcher is not None:
+            watcher.stop()
 
     def _active_alsa_endpoint_id(self) -> str | None:
         active = self.get_active_endpoint_id()
@@ -516,14 +544,22 @@ class LinuxOutputController:
             from tunes_player.platform.linux.alsa_mixer import alsa_set_level_for_endpoint
 
             alsa_set_level_for_endpoint(endpoint_id, clamped)
+            self._note_applied_level(clamped)
             self._subscriptions.notify(clamped)
             return
         if self.uses_device_volume and self._sink_backend is not None:
             self._sink_backend.set_level(clamped)
+            self._note_applied_level(clamped)
             self._subscriptions.notify(clamped)
             return
         self._software_level = clamped
+        self._note_applied_level(clamped)
         self._subscriptions.notify(clamped)
+
+    def _note_applied_level(self, level: float) -> None:
+        watcher = getattr(self, "_stack_watcher", None)
+        if watcher is not None:
+            watcher.note_applied_level(level)
 
     def adjust_level(self, delta: float) -> None:
         if self.uses_device_volume:
@@ -535,7 +571,7 @@ class LinuxOutputController:
         return self._subscriptions.subscribe(listener)
 
     def notify_external_level(self, level: float) -> None:
-        """Report an inbound stack volume change (foundation for #104)."""
+        """Report an inbound stack volume change (from StackVolumeWatcher)."""
         self._subscriptions.notify(level)
 
     def list_endpoints(self) -> list[VolumeEndpoint]:
@@ -604,6 +640,9 @@ class LinuxOutputController:
         clear_alsa_mixer_cache()
         self._config.output_sink_id = endpoint_id
         self._cached_endpoints = None
+        watcher = getattr(self, "_stack_watcher", None)
+        if watcher is not None:
+            watcher.reset_baseline()
 
     def mpv_audio_device(self) -> str | None:
         endpoint_id = self.get_active_endpoint_id()
@@ -682,5 +721,5 @@ class NullVolumeController:
         return self._subscriptions.subscribe(listener)
 
     def notify_external_level(self, level: float) -> None:
-        """Report an inbound stack volume change (foundation for #104)."""
+        """Report an inbound stack volume change (from StackVolumeWatcher)."""
         self._subscriptions.notify(level)

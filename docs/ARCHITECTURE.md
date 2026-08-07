@@ -489,8 +489,9 @@ observable while browsing or in minimized mode.
 **Today:** outbound control via **MPRIS** and GDK media keys is implemented.
 `VolumeController.subscribe()` and **PlayerService** inbound wiring exist (echo-safe
 while Tunes applies outbound volume; device-volume CLI applies are coalesced
-off-thread — #106). Stack/system watchers that feed `subscribe` (GNOME media keys /
-`wpctl`/PipeWire events) are still **#104**.
+off-thread — #106). On Linux, a stack watcher (`pactl subscribe` for PipeWire/Pulse
+sinks, poll for ALSA hardware mixers) feeds `notify_external_level` so GNOME/system
+volume changes update the UI and MPRIS without window focus (#104).
 
 ### Events (core → UI)
 
@@ -798,7 +799,7 @@ implemented. These are design targets — progress is tracked on GitHub Issues.
 |------|---------|
 | **UI** | [Minimized compact controller](#minimized-player-compact-controller--not-implemented); playlists browser; folder browse; full-screen Now Playing |
 | **Catalog** | Heuristic merge, MusicBrainz/ISRC dedup, unified playlists, prefer-local playback ([Unified catalog](#unified-catalog)) |
-| **Control** | Inbound stack/system volume watch (#104); `VolumeController.subscribe()` + PlayerService hook exist ([External control interface](#external-control-interface-requirement)) |
+| **Control** | Linux inbound stack/system volume watch (#104) done; other platforms / richer device knobs as needed ([External control interface](#external-control-interface-requirement)) |
 | **Streaming** | Deezer and Spotify backends when supported playback APIs exist ([Streaming](#streaming)) |
 | **Output** | Networked endpoints ([#60](https://github.com/mbrennwa/tunes-player/issues/60)) |
 | **Platform** | Qt UI for macOS/Windows; WASAPI/CoreAudio bit-perfect parity ([Bit-perfect playback](#bit-perfect-playback-requirement)) |
