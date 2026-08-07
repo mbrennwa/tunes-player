@@ -15,7 +15,7 @@
 - One search across your library and signed-in streaming catalogs
 - **New Releases** and **Suggest Music** for discovery
 - Tag releases with **labels** and browse them via **Labelled**
-- Sync labels across machines through a folder you already keep in sync
+- Sync labels across machines
 - Browse by release — grid view and detail pages with artwork
 - Filter and sort the current view
 
