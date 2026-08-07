@@ -257,9 +257,10 @@ lyrics, streaming source badges in browse views.
 
 | Page | Contents |
 |------|----------|
-| **Application** | New Releases cutoff (days); **Downloads folder** for Save to disk (not a library Source unless the user adds it under Local files); Diagnostics log path |
+| **Application** | New Releases cutoff (days); **Downloads folder** for Save to disk (not a library Source unless the user adds it under Local files); Labels sync |
 | **Sources** | **Local files:** music folders, scan library. **Streaming:** TIDAL sign-in/out (OAuth via browser); Qobuz App ID/Secret, save credentials, email/password sign-in/out |
 | **Audio** | Output device dropdown (PipeWire/Pulse sinks, bit-perfect potential labels); allow software-volume fallback when no sink control |
+| **About** | App name/description, version, license; website and issue tracker links; open diagnostics log file |
 
 **Unifying principle:** Local files and streaming services are both **sources** of music.
 The **Sources** page groups local folders and streaming accounts; credentials and session

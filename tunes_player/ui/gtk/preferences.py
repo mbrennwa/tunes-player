@@ -7,12 +7,12 @@ from pathlib import Path
 import gi
 
 gi.require_version("Adw", "1")
-gi.require_version("Gdk", "4.0")
 gi.require_version("Gio", "2.0")
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
+from tunes_player import __version__
 from tunes_player.core.audio_labels import endpoint_dropdown_label
 from tunes_player.core.folder_scan_status import (
     FOLDER_SCAN_INCOMPLETE,
@@ -33,6 +33,11 @@ from tunes_player.ui.gtk.util import escape_markup, open_external_uri, read_clip
 _FOLDER_WATCH_LABEL = "Watch folder"
 _QOBUZ_CRED_AUTOSAVE_MS = 500
 _UNRECOGNIZED_SYNC_TOAST_SEC = 8
+_APP_DESCRIPTION = (
+    "Music player for local files and streaming (TIDAL, Qobuz; Linux/GNOME first)"
+)
+_PROJECT_HOMEPAGE = "https://github.com/mbrennwa/tunes-player"
+_ISSUE_TRACKER_URL = "https://github.com/mbrennwa/tunes-player/issues"
 _VOLUME_MODE_SUBTITLES = {
     "hardware": "Device hardware volume control",
     "software": "Software volume control in Tunes",
@@ -64,20 +69,6 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._folders_group.add(self._add_row)
 
         self._diagnostics_log_path = diagnostics_log_path(service.config.state_dir)
-        self._log_row = Adw.ActionRow(
-            title="Log file",
-            subtitle=str(self._diagnostics_log_path),
-        )
-        copy_log_btn = Gtk.Button(label="Copy path")
-        copy_log_btn.set_valign(Gtk.Align.CENTER)
-        copy_log_btn.connect(
-            "clicked",
-            lambda *_: self._copy_log_path(self._diagnostics_log_path),
-        )
-        self._log_row.add_suffix(copy_log_btn)
-        self._log_row.set_activatable_widget(copy_log_btn)
-        diagnostics_group = Adw.PreferencesGroup(title="Diagnostics")
-        diagnostics_group.add(self._log_row)
 
         sources_page = Adw.PreferencesPage(title="Sources", icon_name="folder-music-symbolic")
         sources_page.add(self._folders_group)
@@ -201,7 +192,8 @@ class PreferencesWindow(Adw.PreferencesWindow):
         application_page.add(application_group)
         application_page.add(downloads_group)
         application_page.add(labels_group)
-        application_page.add(diagnostics_group)
+
+        about_page = self._build_about_page()
 
         self._tidal_status_row = Adw.ActionRow(title="")
         self._tidal_sign_in_btn = Gtk.Button(label="Sign in")
@@ -250,6 +242,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self.add(sources_page)
         self.add(audio_page)
         self.add(application_page)
+        self.add(about_page)
 
         self._tidal_pkce_dialog: Adw.Dialog | None = None
         self._updating_output_dropdown = False
@@ -269,6 +262,69 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._sync_volume_control_row()
         self._sync_scan_ui()
         self._reload_labels_sync()
+
+    def _build_about_page(self) -> Adw.PreferencesPage:
+        page = Adw.PreferencesPage(title="About", icon_name="help-about-symbolic")
+
+        info_group = Adw.PreferencesGroup()
+        app_row = Adw.ActionRow(title="Tunes", subtitle=_APP_DESCRIPTION)
+        info_group.add(app_row)
+
+        version_row = Adw.ActionRow(title="Version", subtitle=__version__)
+        info_group.add(version_row)
+
+        license_row = Adw.ActionRow(title="License", subtitle="GPL-3.0-or-later")
+        info_group.add(license_row)
+
+        website_row = Adw.ActionRow(
+            title="Website",
+            subtitle="github.com/mbrennwa/tunes-player",
+        )
+        website_row.set_activatable(True)
+        website_row.connect(
+            "activated",
+            lambda *_args: open_external_uri(_PROJECT_HOMEPAGE),
+        )
+        info_group.add(website_row)
+        page.add(info_group)
+
+        bugs_group = Adw.PreferencesGroup(title="Report Bugs")
+        issues_row = Adw.ActionRow(
+            title="Issue Tracker",
+            subtitle=(
+                "Report bugs on GitHub. Include the Tunes version, your OS or distro, "
+                "steps to reproduce, and attach tunes-player.log when relevant. "
+                "Screenshots help too."
+            ),
+        )
+        issues_row.set_activatable(True)
+        issues_row.connect(
+            "activated",
+            lambda *_args: open_external_uri(_ISSUE_TRACKER_URL),
+        )
+        bugs_group.add(issues_row)
+
+        log_row = Adw.ActionRow(
+            title="Open Log File",
+            subtitle=str(self._diagnostics_log_path),
+        )
+        log_row.set_activatable(True)
+        log_row.connect("activated", lambda *_args: self._open_log_file())
+        bugs_group.add(log_row)
+        page.add(bugs_group)
+        return page
+
+    def _open_log_file(self) -> None:
+        path = self._diagnostics_log_path
+        try:
+            if path.is_file():
+                uri = path.resolve().as_uri()
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                uri = path.parent.resolve().as_uri()
+        except OSError:
+            return
+        open_external_uri(uri)
 
     @staticmethod
     def _folder_key(folder: str) -> str:
@@ -735,24 +791,6 @@ class PreferencesWindow(Adw.PreferencesWindow):
                 row.set_tooltip_text(None)
             else:
                 row.set_tooltip_text(self._folder_scan_error_tooltip(folder_key))
-
-    def _copy_text(self, text: str) -> None:
-        display = Gdk.Display.get_default()
-        if display is None:
-            return
-        clipboard = display.get_clipboard()
-        try:
-            clipboard.set_content(Gdk.ContentProvider.new_for_string(text))
-        except (AttributeError, TypeError):
-            clipboard.set_content(
-                Gdk.ContentProvider.new_for_bytes(
-                    "text/plain;charset=utf-8",
-                    GLib.Bytes.new(text.encode("utf-8")),
-                )
-            )
-
-    def _copy_log_path(self, log_path: object) -> None:
-        self._copy_text(str(log_path))
 
     def _on_service_event(self, event: str) -> bool:
         if event == "sources_changed":
