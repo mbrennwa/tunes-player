@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import time
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from tunes_player.platform.linux.volume_watch import (
     StackVolumeWatcher,
+    pactl_subscribe_argv,
     pactl_subscribe_is_relevant,
 )
 
@@ -32,6 +33,26 @@ class PactlSubscribeParsingTests(unittest.TestCase):
         self.assertFalse(
             pactl_subscribe_is_relevant("Event 'new' on sink #9")
         )
+
+    def test_subscribe_argv_prefers_stdbuf_line_buffering(self) -> None:
+        with patch(
+            "tunes_player.platform.linux.volume_watch.shutil.which",
+            return_value="/usr/bin/stdbuf",
+        ):
+            self.assertEqual(
+                pactl_subscribe_argv("/usr/bin/pactl"),
+                ["/usr/bin/stdbuf", "-oL", "/usr/bin/pactl", "subscribe"],
+            )
+
+    def test_subscribe_argv_falls_back_without_stdbuf(self) -> None:
+        with patch(
+            "tunes_player.platform.linux.volume_watch.shutil.which",
+            return_value=None,
+        ):
+            self.assertEqual(
+                pactl_subscribe_argv("/usr/bin/pactl"),
+                ["/usr/bin/pactl", "subscribe"],
+            )
 
 
 class StackVolumeWatcherTests(unittest.TestCase):

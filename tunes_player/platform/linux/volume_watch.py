@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import select
 import shutil
 import subprocess
@@ -16,7 +17,8 @@ log = logging.getLogger(__name__)
 WatchMode = Literal["events", "poll"]
 
 _DELTA = 1e-3
-_DEFAULT_POLL_INTERVAL_SEC = 0.4
+# Bound perceived slider lag; also used as the events-path backup sample period.
+_DEFAULT_POLL_INTERVAL_SEC = 0.1
 
 
 def pactl_subscribe_is_relevant(line: str) -> bool:
@@ -25,6 +27,14 @@ def pactl_subscribe_is_relevant(line: str) -> bool:
     if "event" not in lowered or "change" not in lowered:
         return False
     return " on sink" in lowered or " on server" in lowered
+
+
+def pactl_subscribe_argv(pactl: str) -> list[str]:
+    """Build argv for subscribe; prefer line-buffered stdout via stdbuf."""
+    stdbuf = shutil.which("stdbuf")
+    if stdbuf is not None:
+        return [stdbuf, "-oL", pactl, "subscribe"]
+    return [pactl, "subscribe"]
 
 
 class StackVolumeWatcher:
@@ -50,7 +60,7 @@ class StackVolumeWatcher:
         self._reset = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_level: float | None = None
-        self._proc: subprocess.Popen[str] | None = None
+        self._proc: subprocess.Popen[bytes] | None = None
         self._lock = threading.Lock()
 
     def start(self) -> None:
@@ -119,11 +129,10 @@ class StackVolumeWatcher:
         self._poll_once()
         try:
             proc = subprocess.Popen(
-                [pactl, "subscribe"],
+                pactl_subscribe_argv(pactl),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                text=True,
-                bufsize=1,
+                bufsize=0,
             )
         except OSError:
             log.debug("Could not start pactl subscribe", exc_info=True)
@@ -135,6 +144,8 @@ class StackVolumeWatcher:
         if stdout is None:
             self._kill_subscribe_proc()
             return
+        fd = stdout.fileno()
+        pending = bytearray()
         try:
             while not self._stop.is_set():
                 if not self._should_watch() or self._watch_mode() != "events":
@@ -147,21 +158,45 @@ class StackVolumeWatcher:
                     continue
                 try:
                     ready, _, _ = select.select(
-                        [stdout], [], [], self._poll_interval_sec
+                        [fd], [], [], self._poll_interval_sec
                     )
                 except (OSError, ValueError):
                     break
-                if not ready:
-                    if proc.poll() is not None:
+                relevant = False
+                if ready:
+                    try:
+                        chunk = os.read(fd, 4096)
+                    except OSError:
                         break
-                    continue
-                line = stdout.readline()
-                if line == "":
+                    if chunk == b"":
+                        break
+                    pending.extend(chunk)
+                    relevant = self._consume_subscribe_buffer(pending)
+                elif proc.poll() is not None:
                     break
-                if pactl_subscribe_is_relevant(line):
+                # Sample on relevant events, and on every select timeout as a
+                # latency ceiling when subscribe output is delayed/buffered.
+                if relevant or not ready:
                     self._poll_once()
         finally:
             self._kill_subscribe_proc()
+
+    def _consume_subscribe_buffer(self, pending: bytearray) -> bool:
+        """Parse complete lines from *pending*; return True if any were relevant."""
+        relevant = False
+        while True:
+            newline = pending.find(b"\n")
+            if newline < 0:
+                break
+            raw = bytes(pending[:newline])
+            del pending[: newline + 1]
+            try:
+                line = raw.decode("utf-8", errors="replace")
+            except Exception:
+                continue
+            if pactl_subscribe_is_relevant(line):
+                relevant = True
+        return relevant
 
     def _poll_once(self) -> None:
         if not self._should_watch():
