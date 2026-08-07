@@ -995,12 +995,6 @@ class LibraryScanner:
                 removed += 1
         return removed
 
-    @staticmethod
-    def _path_under_roots(path_str: str, scan_roots: list[str]) -> bool:
-        for root in scan_roots:
-            if path_str == root or path_str.startswith(root + os.sep):
-                return True
-        return False
 
     @staticmethod
     def _remove_missing_files(

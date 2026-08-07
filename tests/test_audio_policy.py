@@ -143,7 +143,7 @@ class AudioPolicyTests(unittest.TestCase):
             self.assertFalse(state.bit_perfect_playback)
             self.assertFalse(state.mpv_soft_volume)
             self.assertEqual(state.volume_mode, "hardware")
-            self.assertTrue(service.volume_adjustable())
+            self.assertTrue(service.volume_control_enabled())
 
     def test_software_volume_when_no_sink_and_fallback_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -155,7 +155,7 @@ class AudioPolicyTests(unittest.TestCase):
             self.assertFalse(state.bit_perfect_playback)
             self.assertTrue(state.mpv_soft_volume)
             self.assertEqual(state.volume_mode, "software")
-            self.assertTrue(service.volume_adjustable())
+            self.assertTrue(service.volume_control_enabled())
 
     def test_no_volume_control_when_fallback_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -168,7 +168,7 @@ class AudioPolicyTests(unittest.TestCase):
             self.assertTrue(state.no_volume_control)
             self.assertFalse(state.bit_perfect_playback)
             self.assertEqual(state.volume_mode, "fixed")
-            self.assertFalse(service.volume_adjustable())
+            self.assertFalse(service.volume_control_enabled())
 
     def test_volume_mode_override_fixed_despite_device_volume(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -181,7 +181,7 @@ class AudioPolicyTests(unittest.TestCase):
             state = service.get_playback_state()
             self.assertTrue(state.device_volume)
             self.assertEqual(state.volume_mode, "fixed")
-            self.assertFalse(service.volume_adjustable())
+            self.assertFalse(service.volume_control_enabled())
             self.assertEqual(state.volume, 1.0)
             self.assertEqual(controller.get_level(), 1.0)
 

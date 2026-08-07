@@ -541,22 +541,6 @@ class LibraryStore:
         with_db_retry(attempt, on_locked=rollback_on_locked)
 
     @_locked_db
-    def last_play_at_ns(self, track_id: str) -> int | None:
-        def query(connection: sqlite3.Connection) -> int | None:
-            row = connection.execute(
-                """
-                SELECT played_at_ns FROM play_history
-                WHERE track_id = ?
-                ORDER BY played_at_ns DESC
-                LIMIT 1
-                """,
-                (track_id,),
-            ).fetchone()
-            return None if row is None else int(row["played_at_ns"])
-
-        return self._with_connection(query)
-
-    @_locked_db
     def list_continue_listening_entries(
         self,
         *,
@@ -1346,13 +1330,6 @@ class LibraryStore:
         return None if row is None else str(row["art_uri"])
 
     @_locked_db
-    def _art_uri_for_release(self, release_id: str) -> str | None:
-        def query(connection: sqlite3.Connection) -> str | None:
-            return self._query_art_uri_for_release(connection, release_id)
-
-        return self._with_connection(query)
-
-    @_locked_db
     def art_uri_map(self, release_ids: list[str]) -> dict[str, str | None]:
         """Return art_uri per release id (missing entries are None)."""
         if not release_ids:
@@ -1362,13 +1339,6 @@ class LibraryStore:
             return self._query_art_uri_map(connection, release_ids)
 
         return self._with_connection(query)
-
-    def _art_uri_map(self, release_ids: list[str]) -> dict[str, str]:
-        return {
-            release_id: art_uri
-            for release_id, art_uri in self.art_uri_map(release_ids).items()
-            if art_uri is not None
-        }
 
     def _row_to_release(self, row: sqlite3.Row, *, art_uri: str | None = None) -> Release:
         track_count = int(row["track_count"])

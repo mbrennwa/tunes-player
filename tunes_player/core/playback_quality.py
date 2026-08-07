@@ -117,7 +117,7 @@ def local_file_format_label(metadata: FileMetadata | None) -> str:
         if parts:
             return " / ".join(parts)
         return (metadata.codec or "Lossless").upper()
-    return _lossy_codec_label(codec)
+    return lossy_codec_label(codec)
 
 
 def qobuz_stream_format_label(format_id: int) -> str:
@@ -295,9 +295,6 @@ def lossy_codec_label(codec: str) -> str:
         return codec.upper()
     return "Lossy"
 
-
-def _lossy_codec_label(codec: str) -> str:
-    return lossy_codec_label(codec)
 
 
 def catalog_tile_quality_label(
