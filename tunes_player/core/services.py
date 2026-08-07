@@ -419,17 +419,25 @@ class PlayerService:
         with self._discover_fetch_lock:
             return self._list_recently_added_items_locked()
 
-    def _tidal_new_release_items(self, within_days: int) -> list[RecentlyAddedItem]:
-        return self._tidal.list_new_release_items(
-            limit=NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
-            within_days=within_days,
+    def _dedupe_expand_truncate_discover(
+        self,
+        items: list[RecentlyAddedItem],
+        limit: int,
+    ) -> list[RecentlyAddedItem]:
+        by_release_id: dict[str, RecentlyAddedItem] = {}
+        for item in items:
+            existing = by_release_id.get(item.release.id)
+            if existing is None or item.added_ns > existing.added_ns:
+                by_release_id[item.release.id] = item
+        deduped = sorted(
+            by_release_id.values(),
+            key=lambda item: (-item.added_ns, item.release.title.casefold()),
         )
-
-    def _qobuz_new_release_items(self, within_days: int) -> list[RecentlyAddedItem]:
-        return self._qobuz.list_new_release_items(
-            limit=NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
-            within_days=within_days,
-        )
+        expanded = self._expand_discover_items(deduped)
+        return sorted(
+            expanded,
+            key=lambda item: (-item.added_ns, item.release.title.casefold()),
+        )[:limit]
 
     def _list_recently_added_items_locked(self) -> list[RecentlyAddedItem]:
         within_days = self._config_manager.config.new_music_within_days
@@ -444,13 +452,17 @@ class PlayerService:
         ) as executor:
             if self._tidal.is_logged_in():
                 streaming_futures["tidal"] = executor.submit(
-                    self._tidal_new_release_items,
-                    within_days,
+                    lambda: self._tidal.list_new_release_items(
+                        limit=NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
+                        within_days=within_days,
+                    ),
                 )
             if self._qobuz.is_logged_in():
                 streaming_futures["qobuz"] = executor.submit(
-                    self._qobuz_new_release_items,
-                    within_days,
+                    lambda: self._qobuz.list_new_release_items(
+                        limit=NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
+                        within_days=within_days,
+                    ),
                 )
             for name, future in streaming_futures.items():
                 try:
@@ -459,20 +471,7 @@ class PlayerService:
                     pass
                 except Exception:
                     log.exception("Failed to load %s new releases", name)
-        by_release_id: dict[str, RecentlyAddedItem] = {}
-        for item in items:
-            existing = by_release_id.get(item.release.id)
-            if existing is None or item.added_ns > existing.added_ns:
-                by_release_id[item.release.id] = item
-        deduped = sorted(
-            by_release_id.values(),
-            key=lambda item: (-item.added_ns, item.release.title.casefold()),
-        )
-        expanded = self._expand_discover_items(deduped)
-        return sorted(
-            expanded,
-            key=lambda item: (-item.added_ns, item.release.title.casefold()),
-        )[:NEW_MUSIC_MERGE_LIMIT]
+        return self._dedupe_expand_truncate_discover(items, NEW_MUSIC_MERGE_LIMIT)
 
     def list_suggestion_items(self) -> list[RecentlyAddedItem]:
         with self._discover_fetch_lock:
@@ -545,20 +544,7 @@ class PlayerService:
                     )
             except TidalUnavailableError:
                 pass
-        by_release_id: dict[str, RecentlyAddedItem] = {}
-        for item in items:
-            existing = by_release_id.get(item.release.id)
-            if existing is None or item.added_ns > existing.added_ns:
-                by_release_id[item.release.id] = item
-        deduped = sorted(
-            by_release_id.values(),
-            key=lambda item: (-item.added_ns, item.release.title.casefold()),
-        )
-        expanded = self._expand_discover_items(deduped)
-        return sorted(
-            expanded,
-            key=lambda item: (-item.added_ns, item.release.title.casefold()),
-        )[:SUGGESTIONS_MERGE_LIMIT]
+        return self._dedupe_expand_truncate_discover(items, SUGGESTIONS_MERGE_LIMIT)
 
     def cache_release_summary(self, release: Release) -> None:
         self._release_summaries[release.id] = release
