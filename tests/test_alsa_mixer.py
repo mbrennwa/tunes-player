@@ -13,8 +13,6 @@ from tunes_player.platform.linux.alsa_mixer import (
     alsa_device_from_endpoint_id,
     alsa_mixer_adjustable,
     alsa_mixer_adjustable_for_endpoint,
-    alsa_mixer_available,
-    alsa_mixer_available_for_endpoint,
     clear_alsa_mixer_cache,
     discover_output_volume_control,
     discover_output_volume_control_for_endpoint,
@@ -34,9 +32,9 @@ class AlsaMixerTests(unittest.TestCase):
     def test_mixer_available_on_typical_hda(self) -> None:
         """Integration: card 0 on dev machines with amixer + Master."""
         clear_alsa_mixer_cache()
-        if not alsa_mixer_available(0):
+        if not alsa_mixer_adjustable(0):
             self.skipTest("no ALSA mixer on card 0")
-        self.assertTrue(alsa_mixer_available(0))
+        self.assertTrue(alsa_mixer_adjustable(0))
 
     def test_card_is_usb_from_proc_usbid(self) -> None:
         usbid = Path("/proc/asound/card1/usbid")
@@ -170,7 +168,6 @@ Simple mixer control 'PCM',0
             self.assertIsNone(
                 discover_output_volume_control(0, device=3, verify=True)
             )
-            self.assertFalse(alsa_mixer_available_for_endpoint("alsa:hw:0:3"))
             self.assertFalse(alsa_mixer_adjustable_for_endpoint("alsa:hw:0:3"))
 
     def test_hdmi_integration_when_present(self) -> None:
@@ -187,7 +184,6 @@ Simple mixer control 'PCM',0
         if hdmi is None:
             self.skipTest("no HDMI ALSA endpoint on this machine")
         clear_alsa_mixer_cache()
-        self.assertFalse(alsa_mixer_available_for_endpoint(hdmi))
         self.assertFalse(alsa_mixer_adjustable_for_endpoint(hdmi))
 
     def test_caldigit_integration_when_present(self) -> None:

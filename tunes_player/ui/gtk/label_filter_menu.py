@@ -29,6 +29,3 @@ class LabelFilterMenu(SearchableCheckFilterMenu):
 
     def set_enabled_labels(self, enabled_labels: frozenset[str]) -> None:
         self.set_enabled(enabled_labels)
-
-    def get_enabled_labels(self) -> frozenset[str]:
-        return self.get_enabled()

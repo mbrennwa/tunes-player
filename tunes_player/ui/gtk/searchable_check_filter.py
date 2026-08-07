@@ -43,10 +43,6 @@ def filter_list_max_height(
     return target
 
 
-# Back-compat alias for existing tests / imports.
-genre_filter_list_max_height = filter_list_max_height
-
-
 class SearchableCheckFilterMenu(Gtk.Box):
     """Heading plus menu button; popover holds searchable checkmark list."""
 

@@ -47,6 +47,3 @@ class QualityMultiSwitch(LinkedMultiSelectChips):
 
     def set_enabled_quality_tiers(self, enabled_quality_tiers: frozenset[str]) -> None:
         self.set_enabled(enabled_quality_tiers)
-
-    def get_enabled_quality_tiers(self) -> frozenset[str]:
-        return self.get_enabled()
