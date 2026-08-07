@@ -285,8 +285,6 @@ class PlayerService:
         self._scanning_folder: str | None = None
         self._scan_progress: tuple[int, int, str] | None = None
         self._scan_progress_pinned_total: int | None = None
-        self._scan_finished_folder: str | None = None
-        self._scan_last_result: ScanResult | None = None
         self._scan_last_error: str | None = None
         self._current_scan_job: _ScanJob | None = None
         self._pending_scan_jobs: list[_ScanJob] = []
@@ -981,14 +979,6 @@ class PlayerService:
         return self._scan_progress
 
     @property
-    def scan_finished_folder(self) -> str | None:
-        return self._scan_finished_folder
-
-    @property
-    def scan_last_result(self) -> ScanResult | None:
-        return self._scan_last_result
-
-    @property
     def scan_last_error(self) -> str | None:
         return self._scan_last_error
 
@@ -1299,8 +1289,6 @@ class PlayerService:
         self._scanning_folder = job.folder
         self._scan_progress = None
         self._scan_progress_pinned_total = None
-        self._scan_finished_folder = None
-        self._scan_last_result = None
         self._scan_last_error = None
         self._scan_catalog_total_persisted = False
         self._scan_last_checkpoint_at = 0
@@ -1369,8 +1357,6 @@ class PlayerService:
                 finished_folder = self._scanning_folder
                 job = self._current_scan_job
                 scan_kind = "incremental" if job is not None and job.is_incremental else "full"
-                self._scan_last_result = result
-                self._scan_finished_folder = finished_folder
                 if finished_folder is not None:
                     if result.errors > 0 or file_errors:
                         log_folder_scan_failure(
@@ -1394,7 +1380,6 @@ class PlayerService:
             elif kind == "error":
                 finished_folder = self._scanning_folder
                 self._scan_last_error = message[1]
-                self._scan_finished_folder = finished_folder
                 if finished_folder is not None:
                     log_folder_scan_failure(
                         finished_folder,
@@ -1426,7 +1411,6 @@ class PlayerService:
                 finished_folder = self._scanning_folder
                 job = self._current_scan_job
                 self._scan_last_error = f"Scan process exited with code {code}"
-                self._scan_finished_folder = finished_folder
                 partial = False
                 if finished_folder is not None:
                     progress = self._scan_progress
@@ -1840,9 +1824,6 @@ class PlayerService:
         """Call after user label associations change."""
         self._emit("flags_changed")
 
-    def notify_labels_sync_changed(self) -> None:
-        self._emit("labels_sync_changed")
-
     def refresh_local_release_art_uris(self, releases: list[Release]) -> list[Release]:
         """Refresh art_uri on local releases from the library store."""
         local_ids = [release.id for release in releases if release.source == Source.LOCAL]
@@ -1909,10 +1890,6 @@ class PlayerService:
 
     def volume_control_enabled(self) -> bool:
         return self._volume_mode() != "fixed"
-
-    def volume_adjustable(self) -> bool:
-        """Alias for volume_control_enabled (transport / MPRIS call sites)."""
-        return self.volume_control_enabled()
 
     def refresh_output_volume_detection(self) -> None:
         """Re-probe whether the active output supports hardware volume."""
@@ -2304,7 +2281,7 @@ class PlayerService:
         self._emit("position_changed")
 
     def set_volume(self, level: float, *, notify: bool = True) -> None:
-        if not self.volume_adjustable():
+        if not self.volume_control_enabled():
             return
         self._volume = max(0.0, min(1.0, level))
         if self._muted and self._volume > 0:
@@ -2312,7 +2289,7 @@ class PlayerService:
         self._push_volume_to_output(notify=notify)
 
     def toggle_mute(self) -> None:
-        if not self.volume_adjustable():
+        if not self.volume_control_enabled():
             return
         self._muted = not self._muted
         self._push_volume_to_output(notify=True)
@@ -2419,7 +2396,7 @@ class PlayerService:
         raise TimeoutError("device volume apply did not drain")
 
     def _push_volume_to_output(self, *, notify: bool = True) -> None:
-        if not self.volume_adjustable():
+        if not self.volume_control_enabled():
             return
         level = self._output_volume_level()
         if self._routes_volume_to_sink() and self._volume_controller is not None:
@@ -2433,7 +2410,7 @@ class PlayerService:
             self._emit("volume_changed")
 
     def adjust_volume(self, delta: float) -> None:
-        if not self.volume_adjustable():
+        if not self.volume_control_enabled():
             return
         self.set_volume(self._volume + delta)
 
@@ -2476,14 +2453,6 @@ class PlayerService:
             return None
         return probe_linux_audio_stack()
 
-    def set_allow_software_volume_fallback(self, enabled: bool) -> None:
-        if enabled == self._allow_software_volume_fallback:
-            return
-        self._allow_software_volume_fallback = enabled
-        self._config_manager.config.allow_software_volume_fallback = enabled
-        self._config_manager.save()
-        self._apply_engine_volume_policy()
-        self._emit("playback_changed")
 
     def set_volume_control_enabled(self, enabled: bool) -> None:
         if enabled == self.volume_control_enabled():
@@ -2656,9 +2625,6 @@ class PlayerService:
         thread = self._download_thread
         return thread is not None and thread.is_alive()
 
-    def is_save_to_disk_cancel_requested(self) -> bool:
-        """True after the user cancels the active job, until the worker exits."""
-        return self._download_cancel.is_set()
 
     def has_download_activity(self) -> bool:
         """True when a job is running or queued."""
@@ -4024,8 +3990,6 @@ class PlayerService:
             self._volume_mode() == "software" and not self._device_volume
         )
 
-    def _no_volume_control(self) -> bool:
-        return self._volume_mode() == "fixed"
 
     def _output_using_fallback(self) -> bool:
         configured = self._config_manager.config.output_sink_id

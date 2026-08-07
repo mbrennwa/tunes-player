@@ -656,8 +656,6 @@ class TunesWindow(Adw.ApplicationWindow):
         self._schedule_persist()
         self._display_cached_selection(reason="quality_filter")
 
-    def _enabled_quality_tiers_for_playback(self) -> frozenset[str]:
-        return self._shell_state.enabled_quality_tiers
 
     def _sync_genre_filter(self) -> None:
         available = genres_in_selection(self._cached_releases)

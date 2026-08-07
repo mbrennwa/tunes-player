@@ -166,11 +166,6 @@ class QobuzClient:
             return None
         return self._account_login or self._user_id
 
-    def set_credentials(self, app_id: str, app_secret: str, *, format_id: int | None = None) -> None:
-        self._app_id = app_id.strip() or None
-        self._app_secret = app_secret.strip() or None
-        if format_id is not None and format_id in VALID_FORMAT_IDS:
-            self._format_id = format_id
 
     def login(self, email: str, password: str) -> None:
         if not self.is_configured():

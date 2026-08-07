@@ -107,11 +107,6 @@ class ReleaseSortSwitch(Gtk.Box):
         finally:
             self._updating = False
 
-    def get_sort_key(self) -> str | None:
-        return self._sort_key
-
-    def get_sort_descending(self) -> bool:
-        return self._sort_descending
 
     def _make_criterion_toggle(self, key: str) -> Gtk.ToggleButton:
         label = Gtk.Label(label=_CHIP_LABELS.get(key, key))

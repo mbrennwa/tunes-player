@@ -75,13 +75,6 @@ class Release:
     def has_hires(self) -> bool:
         return "hi_res" in self.available_quality_tiers
 
-    @property
-    def is_partial(self) -> bool:
-        return self.completeness == ReleaseCompleteness.PARTIAL
-
-    @property
-    def is_synthetic(self) -> bool:
-        return self.completeness == ReleaseCompleteness.SYNTHETIC
 
 
 @dataclass(frozen=True, slots=True)
