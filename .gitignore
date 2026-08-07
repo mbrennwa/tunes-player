@@ -38,3 +38,6 @@ debian/tunes-player/
 *.deb
 *.buildinfo
 *.changes
+
+# RPM packaging artifacts
+.rpmbuild/

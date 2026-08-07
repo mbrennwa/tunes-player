@@ -88,7 +88,14 @@ control.write_text("".join(out), encoding="utf-8")
 print("Updated debian/control Depends for Package: tunes-player")
 PY
 
-dpkg-buildpackage -us -uc
+DPKG_OPTS=(-us -uc)
+# On non-Debian hosts (e.g. Fedora), Build-Depends names like librsvg2-bin /
+# python3-venv are unmet even when the equivalent tools are installed.
+if [ ! -f /etc/debian_version ]; then
+  DPKG_OPTS+=(-d)
+  echo "Non-Debian host: dpkg-buildpackage -d (ignore Debian Build-Depends names)."
+fi
+dpkg-buildpackage "${DPKG_OPTS[@]}"
 
 mkdir -p dist
 find dist -maxdepth 1 -type f -name 'tunes-player_*' -delete

@@ -65,9 +65,25 @@ apt_depends = [
   "python3-platformdirs",
 ]
 # Packages vendored as wheels in the .deb (built at package build time).
+# RPM packaging reuses this list (see rpm/tunes-player.spec).
 pypi_wheelhouse = [
   "tidalapi",
   "python-mpv",
+]
+
+[tool.rpm]
+# Fedora packages provided by the distro (not PyPI).
+# Target venv uses --system-site-packages (see rpm %post); same pattern as .deb.
+dnf_requires = [
+  "python3 >= 3.11",
+  "python3-pip",
+  "python3-gobject",
+  "python3-cairo",
+  "gtk4",
+  "libadwaita",
+  "mpv-libs",
+  "python3-mutagen",
+  "python3-platformdirs",
 ]
 
 [tool.pytest.ini_options]
