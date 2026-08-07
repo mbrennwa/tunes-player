@@ -18,7 +18,6 @@ from tunes_player.core.release_quality import (
     classify_tidal_catalog,
     is_acoustic_hi_res,
     max_quality_tier,
-    min_quality_tier,
     playback_preference_for_tier,
     playback_preference_from_shell,
     qobuz_format_candidates_for_preference,
@@ -345,12 +344,6 @@ class ReleaseQualityTests(unittest.TestCase):
             "maximum_sampling_rate": 44.1,
         }
         self.assertEqual(tier_from_qobuz_album(album), QUALITY_FILTER_HI_RES)
-
-    def test_min_quality_tier(self) -> None:
-        self.assertEqual(
-            min_quality_tier(QUALITY_FILTER_CD, QUALITY_FILTER_HI_RES),
-            QUALITY_FILTER_CD,
-        )
 
     def test_playback_preference_from_shell_cd_only(self) -> None:
         pref = playback_preference_from_shell(frozenset({QUALITY_FILTER_CD}))

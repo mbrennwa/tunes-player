@@ -428,19 +428,6 @@ def max_quality_tier(*tiers: str) -> str:
             best = tier
     return best
 
-def min_quality_tier(*tiers: str) -> str:
-    """Return the lowest catalog tier among the given bucket names."""
-    best = QUALITY_FILTER_HI_RES
-    best_rank = len(_TIER_RANK)
-    for tier in tiers:
-        if tier not in _VALID_QUALITY_FILTERS:
-            continue
-        rank = _TIER_RANK[tier]
-        if rank < best_rank:
-            best_rank = rank
-            best = tier
-    return best
-
 @dataclass(frozen=True, slots=True)
 class PlaybackPreference:
     """User playback ceiling from shell quality filter (no catalog coupling)."""

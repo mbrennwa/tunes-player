@@ -4,17 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from tunes_player.ui.gtk.searchable_check_filter import (
-    SearchableCheckFilterMenu,
-    genre_filter_list_max_height,
-)
+from tunes_player.ui.gtk.searchable_check_filter import SearchableCheckFilterMenu
 
 EnabledGenresChanged = Callable[[frozenset[str]], None]
 
 __all__ = [
     "EnabledGenresChanged",
     "GenreFilterMenu",
-    "genre_filter_list_max_height",
 ]
 
 
@@ -38,6 +34,3 @@ class GenreFilterMenu(SearchableCheckFilterMenu):
 
     def set_enabled_genres(self, enabled_genres: frozenset[str]) -> None:
         self.set_enabled(enabled_genres)
-
-    def get_enabled_genres(self) -> frozenset[str]:
-        return self.get_enabled()

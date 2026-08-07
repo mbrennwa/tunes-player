@@ -50,6 +50,3 @@ class ReleaseTypeMultiSwitch(LinkedMultiSelectChips):
 
     def set_enabled_release_types(self, enabled_release_types: frozenset[str]) -> None:
         self.set_enabled(enabled_release_types)
-
-    def get_enabled_release_types(self) -> frozenset[str]:
-        return self.get_enabled()
