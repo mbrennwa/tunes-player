@@ -14,7 +14,7 @@ from tunes_player.core.library.scanner import ScanFileError
 FOLDER_SCAN_FAILED = -1
 FOLDER_SCAN_INCOMPLETE = -2
 
-DIAGNOSTICS_SCAN_HINT = "see Diagnostics"
+DIAGNOSTICS_SCAN_HINT = "see Settings → About"
 
 _SCAN_LOG = logging.getLogger("tunes_player.scan")
 
