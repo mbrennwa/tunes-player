@@ -407,7 +407,8 @@ Linux implementations (platform/linux/audio.py):
 
 - **PlayerService.set_volume()** → **VolumeController**, not `mpv.volume` (except
   a separate “software volume” fallback when no hardware control exists — clearly
-  labeled and **disables bit-perfect**).
+  labeled and **disables bit-perfect**). Device/sink applies are coalesced on a
+  worker thread (latest wins) so the UI never blocks on `wpctl`/`pactl`/`amixer`.
 - **Software volume fallback:** mpv applies linear gain through its float audio filter
   chain (`volume` filter, ~32-bit float samples). That is the best precision libmpv
   offers; it is **not** 64-bit and **not** bit-perfect. Prefer device/sink volume.
@@ -485,9 +486,11 @@ volume display stay consistent without the user touching the app.
 Do not require the Tunes window to be focused; external volume changes must be
 observable while browsing or in minimized mode.
 
-**Today:** outbound control via **MPRIS** and GDK media keys is implemented. Inbound
-`VolumeController.subscribe()` — syncing hardware or stack volume changes back into the
-UI — is not wired yet.
+**Today:** outbound control via **MPRIS** and GDK media keys is implemented.
+`VolumeController.subscribe()` and **PlayerService** inbound wiring exist (echo-safe
+while Tunes applies outbound volume; device-volume CLI applies are coalesced
+off-thread — #106). Stack/system watchers that feed `subscribe` (GNOME media keys /
+`wpctl`/PipeWire events) are still **#104**.
 
 ### Events (core → UI)
 
@@ -795,7 +798,7 @@ implemented. These are design targets — progress is tracked on GitHub Issues.
 |------|---------|
 | **UI** | [Minimized compact controller](#minimized-player-compact-controller--not-implemented); playlists browser; folder browse; full-screen Now Playing |
 | **Catalog** | Heuristic merge, MusicBrainz/ISRC dedup, unified playlists, prefer-local playback ([Unified catalog](#unified-catalog)) |
-| **Control** | Inbound volume sync via `VolumeController.subscribe()` ([External control interface](#external-control-interface-requirement)) |
+| **Control** | Inbound stack/system volume watch (#104); `VolumeController.subscribe()` + PlayerService hook exist ([External control interface](#external-control-interface-requirement)) |
 | **Streaming** | Deezer and Spotify backends when supported playback APIs exist ([Streaming](#streaming)) |
 | **Output** | Networked endpoints ([#60](https://github.com/mbrennwa/tunes-player/issues/60)) |
 | **Platform** | Qt UI for macOS/Windows; WASAPI/CoreAudio bit-perfect parity ([Bit-perfect playback](#bit-perfect-playback-requirement)) |

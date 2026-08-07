@@ -391,6 +391,8 @@ class NowPlayingBar(Gtk.Box):
     ) -> bool:
         if self._updating_volume or not self._service.volume_adjustable():
             return False
+        # Drag flag suppresses inbound slider sync; device-volume applies are
+        # coalesced off-thread in PlayerService (see #106).
         self._volume_dragging = True
         if self._volume_drag_clear_id is not None:
             GLib.source_remove(self._volume_drag_clear_id)
@@ -402,6 +404,7 @@ class NowPlayingBar(Gtk.Box):
         self._volume_drag_clear_id = None
         self._volume_dragging = False
         if self._service.volume_adjustable():
+            # Flush final level + emit volume_changed for MPRIS / UI listeners.
             self._service.set_volume(self._volume.get_value(), notify=True)
         return False
 

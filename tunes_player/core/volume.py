@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Literal, Protocol
 
 VolumeListener = Callable[[float], None]
@@ -56,6 +56,29 @@ class VolumeEndpoint:
     control_id: str | None = None
 
 
+@dataclass
+class VolumeSubscriptionHub:
+    """Fan-out for device/stack volume level changes (outbound apply + inbound watch)."""
+
+    _listeners: list[VolumeListener] = field(default_factory=list, repr=False)
+
+    def subscribe(self, listener: VolumeListener) -> Unsubscribe:
+        self._listeners.append(listener)
+
+        def unsubscribe() -> None:
+            try:
+                self._listeners.remove(listener)
+            except ValueError:
+                pass
+
+        return unsubscribe
+
+    def notify(self, level: float) -> None:
+        clamped = max(0.0, min(1.0, level))
+        for listener in list(self._listeners):
+            listener(clamped)
+
+
 class VolumeController(Protocol):
     """Adjust listening level on the OS audio sink, not inside the decoder."""
 
@@ -77,3 +100,5 @@ class VolumeController(Protocol):
     def set_active_endpoint(self, endpoint_id: str) -> None: ...
 
     def mpv_audio_device(self) -> str | None: ...
+
+    def subscribe(self, listener: VolumeListener) -> Unsubscribe: ...
