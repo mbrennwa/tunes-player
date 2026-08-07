@@ -77,6 +77,15 @@ from tunes_player.ui.gtk.release_grid import RELEASE_GRID_VIEW_MARGIN, release_g
 _APP_WINDOW_TITLE = "Tunes Player"
 _DEFAULT_SIZE = (960, 640)
 _GRID_ROOT_TAG = "grid-root"
+
+# Recreate reasons that should keep the scroll offset (#75 scan growth / enrich).
+# Sort and filter changes must NOT — same offset on a reordered list looks like a
+# different collection (opposite end of the alphabet, etc.).
+def _preserves_grid_scroll(reason: str) -> bool:
+    if reason == "library_updated" or reason.startswith("library_updated/"):
+        return True
+    return "quality_enrich" in reason
+
 _PERSIST_DEBOUNCE_MS = 400
 _ONBOARDING_MESSAGE = (
     "Configure music sources in Settings, then search or choose New Releases."
@@ -1415,8 +1424,14 @@ class TunesWindow(Adw.ApplicationWindow):
             on_release_grid=on_release_grid,
         )
         # Full recreate resets Gtk.ScrolledWindow; keep the user's place when
-        # All Local grows during a scan (#75 residual scroll jump).
-        scroll_y = self._capture_root_grid_scroll_y() if on_release_grid else None
+        # All Local grows during a scan (#75 residual scroll jump). Do not keep
+        # it for sort/filter — the same offset on a reordered list shows a
+        # different slice of the catalog.
+        scroll_y = (
+            self._capture_root_grid_scroll_y()
+            if on_release_grid and _preserves_grid_scroll(reason)
+            else None
+        )
         view = ReleaseGridView(
             releases=releases,
             on_release_activated=self._open_release,
