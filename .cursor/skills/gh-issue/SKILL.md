@@ -2,9 +2,10 @@
 name: gh-issue
 description: >-
   Runs the phased GitHub issue workflow: analyze root cause, plan on a
-  dedicated branch, implement, then ship (commit, push, PR, merge, update
-  issue). Use when the user says analyze #N, plan, implement, or ship for a
-  GitHub issue, or asks to work an issue through the standard issue loop.
+  dedicated branch (posting analysis/discussion to the GH issue), implement,
+  then ship (commit, push, PR, merge, update issue). Use when the user says
+  analyze #N, plan, implement, or ship for a GitHub issue, or asks to work an
+  issue through the standard issue loop.
 ---
 
 # GitHub issue workflow
@@ -48,13 +49,17 @@ If the issue number is missing and not clear from conversation, ask once.
 **Goal:** Agreed implementation plan on a dedicated branch. Prefer Plan mode when available.
 
 1. Confirm the chosen approach from discussion
-2. Ensure `main` is current; create/checkout `issue-<n>/<short-slug>`
-3. Write a concise plan:
+2. Update the GH issue with analysis + discussion details (before or right as planning starts):
+   - Comment via `gh issue comment <n> --body "$(cat <<'EOF' … EOF)"`
+   - Include: root-cause summary, options considered, chosen approach (and why), key discussion decisions, remaining open questions
+   - Do not close the issue
+3. Ensure `main` is current; create/checkout `issue-<n>/<short-slug>`
+4. Write a concise plan:
    - Scope / non-goals
    - Steps (ordered)
    - Files likely touched
    - Test plan (what the user should verify manually)
-4. Stop for refinement. Do not implement until the user says `implement` (or clearly approves).
+5. Stop for refinement. Do not implement until the user says `implement` (or clearly approves).
 
 ## Phase: Implement
 
