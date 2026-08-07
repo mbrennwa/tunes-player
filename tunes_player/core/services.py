@@ -244,6 +244,7 @@ class PlayerService:
         self._volume_pending: float | None = None
         self._volume_apply_inflight = False
         self._volume_suppress_inbound_depth = 0
+        self._volume_gesture_active = False
         self._volume_controller_unsubscribe: VolumeUnsubscribe | None = None
         if self._volume_controller is not None:
             self._volume_controller_unsubscribe = self._volume_controller.subscribe(
@@ -2325,14 +2326,25 @@ class PlayerService:
             return False
         return self._volume_mode() in ("hardware", "software")
 
+    def begin_volume_gesture(self) -> None:
+        """Ignore inbound stack volume while the UI slider is being dragged."""
+        self._volume_gesture_active = True
+
+    def end_volume_gesture(self) -> None:
+        self._volume_gesture_active = False
+
     def _on_device_volume_level(self, level: float) -> None:
-        """Inbound device/stack volume (subscribe foundation for #104)."""
+        """Inbound device/stack volume from VolumeController.subscribe()."""
         if self._volume_suppress_inbound_depth > 0:
+            return
+        if self._volume_gesture_active:
             return
         clamped = max(0.0, min(1.0, level))
 
         def apply() -> None:
             if self._volume_suppress_inbound_depth > 0:
+                return
+            if self._volume_gesture_active:
                 return
             if abs(self._volume - clamped) < 1e-4 and not (
                 self._muted and clamped > 0
@@ -2583,6 +2595,15 @@ class PlayerService:
         self._volume_controller_unsubscribe = None
         if unsub is not None:
             unsub()
+        self._volume_gesture_active = False
+        controller = self._volume_controller
+        if controller is not None:
+            close = getattr(controller, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    log.debug("Volume controller close failed", exc_info=True)
         with self._volume_apply_lock:
             self._volume_pending = None
         try:

@@ -1,5 +1,5 @@
 # Build a .deb on version tags and attach it to the matching GitHub Release.
-# Tag must match pyproject.toml (e.g. version 1.0a0 → tag v1.0a0).
+# Tag must match pyproject.toml (e.g. version 1.0.0a1 → tag v1.0.0a1).
 
 name: Release DEB
 

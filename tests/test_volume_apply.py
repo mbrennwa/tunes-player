@@ -137,6 +137,28 @@ class VolumeApplyTests(unittest.TestCase):
             self.assertNotIn("volume_changed", events)
             self.assertAlmostEqual(controller.get_level(), 0.61)
 
+    def test_volume_gesture_ignores_inbound_stack_level(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ConfigManager(Path(tmp) / "config.json")
+            config.load()
+            controller = _SlowSinkController(config.config, delay=0.0)
+            events: list[str] = []
+            service = PlayerService(config=config, volume_controller=controller)
+            service.subscribe(events.append)
+            service.set_volume(0.50, notify=False)
+            service.flush_pending_volume_apply()
+            events.clear()
+
+            service.begin_volume_gesture()
+            controller.notify_external_level(0.22)
+            self.assertAlmostEqual(service.get_playback_state().volume, 0.50)
+            self.assertNotIn("volume_changed", events)
+
+            service.end_volume_gesture()
+            controller.notify_external_level(0.22)
+            self.assertAlmostEqual(service.get_playback_state().volume, 0.22)
+            self.assertIn("volume_changed", events)
+
 
 class WpctlTargetCacheTests(unittest.TestCase):
     def test_set_level_uses_cached_endpoints_not_fresh_status(self) -> None:
