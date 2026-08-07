@@ -109,12 +109,12 @@ class MergedOutputTests(unittest.TestCase):
             self.assertFalse(listed[0].is_default)
             self.assertTrue(listed[1].is_default)
 
-    def test_alsa_volume_endpoints_omits_claimed_keeps_unclaimed(self) -> None:
+    def test_alsa_volume_endpoints_omits_dsp_card_keeps_usb(self) -> None:
         from tunes_player.platform.linux import audio as linux_audio
 
         listed = [
-            ("alsa:hw:1:0", "hw:1,0", "Primary"),
-            ("alsa:hw:1:1", "hw:1,1", "Secondary"),
+            ("alsa:hw:0:0", "hw:0,0", "Primary"),
+            ("alsa:hw:0:1", "hw:0,1", "Secondary"),
             ("alsa:hw:2:0", "hw:2,0", "USB DAC"),
         ]
         with (
@@ -123,13 +123,33 @@ class MergedOutputTests(unittest.TestCase):
                 return_value=listed,
             ),
             patch(
-                "tunes_player.platform.linux.pipewire_claimed_alsa.pipewire_claimed_alsa_pcms",
-                return_value={(1, 0), (1, 1)},
+                "tunes_player.platform.linux.pipewire_hidden_parent_alsa."
+                "pipewire_hidden_parent_alsa_pcms",
+                return_value={(0, 0), (0, 1)},
             ),
         ):
             endpoints = linux_audio._alsa_volume_endpoints()
         self.assertEqual([e.id for e in endpoints], ["alsa:hw:2:0"])
 
+    def test_preferred_default_keeps_pw_when_usb_alsa_dual_listed(self) -> None:
+        endpoints = [
+            VolumeEndpoint(
+                id="alsa:hw:2:0",
+                name="hw:2,0",
+                description="Holo USB",
+                bit_perfect_potential="direct",
+            ),
+            VolumeEndpoint(
+                id="pw:alsa_output.usb-holo",
+                name="alsa_output.usb-holo",
+                description="Holo PW",
+                is_default=True,
+                bit_perfect_potential="capable",
+            ),
+        ]
+        marked = _mark_preferred_default(endpoints, configured_id=None)
+        self.assertFalse(marked[0].is_default)
+        self.assertTrue(marked[1].is_default)
     def test_uses_device_volume_when_alsa_mixer_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = ConfigManager(Path(tmp) / "config.json")

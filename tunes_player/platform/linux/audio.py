@@ -172,11 +172,13 @@ def _alsa_volume_endpoints() -> list[VolumeEndpoint]:
         alsa_device_from_endpoint_id,
     )
     from tunes_player.platform.linux.audio_probe import list_alsa_playback_endpoints
-    from tunes_player.platform.linux.pipewire_claimed_alsa import (
-        pipewire_claimed_alsa_pcms,
+    from tunes_player.platform.linux.pipewire_hidden_parent_alsa import (
+        pipewire_hidden_parent_alsa_pcms,
     )
 
-    claimed = pipewire_claimed_alsa_pcms()
+    # Omit ALSA PCMs on cards with software-DSP hide-parent (Asahi Primary/Secondary).
+    # Other cards (USB DACs, normal sinks) dual-list as bit-perfect.
+    omitted = pipewire_hidden_parent_alsa_pcms()
     endpoints: list[VolumeEndpoint] = []
     for endpoint_id, mpv_name, description in list_alsa_playback_endpoints():
         card = alsa_card_from_endpoint_id(endpoint_id)
@@ -184,7 +186,7 @@ def _alsa_volume_endpoints() -> list[VolumeEndpoint]:
         if (
             card is not None
             and device is not None
-            and (card, device) in claimed
+            and (card, device) in omitted
         ):
             continue
         endpoints.append(
@@ -201,7 +203,7 @@ def _alsa_volume_endpoints() -> list[VolumeEndpoint]:
 def _mark_preferred_default(
     endpoints: list[VolumeEndpoint], *, configured_id: str | None
 ) -> list[VolumeEndpoint]:
-    """Prefer saved id, else PipeWire/Pulse default, else first unclaimed ALSA."""
+    """Prefer saved id, else PipeWire/Pulse default, else first ALSA row."""
     if not endpoints:
         return endpoints
     chosen: str | None = None
