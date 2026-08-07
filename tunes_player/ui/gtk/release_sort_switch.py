@@ -16,6 +16,12 @@ from tunes_player.core.shell_state import (
     SORT_KEY_TITLE,
     SORT_KEY_YEAR,
 )
+from tunes_player.ui.gtk.shell_filter_chips import (
+    CHIP_BTN_HEIGHT,
+    make_chip_toggle,
+    make_filter_heading,
+    make_linked_chip_group,
+)
 
 SortStateChanged = Callable[[str | None, bool], None]
 
@@ -33,7 +39,6 @@ _CHIP_LABELS: dict[str, str] = {
     SORT_KEY_SOURCE: "Source",
 }
 
-_BTN_HEIGHT = 18
 _ICON_DESC = "go-down-symbolic"
 _ICON_ASC = "go-up-symbolic"
 
@@ -59,11 +64,7 @@ class ReleaseSortSwitch(Gtk.Box):
         self._sort_descending = sort_descending
         self._criteria: dict[str, Gtk.ToggleButton] = {}
 
-        heading = Gtk.Label(label="Sort")
-        heading.add_css_class("shell-source-heading")
-        heading.set_halign(Gtk.Align.START)
-        heading.set_valign(Gtk.Align.CENTER)
-        self.append(heading)
+        self.append(make_filter_heading("Sort"))
 
         controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         controls.set_valign(Gtk.Align.CENTER)
@@ -76,21 +77,20 @@ class ReleaseSortSwitch(Gtk.Box):
         self._direction_btn.set_margin_bottom(0)
         self._direction_btn.set_margin_start(0)
         self._direction_btn.set_margin_end(0)
-        self._direction_btn.set_size_request(-1, _BTN_HEIGHT)
+        self._direction_btn.set_size_request(-1, CHIP_BTN_HEIGHT)
         self._direction_btn.set_icon_name(_ICON_DESC)
         self._direction_btn.connect("clicked", self._on_direction_clicked)
         controls.append(self._direction_btn)
 
-        self._group = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        self._group.add_css_class("linked")
-        self._group.add_css_class("source-multi-switch")
-        self._group.add_css_class("release-sort-criteria")
-        self._group.set_valign(Gtk.Align.CENTER)
+        self._group = make_linked_chip_group("release-sort-criteria")
         controls.append(self._group)
         self.append(controls)
 
         for key in _CRITERIA:
-            button = self._make_criterion_toggle(key)
+            button = make_chip_toggle(
+                _CHIP_LABELS.get(key, key),
+                on_toggled=lambda btn, item=key: self._on_criterion_toggled(btn, item),
+            )
             self._group.append(button)
             self._criteria[key] = button
 
@@ -106,22 +106,6 @@ class ReleaseSortSwitch(Gtk.Box):
                 button.set_active(key == self._sort_key)
         finally:
             self._updating = False
-
-
-    def _make_criterion_toggle(self, key: str) -> Gtk.ToggleButton:
-        label = Gtk.Label(label=_CHIP_LABELS.get(key, key))
-        label.add_css_class("shell-source-btn-label")
-
-        button = Gtk.ToggleButton()
-        button.set_child(label)
-        button.add_css_class("flat")
-        button.add_css_class("shell-source-btn")
-        button.set_valign(Gtk.Align.CENTER)
-        button.set_margin_top(0)
-        button.set_margin_bottom(0)
-        button.set_size_request(-1, _BTN_HEIGHT)
-        button.connect("toggled", self._on_criterion_toggled, key)
-        return button
 
     def _update_direction_icon(self) -> None:
         self._direction_btn.set_icon_name(
