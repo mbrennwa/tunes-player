@@ -4,7 +4,8 @@
 
 - **One place for your music** — local library and streaming services in the same app
 - **Browse and discover** — search, new releases, and suggestions without switching apps
-- **Audiophile-friendly local playback** — bit-perfect listening when you want it
+- **Label and sync** — tag releases and keep those labels in sync across machines
+- **Audiophile playback** — bit-perfect listening when you want it
 - **Simple and native** — a straightforward desktop app, not a heavy media suite
 
 ![](data/screenshots/tunes-player.png)
@@ -13,6 +14,8 @@
 
 - One search across your library and signed-in streaming catalogs
 - **New Releases** and **Suggest Music** for discovery
+- Tag releases with **labels** and browse them via **Labelled**
+- Sync labels across machines through a folder you already keep in sync
 - Browse by release — grid view and detail pages with artwork
 - Filter and sort the current view
 
