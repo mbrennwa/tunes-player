@@ -1,9 +1,10 @@
-"""Detect ALSA PCMs already owned by the PipeWire graph.
+"""Detect ALSA PCMs exported into the PipeWire graph.
 
-Used to omit claimed ``alsa:hw:C:D`` rows from the bit-perfect merge while keeping
-unclaimed devices (typical USB DACs). Includes hide-parent parents that are absent
-from ``wpctl status`` Sinks: ``Audio/Device`` card-level nodes claim every
-playback PCM on that card (via ``aplay -l``).
+Historically used to omit every claimed ``alsa:hw:C:D`` twin from the bit-perfect
+list. Listing now omits only software-DSP hide-parent parents (see
+``pipewire_hidden_parent_alsa``); this module remains for ownership introspection
+and tests. ``Audio/Device`` card-level nodes expand to every playback PCM on that
+card (via ``aplay -l``).
 """
 
 from __future__ import annotations

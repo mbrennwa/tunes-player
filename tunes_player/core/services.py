@@ -2456,8 +2456,14 @@ class PlayerService:
         normalize = getattr(
             self._volume_controller, "normalize_output_sink_config", None
         )
+        before = self._config_manager.config.output_sink_id
         if callable(normalize) and normalize():
             self._config_manager.save()
+            after = self._config_manager.config.output_sink_id
+            if before and after is None:
+                from tunes_player.core.audio_device_messages import OUTPUT_UNAVAILABLE
+
+                self._report_error(OUTPUT_UNAVAILABLE)
         return self._volume_controller.list_endpoints()
 
     def get_linux_audio_stack_info(self) -> object:
@@ -3631,9 +3637,14 @@ class PlayerService:
 
         self._playback_position_stalled = True
         self._emit("playback_changed")
+        from tunes_player.core.audio_device_messages import (
+            AUDIO_OUTPUT_STALLED,
+            DIRECT_ALSA_STALLED,
+        )
+
         profile = self._output_profile
         if profile is None or not profile.direct_alsa:
-            self._soft_stall_message = "Audio output stalled."
+            self._soft_stall_message = AUDIO_OUTPUT_STALLED
             self._emit("playback_stalled")
             return
         if "alsa_feed_stalled" not in codes and "alsa_not_running" not in codes:
@@ -3646,7 +3657,7 @@ class PlayerService:
         if now - self._direct_alsa_recovery_at < 8.0:
             return
         if self._direct_alsa_soft_stall_attempts >= 3:
-            self._soft_stall_message = "Audio output stalled."
+            self._soft_stall_message = DIRECT_ALSA_STALLED
             self._emit("playback_stalled")
             return
         self._soft_stall_message = "Audio output stalled; recovering…"
@@ -3661,7 +3672,7 @@ class PlayerService:
             self._emit("playback_changed")
             log.warning("Recovered direct ALSA playback after soft stall")
         else:
-            self._soft_stall_message = "Audio output stalled."
+            self._soft_stall_message = DIRECT_ALSA_STALLED
             self._emit("playback_stalled")
 
     def _try_recover_direct_alsa_soft_stall(self) -> bool:
@@ -4863,7 +4874,12 @@ class PlayerService:
                 return
             self._sync_duration_from_engine()
             self._sync_playback_position_from_engine()
-            self._report_error("Playback failed.")
+            if profile is not None and profile.direct_alsa:
+                from tunes_player.core.audio_device_messages import DIRECT_ALSA_UNAVAILABLE
+
+                self._report_error(DIRECT_ALSA_UNAVAILABLE)
+            else:
+                self._report_error("Playback failed.")
             return
         if event == "position_changed":
             self.refresh_playback_position_for_ui()

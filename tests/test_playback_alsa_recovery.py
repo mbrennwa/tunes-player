@@ -157,7 +157,9 @@ class PlaybackSoftStallRecoveryTests(unittest.TestCase):
 
         self.assertEqual(engine.recover_calls, [])
         self.assertTrue(self._service.get_playback_state().position_stalled)
-        self.assertEqual(self._service.soft_stall_message(), "Audio output stalled.")
+        from tunes_player.core.audio_device_messages import DIRECT_ALSA_STALLED
+
+        self.assertEqual(self._service.soft_stall_message(), DIRECT_ALSA_STALLED)
 
     def test_time_pos_only_stall_freezes_ui_without_ao_reload(self) -> None:
         engine = _RecoveryEngine()
