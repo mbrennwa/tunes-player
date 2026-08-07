@@ -502,7 +502,11 @@ UI never polls mpv properties directly.
 
 1. **Federated search (today):** one search box; results tagged by source (Local, TIDAL,
    Qobuz). **`PlayerService.search()`** queries the local store first, then appends
-   signed-in streaming backends.
+   signed-in streaming backends. Query semantics (`core/search_query.py`): whitespace
+   tokens are **AND** (all must match, order irrelevant); `"quoted phrases"` are
+   contiguous. Local search intersects per-term `LIKE` hits; streaming APIs get a
+   plain (unquoted) query string, then results are post-filtered with the same AND /
+   phrase rules.
 2. **Heuristic merge (planned):** merged browse lists with duplicate-title collapsing.
 3. **Strong dedup (planned):** MusicBrainz / ISRC / UPC identity. Today the release grid
    shows one tile per catalog quality tier (`core/release_quality_tiles.py`); the shell
