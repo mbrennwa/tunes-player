@@ -119,6 +119,7 @@ from tunes_player.core.volume import (
     derive_volume_mode,
     is_alsa_endpoint_id,
 )
+from tunes_player.core.volume_apply import VolumeApplyCoordinator
 
 EventCallback = Callable[[str], None]
 Unsubscribe = Callable[[], None]
@@ -240,15 +241,15 @@ class PlayerService:
         )
         if callable(normalize) and normalize():
             self._config_manager.save()
-        self._volume_apply_lock = threading.Lock()
-        self._volume_pending: float | None = None
-        self._volume_apply_inflight = False
-        self._volume_suppress_inbound_depth = 0
-        self._volume_gesture_active = False
+        self._volume_apply = VolumeApplyCoordinator(
+            get_controller=lambda: self._volume_controller,
+            run_on_main_thread=self._run_on_main_thread,
+            apply_inbound_level=self._apply_inbound_device_volume,
+        )
         self._volume_controller_unsubscribe: VolumeUnsubscribe | None = None
         if self._volume_controller is not None:
             self._volume_controller_unsubscribe = self._volume_controller.subscribe(
-                self._on_device_volume_level
+                self._volume_apply.on_device_volume_level
             )
         self._device_output_fallback = False
         self._is_playing = False
@@ -2296,102 +2297,34 @@ class PlayerService:
 
     def begin_volume_gesture(self) -> None:
         """Ignore inbound stack volume while the UI slider is being dragged."""
-        self._volume_gesture_active = True
+        self._volume_apply.begin_gesture()
 
     def end_volume_gesture(self) -> None:
-        self._volume_gesture_active = False
+        self._volume_apply.end_gesture()
 
-    def _on_device_volume_level(self, level: float) -> None:
-        """Inbound device/stack volume from VolumeController.subscribe()."""
-        if self._volume_suppress_inbound_depth > 0:
+    def _apply_inbound_device_volume(self, level: float) -> None:
+        """Main-thread update after coordinator filters suppress/gesture."""
+        if abs(self._volume - level) < 1e-4 and not (self._muted and level > 0):
             return
-        if self._volume_gesture_active:
-            return
-        clamped = max(0.0, min(1.0, level))
-
-        def apply() -> None:
-            if self._volume_suppress_inbound_depth > 0:
-                return
-            if self._volume_gesture_active:
-                return
-            if abs(self._volume - clamped) < 1e-4 and not (
-                self._muted and clamped > 0
-            ):
-                return
-            self._volume = clamped
-            if self._muted and clamped > 0:
-                self._muted = False
-            self._emit("volume_changed")
-
-        self._run_on_main_thread(apply)
-
-    def _schedule_device_volume_apply(self, level: float) -> None:
-        """Coalesce sink/mixer applies off the caller thread (latest wins)."""
-        with self._volume_apply_lock:
-            self._volume_pending = max(0.0, min(1.0, level))
-            if self._volume_apply_inflight:
-                return
-            self._volume_apply_inflight = True
-        threading.Thread(
-            target=self._device_volume_apply_worker,
-            name="volume-apply",
-            daemon=True,
-        ).start()
+        self._volume = level
+        if self._muted and level > 0:
+            self._muted = False
+        self._emit("volume_changed")
 
     def _set_device_volume_sync(self, level: float) -> None:
         """Blocking device-volume write (mode transitions); echo-suppressed."""
-        controller = self._volume_controller
-        if controller is None:
-            return
-        with self._volume_apply_lock:
-            self._volume_pending = None
-        self._volume_suppress_inbound_depth += 1
-        try:
-            controller.set_level(max(0.0, min(1.0, level)))
-        except OSError:
-            log.debug("Could not set device volume", exc_info=True)
-        finally:
-            self._volume_suppress_inbound_depth = max(
-                0, self._volume_suppress_inbound_depth - 1
-            )
-
-    def _device_volume_apply_worker(self) -> None:
-        controller = self._volume_controller
-        while True:
-            with self._volume_apply_lock:
-                pending = self._volume_pending
-                if pending is None:
-                    self._volume_apply_inflight = False
-                    return
-                self._volume_pending = None
-            if controller is None:
-                continue
-            self._volume_suppress_inbound_depth += 1
-            try:
-                controller.set_level(pending)
-            except OSError:
-                log.debug("Device volume apply failed", exc_info=True)
-            finally:
-                self._volume_suppress_inbound_depth = max(
-                    0, self._volume_suppress_inbound_depth - 1
-                )
+        self._volume_apply.set_level_sync(level)
 
     def flush_pending_volume_apply(self, *, timeout: float = 2.0) -> None:
         """Block until coalesced device-volume applies finish (tests / shutdown)."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            with self._volume_apply_lock:
-                if not self._volume_apply_inflight and self._volume_pending is None:
-                    return
-            time.sleep(0.005)
-        raise TimeoutError("device volume apply did not drain")
+        self._volume_apply.flush(timeout=timeout)
 
     def _push_volume_to_output(self, *, notify: bool = True) -> None:
         if not self.volume_control_enabled():
             return
         level = self._output_volume_level()
         if self._routes_volume_to_sink() and self._volume_controller is not None:
-            self._schedule_device_volume_apply(level)
+            self._volume_apply.schedule_apply(level)
         engine = self._engine
         if engine is not None:
             if hasattr(engine, "set_bit_perfect"):
@@ -2561,7 +2494,7 @@ class PlayerService:
         self._volume_controller_unsubscribe = None
         if unsub is not None:
             unsub()
-        self._volume_gesture_active = False
+        self._volume_apply.prepare_shutdown()
         controller = self._volume_controller
         if controller is not None:
             close = getattr(controller, "close", None)
@@ -2570,8 +2503,6 @@ class PlayerService:
                     close()
                 except Exception:
                     log.debug("Volume controller close failed", exc_info=True)
-        with self._volume_apply_lock:
-            self._volume_pending = None
         try:
             self.flush_pending_volume_apply(timeout=1.0)
         except TimeoutError:
