@@ -1,3 +1,9 @@
+tunes-player (1.0.0a1) unstable; urgency=medium
+
+  * Bump to 1.0.0a1 (public alpha).
+
+ -- Matthias Brennwald <mbrennwa@gmail.com>  Fri, 07 Aug 2026 10:24:00 +0200
+
 tunes-player (1.0.dev1-1) unstable; urgency=medium
 
   * Ship desktop entry and hicolor launcher icons in the package.

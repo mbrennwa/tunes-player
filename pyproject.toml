@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tunes-player"
-version = "1.0a0"
+version = "1.0.0a1"
 description = "Tunes — music player for local files and streaming (TIDAL, Qobuz; Linux/GNOME first)"
 readme = "README.md"
 license = "GPL-3.0-or-later"

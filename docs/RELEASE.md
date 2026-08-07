@@ -12,7 +12,7 @@ numbers live in `pyproject.toml`; tags and packaging follow from there.
 | **`bugfix/…`** | Short-lived branches from `main` for a single fix; delete after merge. |
 
 In docs and PRs you may refer to `devel/1.0` when discussing a specific line —
-that avoids confusion with version segments such as `1.0a0`.
+that avoids confusion with version segments such as `1.0.0a1`.
 
 ## Version numbers
 
@@ -24,10 +24,14 @@ Format: `MAJOR.MINOR.PATCH` (e.g. `1.0.4`).
 
 **Pre-stable public testing** (released from `main`):
 
-- `1.0a0`, `1.0a1`, … — increment `aN` for each alpha test release until
-  ready for a stable `1.0.0` (later may move to `bN` / `rcN` if needed).
+Use [PEP 440](https://peps.python.org/pep-0440/) pre-release segments on the
+full triplet (same scheme as [post](https://github.com/mbrennwa/post)):
+
+- `1.0.0a1`, `1.0.0a2`, … — public alpha (`aN` starts at **1**)
+- `1.0.0bN` — public beta (if needed)
+- `1.0.0rcN` — release candidate (if needed)
 - Earlier public tags used `.devN` (`v1.0.dev0`, `v1.0.dev1`); new cuts use
-  `aN`.
+  `aN` / `bN` / `rcN`.
 
 **Stable and maintenance:**
 
@@ -35,18 +39,23 @@ Format: `MAJOR.MINOR.PATCH` (e.g. `1.0.4`).
 - Bug fixes: `1.0.1`, `1.0.2`, …
 
 Set the version only in **`pyproject.toml`**. Runtime and packaging should read it
-from there (do not duplicate version strings elsewhere).
+from there (do not duplicate version strings elsewhere). Match
+`debian/changelog` upstream version when cutting a release.
+
+GitHub milestones for a public alpha cut use `Release_alpha-N` (e.g.
+`Release_alpha-1` for `1.0.0a1`).
 
 ## Release workflow
 
-### Alpha / test release (`1.0aN`)
+### Alpha / test release (`1.0.0aN`)
 
 1. Finish and test on **`devel`**.
 2. Merge **`devel` → `main`**.
-3. On **`main`**, set `version = "1.0aN"` in `pyproject.toml` and commit.
-4. Tag on **`main`**: `v1.0aN`.
+3. On **`main`**, set `version = "1.0.0aN"` in `pyproject.toml` and commit
+   (update `debian/changelog` to match).
+4. Tag on **`main`**: `v1.0.0aN`.
 5. Create a **GitHub Release** from the tag; mark as **pre-release** for alpha
-   versions.
+   versions (CI does this for `aN` / `bN` / `rcN` / legacy `.devN`).
 6. Merge **`main` → `devel`** so the devel branch includes the released state.
 7. Continue development on **`devel`**.
 
@@ -65,7 +74,7 @@ mark the GitHub Release as pre-release.
 
 ## Git tags
 
-- Format: `v` + version from `pyproject.toml` (e.g. `v1.0a0`, `v1.0.0`,
+- Format: `v` + version from `pyproject.toml` (e.g. `v1.0.0a1`, `v1.0.0`,
   `v1.0.1`).
 - Tags are created on **`main`** at the release commit.
 
@@ -87,7 +96,7 @@ DEB packages are built from **`main`** at a release tag.
   Local build artifacts land in `dist/` (gitignored).
 - **Target systems:** Debian 12+ or Ubuntu 24.04+ with Python 3.11+.
 - **Dependencies:** `[tool.deb]` in `pyproject.toml` (`apt_depends`, `pypi_wheelhouse`).
-- Push an annotated tag `v` + version (e.g. `v1.0a0`). CI
+- Push an annotated tag `v` + version (e.g. `v1.0.0a1`). CI
   ([`.github/workflows/release-deb.yml`](../.github/workflows/release-deb.yml))
   builds the `.deb` and attaches it to the GitHub Release automatically.
 - Optional: build locally with `./tools/build-deb.sh` (artifacts in `dist/`).
