@@ -523,7 +523,6 @@ class ReleaseDetailView(Gtk.Box):
         self._detail_art_frame = art_frame
         self._playback_unsubscribe = service.subscribe(self._on_playback_event)
         self.connect("destroy", self._on_destroy)
-        GLib.idle_add(self._sync_release_art_play, service, release.id, art_frame)
 
         details_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         details_column.set_hexpand(False)
@@ -591,23 +590,29 @@ class ReleaseDetailView(Gtk.Box):
             lambda _box, row: service.play_track(row.track_id),
         )
         scrolled.set_child(list_box)
+        self._detail_scrolled = scrolled
+        self._detail_list_box = list_box
+        self._marked_track_id: str | None = None
 
         for index, track in enumerate(tracks):
             row = _compact_track_row(track, index=index, show_artist=show_artists)
             attach_track_save_menu(row, service=service, track=track)
             list_box.append(row)
 
+        GLib.idle_add(self._sync_playback_chrome_idle)
+
     def _on_playback_event(self, event: str) -> None:
         if event == "position_changed":
             return
-        GLib.idle_add(self._sync_release_art_play_idle)
+        GLib.idle_add(self._sync_playback_chrome_idle)
 
-    def _sync_release_art_play_idle(self) -> bool:
+    def _sync_playback_chrome_idle(self) -> bool:
         self._sync_release_art_play(
             self._detail_service,
             self._detail_release_id,
             self._detail_art_frame,
         )
+        self._sync_now_playing_track()
         return False
 
     @staticmethod
@@ -621,10 +626,79 @@ class ReleaseDetailView(Gtk.Box):
             _sync_release_art_play_button(btn, service=service, release_id=release_id)
         return False
 
+    def _sync_now_playing_track(self) -> None:
+        state = self._detail_service.get_playback_state()
+        current = state.current_track
+        current_id = current.id if current is not None else None
+        marked_row: Gtk.ListBoxRow | None = None
+
+        row = self._detail_list_box.get_first_child()
+        while row is not None:
+            if isinstance(row, Gtk.ListBoxRow):
+                track_id = getattr(row, "track_id", None)
+                active = current_id is not None and track_id == current_id
+                _set_track_row_now_playing(row, active=active)
+                if active:
+                    marked_row = row
+            row = row.get_next_sibling()
+
+        previous_id = self._marked_track_id
+        self._marked_track_id = current_id if marked_row is not None else None
+        if marked_row is not None and self._marked_track_id != previous_id:
+            GLib.idle_add(
+                _scroll_list_row_into_view_idle,
+                self._detail_scrolled,
+                marked_row,
+            )
+
     def _on_destroy(self, *_args: object) -> None:
         unsubscribe = getattr(self, "_playback_unsubscribe", None)
         if unsubscribe is not None:
             unsubscribe()
+
+def _set_track_row_now_playing(row: Gtk.ListBoxRow, *, active: bool) -> None:
+    icon = getattr(row, "_now_playing_icon", None)
+    if icon is None:
+        return
+    if active:
+        icon.set_from_icon_name("media-playback-start-symbolic")
+    else:
+        icon.clear()
+
+def _scroll_list_row_into_view_idle(
+    scrolled: Gtk.ScrolledWindow,
+    row: Gtk.Widget,
+    attempt: int = 0,
+) -> bool:
+    if _scroll_list_row_into_view(scrolled, row):
+        return False
+    if attempt < 3:
+        GLib.idle_add(_scroll_list_row_into_view_idle, scrolled, row, attempt + 1)
+    return False
+
+def _scroll_list_row_into_view(
+    scrolled: Gtk.ScrolledWindow,
+    row: Gtk.Widget,
+) -> bool:
+    """Scroll so ``row`` is fully visible. Returns False if layout is not ready.
+
+    Gtk.ListBox boxed-list rows have stride larger than ``get_height()``
+    (separators/borders). ``compute_bounds`` + ``clamp_page`` match GTK's own
+    ensure-visible path and land on the correct content offset.
+    """
+    vadj = scrolled.get_vadjustment()
+    list_box = row.get_parent()
+    if vadj is None or not isinstance(list_box, Gtk.ListBox):
+        return False
+    ok, bounds = row.compute_bounds(list_box)
+    if not ok or bounds is None:
+        return False
+    y = float(bounds.origin.y)
+    height = float(bounds.size.height)
+    if height <= 0:
+        return False
+    vadj.clamp_page(y, y + height)
+    return True
 
 def _compact_track_row(
     track: Track,
@@ -642,6 +716,13 @@ def _compact_track_row(
     box.set_margin_start(12)
     box.set_margin_end(12)
     row.set_child(box)
+
+    icon = Gtk.Image()
+    icon.set_pixel_size(16)
+    icon.set_size_request(16, 16)
+    icon.set_valign(Gtk.Align.CENTER)
+    row._now_playing_icon = icon
+    box.append(icon)
 
     number = format_track_number(track, fallback=index + 1) or str(index + 1)
     num_label = Gtk.Label(label=number, xalign=1.0)
