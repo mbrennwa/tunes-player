@@ -13,8 +13,11 @@ from tunes_player.core.audio_labels import classify_sink_potential
 from tunes_player.core.config import AppConfig
 from tunes_player.core.volume import (
     SYSTEM_DEFAULT_SINK_ID,
+    Unsubscribe,
     VolumeController,
     VolumeEndpoint,
+    VolumeListener,
+    VolumeSubscriptionHub,
     is_alsa_endpoint_id,
     pipewire_endpoint_id,
 )
@@ -230,6 +233,7 @@ class _SubprocessVolumeController(ABC):
     def __init__(self, config: AppConfig) -> None:
         self._config = config
         self._cached_endpoints: list[VolumeEndpoint] | None = None
+        self._subscriptions = VolumeSubscriptionHub()
 
     @property
     @abstractmethod
@@ -257,9 +261,18 @@ class _SubprocessVolumeController(ABC):
             self._run([self._command, *self._set_volume_args(clamped)], check=True)
         except (OSError, subprocess.CalledProcessError):
             log.debug("Could not set %s output volume", self._command, exc_info=True)
+            return
+        self._subscriptions.notify(clamped)
 
     def adjust_level(self, delta: float) -> None:
         self.set_level(self.get_level() + delta)
+
+    def subscribe(self, listener: VolumeListener) -> Unsubscribe:
+        return self._subscriptions.subscribe(listener)
+
+    def notify_external_level(self, level: float) -> None:
+        """Report an inbound stack volume change (foundation for #104)."""
+        self._subscriptions.notify(level)
 
     def list_endpoints(self) -> list[VolumeEndpoint]:
         if self._cached_endpoints is None:
@@ -325,7 +338,8 @@ class WpctlVolumeController(_SubprocessVolumeController):
         endpoint_id = self.get_active_endpoint_id()
         if endpoint_id is None or endpoint_id == SYSTEM_DEFAULT_SINK_ID:
             return "@DEFAULT_AUDIO_SINK@"
-        for endpoint in self._list_endpoints():
+        # Use cached list_endpoints() — never re-run wpctl status per set/get.
+        for endpoint in self.list_endpoints():
             if endpoint.id == endpoint_id and endpoint.control_id is not None:
                 return endpoint.control_id
         return endpoint_id
@@ -426,6 +440,7 @@ class LinuxOutputController:
     def __init__(self, config: AppConfig) -> None:
         self._config = config
         self._cached_endpoints: list[VolumeEndpoint] | None = None
+        self._subscriptions = VolumeSubscriptionHub()
         self._sink_backend: _SubprocessVolumeController | None = None
         wpctl = WpctlVolumeController(config)
         if wpctl.available():
@@ -501,17 +516,27 @@ class LinuxOutputController:
             from tunes_player.platform.linux.alsa_mixer import alsa_set_level_for_endpoint
 
             alsa_set_level_for_endpoint(endpoint_id, clamped)
+            self._subscriptions.notify(clamped)
             return
         if self.uses_device_volume and self._sink_backend is not None:
             self._sink_backend.set_level(clamped)
+            self._subscriptions.notify(clamped)
             return
         self._software_level = clamped
+        self._subscriptions.notify(clamped)
 
     def adjust_level(self, delta: float) -> None:
         if self.uses_device_volume:
             self.set_level(self.get_level() + delta)
             return
         self.set_level(self._software_level + delta)
+
+    def subscribe(self, listener: VolumeListener) -> Unsubscribe:
+        return self._subscriptions.subscribe(listener)
+
+    def notify_external_level(self, level: float) -> None:
+        """Report an inbound stack volume change (foundation for #104)."""
+        self._subscriptions.notify(level)
 
     def list_endpoints(self) -> list[VolumeEndpoint]:
         if self._cached_endpoints is None:
@@ -620,6 +645,7 @@ class NullVolumeController:
     def __init__(self, config: AppConfig) -> None:
         self._config = config
         self._level = 0.72
+        self._subscriptions = VolumeSubscriptionHub()
 
     def available(self) -> bool:
         return True
@@ -629,6 +655,7 @@ class NullVolumeController:
 
     def set_level(self, level: float) -> None:
         self._level = max(0.0, min(1.0, level))
+        self._subscriptions.notify(self._level)
 
     def adjust_level(self, delta: float) -> None:
         self.set_level(self._level + delta)
@@ -650,3 +677,10 @@ class NullVolumeController:
 
     def mpv_audio_device(self) -> str | None:
         return None
+
+    def subscribe(self, listener: VolumeListener) -> Unsubscribe:
+        return self._subscriptions.subscribe(listener)
+
+    def notify_external_level(self, level: float) -> None:
+        """Report an inbound stack volume change (foundation for #104)."""
+        self._subscriptions.notify(level)

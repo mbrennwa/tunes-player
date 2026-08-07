@@ -331,9 +331,12 @@ class MpvEngine:
         self._apply_software_volume()
 
     def set_bit_perfect(self, enabled: bool) -> None:
+        new_software_volume = not enabled
+        if self._unity_gain == enabled and self._software_volume == new_software_volume:
+            return
         prev_software_volume = self._software_volume
         self._unity_gain = enabled
-        self._software_volume = not enabled
+        self._software_volume = new_software_volume
         self._set_property("replaygain", "no")
         if enabled or not self._software_volume:
             self._set_property("volume", 100)

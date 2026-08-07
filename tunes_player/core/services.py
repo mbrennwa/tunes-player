@@ -112,6 +112,7 @@ from tunes_player.core.release_quality_tiles import (
     release_for_quality_tier,
 )
 from tunes_player.core.volume import (
+    Unsubscribe as VolumeUnsubscribe,
     VolumeController,
     VolumeEndpoint,
     VolumeMode,
@@ -239,6 +240,15 @@ class PlayerService:
         )
         if callable(normalize) and normalize():
             self._config_manager.save()
+        self._volume_apply_lock = threading.Lock()
+        self._volume_pending: float | None = None
+        self._volume_apply_inflight = False
+        self._volume_suppress_inbound_depth = 0
+        self._volume_controller_unsubscribe: VolumeUnsubscribe | None = None
+        if self._volume_controller is not None:
+            self._volume_controller_unsubscribe = self._volume_controller.subscribe(
+                self._on_device_volume_level
+            )
         self._device_output_fallback = False
         self._is_playing = False
         self._playlist_meta: list[Track] = []
@@ -2315,12 +2325,93 @@ class PlayerService:
             return False
         return self._volume_mode() in ("hardware", "software")
 
+    def _on_device_volume_level(self, level: float) -> None:
+        """Inbound device/stack volume (subscribe foundation for #104)."""
+        if self._volume_suppress_inbound_depth > 0:
+            return
+        clamped = max(0.0, min(1.0, level))
+
+        def apply() -> None:
+            if self._volume_suppress_inbound_depth > 0:
+                return
+            if abs(self._volume - clamped) < 1e-4 and not (
+                self._muted and clamped > 0
+            ):
+                return
+            self._volume = clamped
+            if self._muted and clamped > 0:
+                self._muted = False
+            self._emit("volume_changed")
+
+        self._run_on_main_thread(apply)
+
+    def _schedule_device_volume_apply(self, level: float) -> None:
+        """Coalesce sink/mixer applies off the caller thread (latest wins)."""
+        with self._volume_apply_lock:
+            self._volume_pending = max(0.0, min(1.0, level))
+            if self._volume_apply_inflight:
+                return
+            self._volume_apply_inflight = True
+        threading.Thread(
+            target=self._device_volume_apply_worker,
+            name="volume-apply",
+            daemon=True,
+        ).start()
+
+    def _set_device_volume_sync(self, level: float) -> None:
+        """Blocking device-volume write (mode transitions); echo-suppressed."""
+        controller = self._volume_controller
+        if controller is None:
+            return
+        with self._volume_apply_lock:
+            self._volume_pending = None
+        self._volume_suppress_inbound_depth += 1
+        try:
+            controller.set_level(max(0.0, min(1.0, level)))
+        except OSError:
+            log.debug("Could not set device volume", exc_info=True)
+        finally:
+            self._volume_suppress_inbound_depth = max(
+                0, self._volume_suppress_inbound_depth - 1
+            )
+
+    def _device_volume_apply_worker(self) -> None:
+        controller = self._volume_controller
+        while True:
+            with self._volume_apply_lock:
+                pending = self._volume_pending
+                if pending is None:
+                    self._volume_apply_inflight = False
+                    return
+                self._volume_pending = None
+            if controller is None:
+                continue
+            self._volume_suppress_inbound_depth += 1
+            try:
+                controller.set_level(pending)
+            except OSError:
+                log.debug("Device volume apply failed", exc_info=True)
+            finally:
+                self._volume_suppress_inbound_depth = max(
+                    0, self._volume_suppress_inbound_depth - 1
+                )
+
+    def flush_pending_volume_apply(self, *, timeout: float = 2.0) -> None:
+        """Block until coalesced device-volume applies finish (tests / shutdown)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._volume_apply_lock:
+                if not self._volume_apply_inflight and self._volume_pending is None:
+                    return
+            time.sleep(0.005)
+        raise TimeoutError("device volume apply did not drain")
+
     def _push_volume_to_output(self, *, notify: bool = True) -> None:
         if not self.volume_adjustable():
             return
         level = self._output_volume_level()
         if self._routes_volume_to_sink() and self._volume_controller is not None:
-            self._volume_controller.set_level(level)
+            self._schedule_device_volume_apply(level)
         engine = self._engine
         if engine is not None:
             if hasattr(engine, "set_bit_perfect"):
@@ -2332,23 +2423,7 @@ class PlayerService:
     def adjust_volume(self, delta: float) -> None:
         if not self.volume_adjustable():
             return
-        mode = self._volume_mode()
-        if mode == "hardware" and self._device_volume and self._volume_controller is not None:
-            if self._muted:
-                self._volume = max(0.0, min(1.0, self._volume + delta))
-                if self._volume > 0:
-                    self._muted = False
-                self._push_volume_to_output(notify=True)
-                return
-            self._volume_controller.adjust_level(delta)
-            try:
-                self._volume = self._volume_controller.get_level()
-            except OSError:
-                self._volume = max(0.0, min(1.0, self._volume + delta))
-        else:
-            self.set_volume(self._volume + delta)
-            return
-        self._emit("volume_changed")
+        self.set_volume(self._volume + delta)
 
     def set_output_sink(self, endpoint_id: str) -> None:
         if self._volume_controller is None:
@@ -2504,6 +2579,16 @@ class PlayerService:
         )
 
     def shutdown(self) -> None:
+        unsub = self._volume_controller_unsubscribe
+        self._volume_controller_unsubscribe = None
+        if unsub is not None:
+            unsub()
+        with self._volume_apply_lock:
+            self._volume_pending = None
+        try:
+            self.flush_pending_volume_apply(timeout=1.0)
+        except TimeoutError:
+            log.debug("Timed out waiting for volume apply on shutdown")
         self.flush_labels_sync()
         self.pause_save_to_disk_for_quit()
         monitor = self._playback_health_monitor
@@ -3722,10 +3807,7 @@ class PlayerService:
         """Restore sink to 100% for fixed mode; optionally sync in-app volume."""
         if not self._device_volume or self._volume_controller is None:
             return False
-        try:
-            self._volume_controller.set_level(1.0)
-        except OSError:
-            log.debug("Could not reset output volume for fixed mode", exc_info=True)
+        self._set_device_volume_sync(1.0)
         if not reset_app_volume:
             return False
         self._volume = 1.0
@@ -3745,13 +3827,7 @@ class PlayerService:
             and self._device_volume
             and self._volume_controller is not None
         ):
-            try:
-                self._volume_controller.set_level(1.0)
-            except OSError:
-                log.debug(
-                    "Could not reset output volume for software mode",
-                    exc_info=True,
-                )
+            self._set_device_volume_sync(1.0)
             return False
         if new_mode == "hardware" and prev_mode == "software":
             self._push_volume_to_output(notify=False)
@@ -3892,10 +3968,7 @@ class PlayerService:
         self._volume = 1.0
         self._muted = False
         if self._device_volume and self._volume_controller is not None:
-            try:
-                self._volume_controller.set_level(1.0)
-            except OSError:
-                pass
+            self._set_device_volume_sync(1.0)
 
     def _auto_volume_mode(self) -> VolumeMode:
         return derive_volume_mode(

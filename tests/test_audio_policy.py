@@ -11,10 +11,16 @@ from tunes_player.core.audio_labels import (
     endpoint_display_label,
     endpoint_dropdown_label,
 )
-from tunes_player.core.volume import SYSTEM_DEFAULT_SINK_ID
+from tunes_player.core.volume import (
+    SYSTEM_DEFAULT_SINK_ID,
+    Unsubscribe,
+    VolumeEndpoint,
+    VolumeListener,
+    VolumeSubscriptionHub,
+    derive_volume_mode,
+)
 from tunes_player.core.config import ConfigManager
 from tunes_player.core.services import PlayerService
-from tunes_player.core.volume import VolumeEndpoint, derive_volume_mode
 
 
 class _SinkVolumeController:
@@ -23,6 +29,8 @@ class _SinkVolumeController:
     def __init__(self, config: object) -> None:
         self._config = config
         self._level = 0.5
+        self._subscriptions = VolumeSubscriptionHub()
+        self.set_level_calls: list[float] = []
 
     def available(self) -> bool:
         return True
@@ -31,10 +39,12 @@ class _SinkVolumeController:
         return self._level
 
     def set_level(self, level: float) -> None:
-        self._level = level
+        self._level = max(0.0, min(1.0, level))
+        self.set_level_calls.append(self._level)
+        self._subscriptions.notify(self._level)
 
     def adjust_level(self, delta: float) -> None:
-        self._level = max(0.0, min(1.0, self._level + delta))
+        self.set_level(self._level + delta)
 
     def list_endpoints(self) -> list[VolumeEndpoint]:
         return [
@@ -56,6 +66,12 @@ class _SinkVolumeController:
 
     def mpv_audio_device(self) -> str | None:
         return "pulse/alsa_output.usb-Foo"
+
+    def subscribe(self, listener: VolumeListener) -> Unsubscribe:
+        return self._subscriptions.subscribe(listener)
+
+    def notify_external_level(self, level: float) -> None:
+        self._subscriptions.notify(level)
 
 
 class AudioPolicyTests(unittest.TestCase):
@@ -176,6 +192,7 @@ class AudioPolicyTests(unittest.TestCase):
             controller = _SinkVolumeController(config.config)
             service = PlayerService(config=config, volume_controller=controller)
             service.set_volume(0.5)
+            service.flush_pending_volume_apply()
             self.assertEqual(controller.get_level(), 0.5)
 
             service.set_volume_control_enabled(False)
@@ -190,6 +207,7 @@ class AudioPolicyTests(unittest.TestCase):
             controller = _SinkVolumeController(config.config)
             service = PlayerService(config=config, volume_controller=controller)
             service.set_volume(0.5)
+            service.flush_pending_volume_apply()
             service.set_volume_control_enabled(False)
             self.assertEqual(controller.get_level(), 1.0)
 
@@ -204,6 +222,7 @@ class AudioPolicyTests(unittest.TestCase):
             controller = _SinkVolumeController(config.config)
             service = PlayerService(config=config, volume_controller=controller)
             service.set_volume(0.5)
+            service.flush_pending_volume_apply()
             self.assertEqual(controller.get_level(), 0.5)
 
             service.set_volume_control_enabled(True)
@@ -240,6 +259,7 @@ class AudioPolicyTests(unittest.TestCase):
             service = PlayerService(config=config, volume_controller=controller)
             service.set_volume_control_enabled(True)
             service.set_volume(0.35)
+            service.flush_pending_volume_apply()
             self.assertAlmostEqual(controller.get_level(), 0.35, places=4)
 
     def test_software_to_hardware_pushes_volume_to_sink(self) -> None:
@@ -252,9 +272,11 @@ class AudioPolicyTests(unittest.TestCase):
             controller = _SinkVolumeController(config.config)
             service = PlayerService(config=config, volume_controller=controller)
             service.set_volume(0.4)
+            service.flush_pending_volume_apply()
             self.assertEqual(service.get_playback_state().volume, 0.4)
 
             service.set_volume_control_enabled(True)
+            service.flush_pending_volume_apply()
 
             self.assertAlmostEqual(controller.get_level(), 0.4, places=4)
 
