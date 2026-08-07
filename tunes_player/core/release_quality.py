@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -78,16 +79,6 @@ def acoustic_tier_from_stream(
         sample_rate_hz=sample_rate_hz,
     )
 
-def _tier_from_lossless_bit_depth_sample_rate(
-    *,
-    bit_depth: int,
-    sample_rate_hz: int,
-) -> str:
-    return acoustic_tier_from_lossless(
-        bit_depth=bit_depth,
-        sample_rate_hz=sample_rate_hz,
-    )
-
 def classify_local_catalog(
     *,
     max_bit_depth: int | None,
@@ -101,33 +92,19 @@ def classify_local_catalog(
         tiers.add(QUALITY_FILTER_COMPRESSED)
     if has_lossless:
         tiers.add(
-            _tier_from_lossless_bit_depth_sample_rate(
+            acoustic_tier_from_lossless(
                 bit_depth=max_bit_depth or 0,
                 sample_rate_hz=max_sample_rate or 0,
             ),
         )
     elif max_bit_depth is not None and max_sample_rate is not None:
         tiers.add(
-            _tier_from_lossless_bit_depth_sample_rate(
+            acoustic_tier_from_lossless(
                 bit_depth=max_bit_depth,
                 sample_rate_hz=max_sample_rate,
             ),
         )
     return frozenset(tier for tier in tiers if tier in _VALID_QUALITY_FILTERS)
-
-def tiers_from_local(
-    *,
-    max_bit_depth: int | None,
-    max_sample_rate: int | None,
-    has_lossless: bool,
-    has_lossy: bool,
-) -> frozenset[str]:
-    return classify_local_catalog(
-        max_bit_depth=max_bit_depth,
-        max_sample_rate=max_sample_rate,
-        has_lossless=has_lossless,
-        has_lossy=has_lossy,
-    )
 
 def tier_from_local(
     *,
@@ -314,6 +291,28 @@ def tier_from_tidal_album(album: object) -> str:
     tiers = classify_tidal_catalog(album)
     return max_quality_tier(*tiers) if tiers else ""
 
+_TECH_SPEC_RE = re.compile(
+    r"(\d+)\s*(?:bit|-bit).*?(\d+(?:\.\d+)?)\s*khz",
+    re.IGNORECASE,
+)
+
+def parse_qobuz_technical_spec(spec: object) -> tuple[int | None, int | None]:
+    """Parse Qobuz ``maximum_technical_specifications`` into bit depth and Hz."""
+    if not isinstance(spec, str) or not spec.strip():
+        return None, None
+    match = _TECH_SPEC_RE.search(spec)
+    if match is None:
+        return None, None
+    try:
+        depth = int(match.group(1))
+    except (TypeError, ValueError):
+        depth = None
+    rate_hz = _normalize_sample_rate_hz(float(match.group(2)))
+    return (
+        depth if depth and depth > 0 else None,
+        rate_hz if rate_hz > 0 else None,
+    )
+
 def _tier_from_qobuz_bit_depth_sample_rate(
     *,
     bit_depth: int | float | str | None,
@@ -326,26 +325,18 @@ def _tier_from_qobuz_bit_depth_sample_rate(
     rate_hz = _normalize_sample_rate_hz(sample_rate)
     if depth <= 0 and rate_hz <= 0:
         return None
-    return _tier_from_lossless_bit_depth_sample_rate(
+    return acoustic_tier_from_lossless(
         bit_depth=depth,
         sample_rate_hz=rate_hz,
     )
 
 def _tier_from_qobuz_technical_specifications(spec: object) -> str | None:
-    if not isinstance(spec, str) or not spec.strip():
-        return None
-    import re
-
-    match = re.search(
-        r"(\d+)\s*(?:bit|-bit).*?(\d+(?:\.\d+)?)\s*khz",
-        spec,
-        flags=re.IGNORECASE,
-    )
-    if match is None:
+    depth, rate_hz = parse_qobuz_technical_spec(spec)
+    if depth is None and (rate_hz is None or rate_hz <= 0):
         return None
     return _tier_from_qobuz_bit_depth_sample_rate(
-        bit_depth=match.group(1),
-        sample_rate=match.group(2),
+        bit_depth=depth,
+        sample_rate=rate_hz,
     )
 
 def _qobuz_item_has_hires_above_cd(item: dict[str, Any]) -> bool:
@@ -420,9 +411,6 @@ def classify_qobuz_catalog(album: dict[str, Any]) -> frozenset[str]:
         if tier in _VALID_QUALITY_FILTERS
     )
 
-def tiers_from_qobuz_album(album: dict[str, Any]) -> frozenset[str]:
-    return classify_qobuz_catalog(album)
-
 def tier_from_qobuz_album(album: dict[str, Any]) -> str:
     tiers = classify_qobuz_catalog(album)
     return max_quality_tier(*tiers) if tiers else ""
@@ -452,9 +440,6 @@ def min_quality_tier(*tiers: str) -> str:
             best_rank = rank
             best = tier
     return best
-
-def peak_quality_tier_from_tiers(tiers: frozenset[str]) -> str:
-    return max_quality_tier(*tiers) if tiers else ""
 
 @dataclass(frozen=True, slots=True)
 class PlaybackPreference:
@@ -501,10 +486,6 @@ def catalog_quality_label_for_release(release: Release) -> str | None:
         quality_tier=tier,
         source=release.source,
     )
-
-def release_available_quality_tiers(release: Release) -> frozenset[str]:
-    """Tiers used for shell quality filter matching."""
-    return release.available_quality_tiers
 
 def streaming_catalog_quality_needs_enrich(release: Release) -> bool:
     """True when album lookup is still needed (or stale) for streaming quality tiers."""

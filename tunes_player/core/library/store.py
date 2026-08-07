@@ -1356,21 +1356,21 @@ class LibraryStore:
         )
         duration = row["duration_sec"]
         from tunes_player.core.release_quality import (
+            classify_local_catalog,
             max_quality_tier,
-            tiers_from_local,
         )
 
         max_bit_depth = row["max_bit_depth"]
         max_sample_rate = row["max_sample_rate"]
         has_lossless = bool(int(row["has_lossless"] or 0))
         has_lossy = bool(int(row["has_lossy"] or 0))
-        available_quality_tiers = tiers_from_local(
+        available_quality_tiers = classify_local_catalog(
             max_bit_depth=int(max_bit_depth) if max_bit_depth is not None else None,
             max_sample_rate=int(max_sample_rate) if max_sample_rate is not None else None,
             has_lossless=has_lossless,
             has_lossy=has_lossy,
         )
-        peak_quality_tier = max_quality_tier(*available_quality_tiers)
+        peak_quality_tier = max_quality_tier(*available_quality_tiers) if available_quality_tiers else ""
         release_id = str(row["release_id"])
         return Release(
             id=release_id,

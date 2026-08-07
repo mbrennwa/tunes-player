@@ -27,8 +27,7 @@ from tunes_player.core.release_quality import (
     streaming_catalog_quality_needs_enrich,
     tier_from_local,
     tier_from_qobuz_album,
-    tiers_from_qobuz_album,
-    tier_from_tidal_album,
+        tier_from_tidal_album,
     tier_from_tidal_peak,
     tier_from_tidal_track,
 )
@@ -452,7 +451,7 @@ class ReleaseQualityTests(unittest.TestCase):
             "hires_streamable": True,
         }
         self.assertEqual(tier_from_qobuz_album(album), QUALITY_FILTER_CD)
-        self.assertEqual(tiers_from_qobuz_album(album), frozenset({QUALITY_FILTER_CD}))
+        self.assertEqual(classify_qobuz_catalog(album), frozenset({QUALITY_FILTER_CD}))
 
     def test_qobuz_dual_format_matches_hi_res_filter(self) -> None:
         release = Release(
@@ -462,7 +461,7 @@ class ReleaseQualityTests(unittest.TestCase):
             source=Source.QOBUZ,
             peak_quality_tier=QUALITY_FILTER_CD,
             catalog_quality_ready=True,
-            available_quality_tiers=tiers_from_qobuz_album(
+            available_quality_tiers=classify_qobuz_catalog(
                 {
                     "maximum_bit_depth": 16,
                     "maximum_sampling_rate": 44.1,
