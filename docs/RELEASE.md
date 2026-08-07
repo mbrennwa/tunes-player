@@ -87,19 +87,23 @@ mark the GitHub Release as pre-release.
 
 ## Packaging
 
-DEB packages are built from **`main`** at a release tag.
+DEB and RPM packages are built from **`main`** at a release tag.
 
 - **Upstream version** comes from `pyproject.toml` (`[project].version`).
 - **Debian revision** (`-1`, `-2`, …) is for packaging-only fixes without bumping
-  the upstream version.
-- **Build:** `./tools/build-deb.sh` (see [tools/howto-build-deb.txt](../tools/howto-build-deb.txt)).
+  the upstream version. RPM **Release** is always `1` in the published filename.
+- **Build:** `make deb` / `make rpm` / `make packages` (or the scripts under `tools/`;
+  see [tools/howto-build-deb.txt](../tools/howto-build-deb.txt) and
+  [tools/howto-build-rpm.txt](../tools/howto-build-rpm.txt)).
   Local build artifacts land in `dist/` (gitignored).
-- **Target systems:** Debian 12+ or Ubuntu 24.04+ with Python 3.11+.
-- **Dependencies:** `[tool.deb]` in `pyproject.toml` (`apt_depends`, `pypi_wheelhouse`).
+- **Target systems:** Debian 12+ or Ubuntu 24.04+ (DEB), Fedora and compatible
+  dnf-based systems (RPM), with Python 3.11+.
+- **Dependencies:** `[tool.deb]` (`apt_depends`, `pypi_wheelhouse`) and
+  `[tool.rpm]` (`dnf_requires`) in `pyproject.toml`. The RPM wheelhouse reuses
+  `[tool.deb].pypi_wheelhouse`.
 - Push an annotated tag `v` + version (e.g. `v1.0.0a1`). CI
-  ([`.github/workflows/release-deb.yml`](../.github/workflows/release-deb.yml))
-  builds the `.deb` and attaches it to the GitHub Release automatically.
-- Optional: build locally with `./tools/build-deb.sh` (artifacts in `dist/`).
+  ([`.github/workflows/release-packages.yml`](../.github/workflows/release-packages.yml))
+  builds the `.deb` and `.rpm` and attaches both to the GitHub Release automatically.
 
 ## References
 

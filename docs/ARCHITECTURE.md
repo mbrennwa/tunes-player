@@ -12,7 +12,7 @@ lives on GitHub Issues.
 | Package / CLI / icon name | **tunes-player** |
 | GTK / D-Bus app ID | `tunes.player` |
 | License | **GPL-3.0-or-later** (see [License rationale](#license-rationale)) |
-| Distribution | Public FOSS; **DEB** for Debian/Ubuntu first (not Flatpak-first) |
+| Distribution | Public FOSS; **DEB** (Debian/Ubuntu) and **RPM** (Fedora); not Flatpak-first |
 | Initial platform | **Linux / GNOME / GTK 4 + Libadwaita** |
 | Later platforms | macOS / Windows via separate UI (e.g. Qt), shared **core** |
 
@@ -778,7 +778,7 @@ instead of mpv). **AGPL** is unnecessary for a desktop app.
 | Layer | Value |
 |-------|--------|
 | GitHub repo | `mbrennwa/tunes-player` |
-| Debian package | `tunes-player` (not bare `tunes`) |
+| Debian / RPM package | `tunes-player` (not bare `tunes`) |
 | Binary | `tunes-player` |
 | Desktop file | `data/tunes.player.desktop` (basename must match GTK app ID) |
 | Config | `platformdirs` → `~/.config/tunes-player/config.json` |
@@ -786,8 +786,9 @@ instead of mpv). **AGPL** is unnecessary for a desktop app.
 | Logs | `~/.local/state/tunes-player/tunes-player.log` |
 | Sessions | `tidal-session.json`, `qobuz-session.json` under data dir |
 
-DEB packages are built from `debian/` via `tools/build-deb.sh`; release workflow is
-documented in [RELEASE.md](RELEASE.md).
+DEB packages are built from `debian/` via `tools/build-deb.sh`; RPM from
+`rpm/tunes-player.spec` via `tools/build-rpm.sh` (`make deb` / `make rpm` /
+`make packages`). Release workflow is documented in [RELEASE.md](RELEASE.md).
 
 ---
 

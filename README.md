@@ -25,14 +25,22 @@
 
 ## Install
 
-On Debian 12+, Ubuntu 24.04+, or similar DEB-based distros, download the latest
-`tunes-player_*.deb` from [GitHub Releases](https://github.com/mbrennwa/tunes-player/releases), then:
+Download the latest package from
+[GitHub Releases](https://github.com/mbrennwa/tunes-player/releases).
+
+**Debian 12+ / Ubuntu 24.04+** (`tunes-player_*.deb`):
 
 ```bash
 sudo apt install ./path/to/tunes-player_*.deb
 ```
 
-`apt` installs dependencies automatically. After install, **Tunes** appears in the application menu.
+**Fedora** (and compatible dnf-based systems; `tunes-player-*-1.noarch.rpm`):
+
+```bash
+sudo dnf install ./path/to/tunes-player-*-1.noarch.rpm
+```
+
+`apt` / `dnf` install dependencies automatically. After install, **Tunes** appears in the application menu.
 
 Add music folders in **Settings → Sources**, and sign in to TIDAL or Qobuz to enable streaming. For **Qobuz**: enter an App ID and App Secret in Settings, then sign in with your account. Qobuz did not provide these to the Tunes project, but `ID=942852567` and `secret=761730d3f95e4af09ac63b9a37ccc96a` as used by other open-source tools works fine.
 

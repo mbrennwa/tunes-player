@@ -2,6 +2,10 @@ Build a tunes-player .deb package
 
 From the repository root:
 
+  make deb
+
+or:
+
   ./tools/build-deb.sh
 
 Version and dependencies are read from pyproject.toml ([project].version and
@@ -12,7 +16,14 @@ download tidalapi and its dependencies into wheels).
 
 Build machine prerequisites (Debian 12+ / Ubuntu 24.04+):
 
-  sudo apt install debhelper devscripts python3 python3-venv python3-pip
+  sudo apt install debhelper devscripts python3 python3-venv python3-pip librsvg2-bin
+
+On Fedora (local .deb builds with Fedora's dpkg/debhelper):
+
+  sudo dnf install dpkg-dev debhelper fakeroot devscripts librsvg2-tools python3-pip
+
+  tools/build-deb.sh passes dpkg-buildpackage -d so Fedora package names do not
+  need to match debian/control Build-Depends. Release CI still builds on Ubuntu.
 
 Install on a target system (apt pulls in [tool.deb].apt_depends automatically):
 
@@ -20,7 +31,8 @@ Install on a target system (apt pulls in [tool.deb].apt_depends automatically):
   tunes-player
 
 Published packages: push a tag v<version> (matching pyproject.toml); GitHub Actions
-uploads the .deb to https://github.com/mbrennwa/tunes-player/releases
+uploads the .deb (and .rpm) to https://github.com/mbrennwa/tunes-player/releases
 
 The package installs data/tunes.player.desktop and hicolor icons (generated from
-data/icons/tunes-player.svg at build time; requires librsvg2-bin on the build host).
+data/icons/tunes-player.svg at build time; requires librsvg2-bin / librsvg2-tools
+on the build host).

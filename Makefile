@@ -1,8 +1,11 @@
-# Tunes — build helpers (icons, system install)
+# Tunes — build helpers (icons, packages, system install)
 #
 # Usage:
 #   make icons              # Linux hicolor icons in build/icons/
 #   make icons-all          # Linux + macOS + Windows outputs
+#   make deb                # Build a .deb package (output in dist/)
+#   make rpm                # Build an .rpm package (output in dist/)
+#   make packages           # Build .deb and .rpm (requires both toolchains)
 #   sudo make install       # Install desktop entry and icons
 #   make uninstall          # Remove installed files
 
@@ -19,12 +22,15 @@ ICON_DEST := $(DESTDIR)$(PREFIX)/share/icons/hicolor
 DESKTOP_DEST := $(DESTDIR)$(PREFIX)/share/applications/$(DESKTOP_ID).desktop
 LEGACY_DESKTOP_DEST := $(DESTDIR)$(PREFIX)/share/applications/$(APP_ID).desktop
 
-.PHONY: icons icons-all install uninstall clean-icons help
+.PHONY: icons icons-all install uninstall clean-icons deb rpm packages help
 
 help:
 	@echo "Targets:"
 	@echo "  icons       Generate Linux hicolor icons (build/icons/)"
 	@echo "  icons-all   Generate Linux, macOS, and Windows icon outputs"
+	@echo "  deb         Build a .deb package (output in dist/)"
+	@echo "  rpm         Build an .rpm package (output in dist/)"
+	@echo "  packages    Build .deb and .rpm (requires both toolchains)"
 	@echo "  install     Install desktop entry and generated icons"
 	@echo "  uninstall   Remove installed desktop entry and icons"
 	@echo "  clean-icons Remove build/icons/"
@@ -34,6 +40,15 @@ icons:
 
 icons-all:
 	$(PYTHON) scripts/generate_icons.py --platform all
+
+deb:
+	./tools/build-deb.sh
+
+rpm:
+	./tools/build-rpm.sh
+
+packages:
+	./tools/build-packages.sh
 
 install: icons
 	install -Dm644 $(DESKTOP_SRC) $(DESKTOP_DEST)

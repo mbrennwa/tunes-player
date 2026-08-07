@@ -1,0 +1,37 @@
+Build a tunes-player .rpm package
+
+From the repository root:
+
+  make rpm
+
+or:
+
+  ./tools/build-rpm.sh
+
+Version and runtime dependencies are read from pyproject.toml ([project].version and
+[tool.rpm].dnf_requires). PyPI wheelhouse packages come from [tool.deb].pypi_wheelhouse
+(shared with the DEB build). Each build overwrites
+dist/tunes-player-<version>-1.noarch.rpm (Release is always 1; no dist tag in the
+filename).
+
+rpm/tunes-player.spec Version must match [project].version (update %%changelog when
+bumping).
+
+Build machine prerequisites (Fedora):
+
+  sudo dnf install rpm-build python3 python3-pip python3-setuptools librsvg2-tools
+
+The build machine needs network access when pip builds the wheelhouse (to download
+tidalapi / python-mpv and their dependencies into wheels).
+
+Install on a target system (dnf pulls in [tool.rpm].dnf_requires automatically):
+
+  sudo dnf install ./dist/tunes-player-1.0.0a1-1.noarch.rpm
+  tunes-player
+
+Published packages: push a tag v<version> (matching pyproject.toml); GitHub Actions
+uploads the .rpm to https://github.com/mbrennwa/tunes-player/releases alongside the .deb.
+
+The package installs data/tunes.player.desktop and hicolor launcher icons (generated
+from data/icons/tunes-player.svg at build time). Wrappers are shared with the DEB
+package (debian/wrapper/).
