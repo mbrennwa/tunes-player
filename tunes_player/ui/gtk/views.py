@@ -39,6 +39,7 @@ from tunes_player.ui.gtk.util import (
     format_track_number,
     join_detail,
     source_label,
+    tracks_have_mixed_artists,
 )
 
 _RELEASE_TILE_ART_PIXELS_SMALL = 384
@@ -497,6 +498,7 @@ class ReleaseDetailView(Gtk.Box):
             release.id,
             playback_preference=playback_preference_for_tier(tile_tier),
         )
+        show_artists = tracks_have_mixed_artists(tracks)
 
         art_frame = _square_art_with_play(
             release,
@@ -591,7 +593,7 @@ class ReleaseDetailView(Gtk.Box):
         scrolled.set_child(list_box)
 
         for index, track in enumerate(tracks):
-            row = _compact_track_row(track, index=index)
+            row = _compact_track_row(track, index=index, show_artist=show_artists)
             attach_track_save_menu(row, service=service, track=track)
             list_box.append(row)
 
@@ -624,7 +626,12 @@ class ReleaseDetailView(Gtk.Box):
         if unsubscribe is not None:
             unsubscribe()
 
-def _compact_track_row(track: Track, *, index: int) -> Gtk.ListBoxRow:
+def _compact_track_row(
+    track: Track,
+    *,
+    index: int,
+    show_artist: bool = False,
+) -> Gtk.ListBoxRow:
     row = Gtk.ListBoxRow()
     row.track_id = track.id
     row.set_activatable(True)
@@ -645,10 +652,24 @@ def _compact_track_row(track: Track, *, index: int) -> Gtk.ListBoxRow:
     box.append(num_label)
 
     title = Gtk.Label(label=track.title, xalign=0.0, ellipsize=3)
-    title.set_hexpand(True)
     title.set_halign(Gtk.Align.START)
-    title.set_valign(Gtk.Align.CENTER)
-    box.append(title)
+    if show_artist and track.artist_name:
+        title_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        title_col.set_hexpand(True)
+        title_col.set_halign(Gtk.Align.START)
+        title_col.set_valign(Gtk.Align.CENTER)
+        title.set_hexpand(True)
+        title_col.append(title)
+        artist = Gtk.Label(label=track.artist_name, xalign=0.0, ellipsize=3)
+        artist.add_css_class("dim-label")
+        artist.add_css_class("caption")
+        artist.set_halign(Gtk.Align.START)
+        title_col.append(artist)
+        box.append(title_col)
+    else:
+        title.set_hexpand(True)
+        title.set_valign(Gtk.Align.CENTER)
+        box.append(title)
 
     meta = Gtk.Label(
         label=join_detail(

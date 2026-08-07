@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import webbrowser
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from importlib import resources
 
 import gi
@@ -64,6 +64,12 @@ def format_track_number(track: Track, *, fallback: int | None = None) -> str | N
 def join_detail(*parts: str | None) -> str:
     """Join non-empty subtitle segments with middle dots."""
     return " · ".join(part for part in parts if part)
+
+
+def tracks_have_mixed_artists(tracks: Sequence[Track]) -> bool:
+    """True when track artists are not all the same (mixed-artist release)."""
+    artists = {t.artist_name for t in tracks if t.artist_name}
+    return len(artists) > 1
 
 
 def format_duration(seconds: float | None) -> str:
