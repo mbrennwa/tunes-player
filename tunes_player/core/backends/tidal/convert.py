@@ -18,7 +18,7 @@ from tunes_player.core.release_catalog import (
 )
 from tunes_player.core.release_quality import (
     classify_tidal_catalog,
-    peak_quality_tier_from_tiers,
+    max_quality_tier,
 )
 from tunes_player.core.models import (
     Release,
@@ -145,7 +145,7 @@ def release_from_tidal(
         tracks=tracks,
         supplemental_media_tags=supplemental_media_tags,
     )
-    peak_quality_tier = peak_quality_tier_from_tiers(available_quality_tiers)
+    peak_quality_tier = max_quality_tier(*available_quality_tiers) if available_quality_tiers else ""
     catalog_id = tidal_ids.album_id(album.id)
     return Release(
         id=catalog_id,
