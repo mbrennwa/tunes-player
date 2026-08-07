@@ -44,6 +44,7 @@ from tunes_player.core.library.scanner import ScanFileError
 from tunes_player.core.library.scan_process import terminate_orphan_library_scans
 from tunes_player.core.library.scan_worker import close_scan_queue, create_scan_process
 from tunes_player.core.models import Release, Source, Track
+from tunes_player.core.search_query import parse_search_query, release_matches_query
 from tunes_player.core.save_to_disk import (
     MAX_SAVE_CONCURRENCY,
     STATUS_COMPLETED,
@@ -126,13 +127,6 @@ _QUEUE_END_MARGIN_SEC = 1.0
 _UNSET_PLAYBACK_PREFERENCE = object()
 
 MainThreadHook: TypeAlias = Callable[[Callable[[], None]], None]
-
-
-def _artist_name_matches_query(query: str, artist_name: str) -> bool:
-    needle = query.strip().casefold()
-    if not needle:
-        return False
-    return needle in artist_name.casefold()
 
 
 @dataclass(frozen=True, slots=True)
@@ -663,15 +657,20 @@ class PlayerService:
         return self._store.get_release_tracks(resolved_id)
 
     def search(self, query: str, *, artists_only: bool = False) -> SearchResults:
-        needle = query.strip()
-        if not needle:
+        parsed = parse_search_query(query)
+        if not parsed.terms:
             return SearchResults(releases=[])
-        releases = self._store.search_releases(needle, artists_only=artists_only)
+        # Pass original stripped query so quoted phrases survive local parse.
+        local_query = query.strip()
+        plain = parsed.plain_query
+        releases = self._store.search_releases(local_query, artists_only=artists_only)
         seen = {release.id for release in releases}
         if self._tidal.is_logged_in():
             try:
-                for release in self._tidal.search_releases(needle):
-                    if artists_only and not _artist_name_matches_query(needle, release.artist_name):
+                for release in self._tidal.search_releases(plain):
+                    if not release_matches_query(
+                        release, parsed, artists_only=artists_only
+                    ):
                         continue
                     if release.id not in seen:
                         seen.add(release.id)
@@ -680,8 +679,10 @@ class PlayerService:
                 pass
         if self._qobuz.is_logged_in():
             try:
-                for release in self._qobuz.search_releases(needle):
-                    if artists_only and not _artist_name_matches_query(needle, release.artist_name):
+                for release in self._qobuz.search_releases(plain):
+                    if not release_matches_query(
+                        release, parsed, artists_only=artists_only
+                    ):
                         continue
                     if release.id not in seen:
                         seen.add(release.id)

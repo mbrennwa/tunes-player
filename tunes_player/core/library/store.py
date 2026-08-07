@@ -21,6 +21,7 @@ from tunes_player.core.home import (
 from tunes_player.core.library.db import connect, with_db_retry
 from tunes_player.core.library.release_logic import infer_release_metadata
 from tunes_player.core.models import Release, Source, Track
+from tunes_player.core.search_query import parse_search_query
 
 _RELEASE_GROUP_SELECT = """
     SELECT
@@ -371,57 +372,75 @@ class LibraryStore:
         limit: int = 50,
         artists_only: bool = False,
     ) -> list[Release]:
-        needle = f"%{query.strip()}%"
+        parsed = parse_search_query(query)
+        if not parsed.terms:
+            return []
 
         def search(connection: sqlite3.Connection) -> list[Release]:
-            release_ids: list[str] = []
-            seen: set[str] = set()
+            def ids_for_term(term_text: str) -> list[str]:
+                needle = f"%{term_text}%"
+                release_ids: list[str] = []
+                seen: set[str] = set()
 
-            def add_ids(rows: list[sqlite3.Row]) -> None:
-                for row in rows:
-                    release_id = str(row["release_id"])
-                    if release_id not in seen:
-                        seen.add(release_id)
-                        release_ids.append(release_id)
+                def add_ids(rows: list[sqlite3.Row]) -> None:
+                    for row in rows:
+                        release_id = str(row["release_id"])
+                        if release_id not in seen:
+                            seen.add(release_id)
+                            release_ids.append(release_id)
 
-            if artists_only:
-                add_ids(
-                    connection.execute(
-                        """
-                        SELECT DISTINCT t.album_id AS release_id
-                        FROM tracks t
-                        WHERE t.album_artist LIKE ? COLLATE NOCASE
-                        LIMIT ?
-                        """,
-                        (needle, limit),
-                    ).fetchall(),
-                )
-            else:
-                add_ids(
-                    connection.execute(
-                        f"""
-                        SELECT DISTINCT t.album_id AS release_id
-                        FROM tracks t
-                        WHERE t.album LIKE ? COLLATE NOCASE
-                           OR t.album_artist LIKE ? COLLATE NOCASE
-                        LIMIT ?
-                        """,
-                        (needle, needle, limit),
-                    ).fetchall(),
-                )
-                add_ids(
-                    connection.execute(
-                        """
-                        SELECT DISTINCT t.album_id AS release_id
-                        FROM tracks t
-                        WHERE t.title LIKE ? COLLATE NOCASE
-                           OR t.artist LIKE ? COLLATE NOCASE
-                        LIMIT ?
-                        """,
-                        (needle, needle, limit),
-                    ).fetchall(),
-                )
+                # Oversample per term so AND intersection is less likely to
+                # drop matches solely because an early LIMIT cut a candidate.
+                term_limit = max(limit * 4, limit)
+                if artists_only:
+                    add_ids(
+                        connection.execute(
+                            """
+                            SELECT DISTINCT t.album_id AS release_id
+                            FROM tracks t
+                            WHERE t.album_artist LIKE ? COLLATE NOCASE
+                            LIMIT ?
+                            """,
+                            (needle, term_limit),
+                        ).fetchall(),
+                    )
+                else:
+                    add_ids(
+                        connection.execute(
+                            """
+                            SELECT DISTINCT t.album_id AS release_id
+                            FROM tracks t
+                            WHERE t.album LIKE ? COLLATE NOCASE
+                               OR t.album_artist LIKE ? COLLATE NOCASE
+                            LIMIT ?
+                            """,
+                            (needle, needle, term_limit),
+                        ).fetchall(),
+                    )
+                    add_ids(
+                        connection.execute(
+                            """
+                            SELECT DISTINCT t.album_id AS release_id
+                            FROM tracks t
+                            WHERE t.title LIKE ? COLLATE NOCASE
+                               OR t.artist LIKE ? COLLATE NOCASE
+                            LIMIT ?
+                            """,
+                            (needle, needle, term_limit),
+                        ).fetchall(),
+                    )
+                return release_ids
 
+            term_id_lists = [ids_for_term(term.text) for term in parsed.terms]
+            if not term_id_lists or not term_id_lists[0]:
+                return []
+            required = set(term_id_lists[0])
+            for other in term_id_lists[1:]:
+                required &= set(other)
+                if not required:
+                    return []
+            # Preserve first-term hit order, then apply limit.
+            release_ids = [rid for rid in term_id_lists[0] if rid in required][:limit]
             if not release_ids:
                 return []
 
