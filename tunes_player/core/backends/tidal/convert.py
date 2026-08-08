@@ -5,10 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from tunes_player.core.backends.tidal import ids as tidal_ids
-from tunes_player.core.library.release_logic import (
-    infer_release_completeness,
-    release_type_from_metadata,
-)
+from tunes_player.core.library.release_logic import infer_release_metadata
 from tunes_player.core.release_catalog import (
     genre_from_tidal_album,
     media_tags_from_tidal_openapi_payload,
@@ -81,15 +78,12 @@ def _release_common_fields(
         year = album.release_date.year
     expected = int(album.num_tracks or 0) or None
     track_count = owned_track_count if owned_track_count is not None else (expected or 0)
-    completeness, expected = infer_release_completeness(
+    completeness, release_type, expected = infer_release_metadata(
         track_count=track_count,
         is_synthetic=False,
         total_tracks_tag=expected,
         max_track_number=None,
-    )
-    release_type = release_type_from_metadata(
-        _resolve_tidal_release_type(session, album),
-        is_synthetic=False,
+        release_type_tag=_resolve_tidal_release_type(session, album),
     )
     art_uri = _album_art(session, album)
     return artist_name, year, expected, track_count, completeness, release_type, art_uri
