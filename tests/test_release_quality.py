@@ -13,6 +13,7 @@ from tunes_player.core.release_quality import (
     PlaybackPreference,
     acoustic_tier_from_lossless,
     acoustic_tier_from_stream,
+    catalog_quality_label_for_release,
     classify_local_catalog,
     classify_qobuz_catalog,
     classify_tidal_catalog,
@@ -122,6 +123,7 @@ class ReleaseQualityTests(unittest.TestCase):
         )
 
     def test_tidal_album_measured_cd_rate_stays_cd_despite_hires_tags(self) -> None:
+        """HIRES tags must not invent a second tier when peak rate is 44.1 (#147)."""
         album = SimpleNamespace(
             audio_quality="HI_RES_LOSSLESS",
             media_metadata_tags=["HIRES_LOSSLESS"],
@@ -129,7 +131,37 @@ class ReleaseQualityTests(unittest.TestCase):
             sample_rate=44_100,
         )
         tiers = classify_tidal_catalog(album)
-        self.assertIn(QUALITY_FILTER_CD, tiers)
+        self.assertEqual(tiers, frozenset({QUALITY_FILTER_CD}))
+        self.assertEqual(tier_from_tidal_album(album), QUALITY_FILTER_CD)
+
+    def test_tidal_album_hires_tags_plus_cd_rate_no_duplicate_tile(self) -> None:
+        from tunes_player.core.release_quality_tiles import expand_releases_by_quality_tier
+        from tunes_player.core.models import Release, Source
+
+        album = SimpleNamespace(
+            audio_quality="HI_RES_LOSSLESS",
+            media_metadata_tags=["LOSSLESS", "HIRES_LOSSLESS"],
+            audio_modes=["STEREO"],
+            sample_rate=44_100,
+            bit_depth=24,
+        )
+        tiers = classify_tidal_catalog(album)
+        release = Release(
+            id="tidal:album:man-down",
+            title="MAN DOWN",
+            artist_name="B Young",
+            source=Source.TIDAL,
+            track_count=1,
+            peak_quality_tier=QUALITY_FILTER_CD,
+            available_quality_tiers=tiers,
+            catalog_quality_ready=True,
+            catalog_release_id="tidal:album:man-down",
+            peak_sample_rate_hz=44_100,
+            peak_bit_depth=24,
+        )
+        expanded = expand_releases_by_quality_tier([release])
+        self.assertEqual(len(expanded), 1)
+        self.assertEqual(catalog_quality_label_for_release(expanded[0]), "44.1/24")
 
     def test_tidal_album_without_metadata_has_no_tier(self) -> None:
         album = SimpleNamespace(audio_quality="", media_metadata_tags=None, audio_modes=[])
@@ -150,13 +182,32 @@ class ReleaseQualityTests(unittest.TestCase):
         )
         self.assertEqual(tier_from_tidal_album(album), QUALITY_FILTER_CD)
 
-    def test_tidal_album_audio_modes_dual_format(self) -> None:
+    def test_tidal_album_audio_modes_alone_do_not_promote_hi_res(self) -> None:
+        """HI_RES audio_modes without rate/tags is not hi-res catalog evidence (#147)."""
         album = SimpleNamespace(
             audio_quality="LOSSLESS",
             media_metadata_tags=None,
             audio_modes=["HI_RES_LOSSLESS"],
         )
+        self.assertEqual(tier_from_tidal_album(album), QUALITY_FILTER_CD)
+        self.assertEqual(
+            classify_tidal_catalog(album),
+            frozenset({QUALITY_FILTER_CD}),
+        )
+
+    def test_tidal_album_hi_res_rate_with_modes_classifies_hi_res(self) -> None:
+        album = SimpleNamespace(
+            audio_quality="LOSSLESS",
+            media_metadata_tags=None,
+            audio_modes=["HI_RES_LOSSLESS"],
+            sample_rate=96_000,
+            bit_depth=24,
+        )
         self.assertEqual(tier_from_tidal_album(album), QUALITY_FILTER_HI_RES)
+        self.assertEqual(
+            classify_tidal_catalog(album),
+            frozenset({QUALITY_FILTER_HI_RES}),
+        )
 
     def test_tidal_hi_res_edition_uses_media_tags(self) -> None:
         """Separate hi-res catalog IDs expose HIRES_LOSSLESS in media tags."""

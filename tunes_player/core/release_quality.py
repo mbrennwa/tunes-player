@@ -172,14 +172,6 @@ def tier_from_tidal_track(track: object) -> str:
         return ""
     return tier_from_tidal_peak(track_peak_quality(track))
 
-def _tidal_album_has_hi_res_mode(album: object) -> bool:
-    audio_modes = getattr(album, "audio_modes", None) or []
-    for mode in audio_modes:
-        key = str(mode).upper().replace(" ", "_")
-        if "HI_RES" in key or "HIRES" in key:
-            return True
-    return False
-
 _HI_RES_MEDIA_TAGS = frozenset({"HIRES_LOSSLESS", "HI_RES_LOSSLESS"})
 
 def _tidal_media_tag_set(
@@ -286,8 +278,13 @@ def _collect_tidal_album_tier_signals(
     peak = _tidal_acoustic_peak_tier(album, supplemental_tags=tags if tags else None)
     if peak in _VALID_QUALITY_FILTERS:
         signals.add(peak)
-    if _tidal_album_has_hi_res_mode(album) and QUALITY_FILTER_CD in signals:
-        signals.add(QUALITY_FILTER_HI_RES)
+    # Measured rate wins over HIRES tags/API labels (#147). A 44.1 kHz peak
+    # must not keep a phantom hi_res tier (unlabeled duplicate tile).
+    rate_hz = _tidal_album_sample_rate_hz(album)
+    if rate_hz > 0 and not is_acoustic_hi_res(rate_hz):
+        signals.discard(QUALITY_FILTER_HI_RES)
+        if rate_hz == _CD_SAMPLE_RATE_HZ:
+            signals.add(QUALITY_FILTER_CD)
     return {tier for tier in signals if tier in _VALID_QUALITY_FILTERS}
 
 def classify_tidal_catalog(
@@ -308,6 +305,11 @@ def classify_tidal_catalog(
             tier = tier_from_tidal_track(track)
             if tier in _VALID_QUALITY_FILTERS:
                 tiers.add(tier)
+    rate_hz = _tidal_album_sample_rate_hz(album)
+    if rate_hz > 0 and not is_acoustic_hi_res(rate_hz):
+        tiers.discard(QUALITY_FILTER_HI_RES)
+        if rate_hz == _CD_SAMPLE_RATE_HZ:
+            tiers.add(QUALITY_FILTER_CD)
     return frozenset(tiers)
 
 def tier_from_tidal_album(album: object) -> str:
@@ -464,24 +466,48 @@ def playback_preference_for_tier(tier: str) -> PlaybackPreference:
     return PlaybackPreference(QUALITY_FILTER_HI_RES)
 
 def catalog_quality_label_for_release(release: Release) -> str | None:
-    """Human-readable catalog quality for grid tiles and release detail."""
+    """Human-readable catalog quality for grid tiles and release detail.
+
+    Labels follow measured rate/depth (acoustic truth), not marketing tier
+    names. A claimed hi_res row with a 44.1 kHz peak must show ``44.1/…``,
+    never a blank quality segment (#147).
+    """
     from tunes_player.core.playback_quality import catalog_tile_quality_label
     from tunes_player.core.release_quality_tiles import (
         parse_quality_tier_suffix,
         tier_sample_metadata,
     )
 
-    tier = (
+    claimed = (
         release.quality_tier
         or parse_quality_tier_suffix(release.id)
         or release.peak_quality_tier
     )
-    if not tier and len(release.available_quality_tiers) == 1:
-        tier = next(iter(release.available_quality_tiers))
-    if tier:
-        depth, rate_hz = tier_sample_metadata(release, tier)
-    else:
-        depth, rate_hz = release.peak_bit_depth, release.peak_sample_rate_hz
+    if not claimed and len(release.available_quality_tiers) == 1:
+        claimed = next(iter(release.available_quality_tiers))
+
+    depth: int | None = None
+    rate_hz: int | None = None
+    if claimed:
+        depth, rate_hz = tier_sample_metadata(release, claimed)
+    if rate_hz is None or rate_hz <= 0:
+        depth = release.peak_bit_depth
+        rate_hz = release.peak_sample_rate_hz
+
+    tier = claimed
+    if (
+        claimed != QUALITY_FILTER_COMPRESSED
+        and rate_hz is not None
+        and rate_hz > 0
+    ):
+        # Prefer acoustics over a mismatched marketing tier for the label.
+        tier = acoustic_tier_from_lossless(
+            bit_depth=depth or 16,
+            sample_rate_hz=rate_hz,
+        )
+    elif not tier:
+        tier = ""
+
     return catalog_tile_quality_label(
         bit_depth=depth,
         sample_rate_hz=rate_hz,

@@ -113,6 +113,21 @@ class PlaybackQualityTests(unittest.TestCase):
         )
         self.assertEqual(catalog_quality_label_for_release(release), "192/24")
 
+    def test_catalog_quality_label_hi_res_claim_with_cd_rate_uses_acoustics(self) -> None:
+        """Marketing hi_res + 44.1/24 peak must label as 44.1/24, not blank (#147)."""
+        release = Release(
+            id="tidal:album:man-down@hi_res",
+            title="MAN DOWN",
+            artist_name="B Young",
+            source=Source.TIDAL,
+            quality_tier=QUALITY_FILTER_HI_RES,
+            peak_quality_tier=QUALITY_FILTER_HI_RES,
+            available_quality_tiers=frozenset({QUALITY_FILTER_HI_RES}),
+            peak_bit_depth=24,
+            peak_sample_rate_hz=44_100,
+        )
+        self.assertEqual(catalog_quality_label_for_release(release), "44.1/24")
+
     def test_lossless_flac(self) -> None:
         meta = FileMetadata(
             path="/a.flac",

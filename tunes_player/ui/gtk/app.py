@@ -18,7 +18,10 @@ from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.logging_config import configure_logging
 from tunes_player.core.models import Release, Source
-from tunes_player.core.release_quality_tiles import parse_catalog_release_id
+from tunes_player.core.release_quality_tiles import (
+    collapse_expanded_releases_to_catalog,
+    parse_catalog_release_id,
+)
 from tunes_player.core.release_quality import streaming_catalog_quality_needs_enrich
 from tunes_player.core.services import PlayerService
 from tunes_player.core.shell_state import (
@@ -1221,22 +1224,26 @@ class TunesWindow(Adw.ApplicationWindow):
             return False
         catalog_id = enriched.catalog_release_id or enriched.id
         catalog_releases: dict[str, Release] = {}
-        patched = False
-        for release in self._cached_releases:
+        order: list[str] = []
+        for release in collapse_expanded_releases_to_catalog(self._cached_releases):
             release_catalog_id = (
                 release.catalog_release_id
                 or parse_catalog_release_id(release.id)
                 or release.id
             )
-            if release_catalog_id == catalog_id:
-                catalog_releases[catalog_id] = enriched
-                patched = True
-            elif release_catalog_id not in catalog_releases:
-                catalog_releases[release_catalog_id] = release
-        if not patched:
-            catalog_releases[catalog_id] = enriched
+            if release_catalog_id not in catalog_releases:
+                order.append(release_catalog_id)
+            catalog_releases[release_catalog_id] = release
+        catalog_releases[catalog_id] = replace(
+            enriched,
+            id=catalog_id,
+            catalog_release_id=catalog_id,
+            quality_tier="",
+        )
+        if catalog_id not in order:
+            order.append(catalog_id)
         self._cached_releases = self._service.expand_releases_with_cache(
-            list(catalog_releases.values()),
+            [catalog_releases[item_id] for item_id in order],
         )
         return False
 
@@ -1247,17 +1254,8 @@ class TunesWindow(Adw.ApplicationWindow):
     ) -> bool:
         if token != self._load_token:
             return False
-        catalog_releases: dict[str, Release] = {}
-        for release in self._cached_releases:
-            catalog_id = (
-                release.catalog_release_id
-                or parse_catalog_release_id(release.id)
-                or release.id
-            )
-            if catalog_id not in catalog_releases:
-                catalog_releases[catalog_id] = release
         self._cached_releases = self._service.expand_releases_with_cache(
-            list(catalog_releases.values()),
+            collapse_expanded_releases_to_catalog(self._cached_releases),
         )
         self._sync_quality_filter()
         visible_ids_after = tuple(

@@ -13,6 +13,7 @@ from tunes_player.core.release_quality import (
     _VALID_QUALITY_FILTERS,
     acoustic_tier_from_lossless,
     is_acoustic_hi_res,
+    peak_quality_tier_from_tiers,
 )
 
 _TIER_SUFFIX_RE = re.compile(r"@(compressed|cd|hi_res)$")
@@ -72,10 +73,21 @@ def _tiers_for_expansion(release: Release) -> frozenset[str]:
         return frozenset()
     tiers = release.available_quality_tiers
     if tiers:
-        return frozenset(tier for tier in tiers if tier in _VALID_QUALITY_FILTERS)
-    if release.peak_quality_tier in _VALID_QUALITY_FILTERS:
-        return frozenset({release.peak_quality_tier})
-    return frozenset()
+        tiers = frozenset(tier for tier in tiers if tier in _VALID_QUALITY_FILTERS)
+    elif release.peak_quality_tier in _VALID_QUALITY_FILTERS:
+        tiers = frozenset({release.peak_quality_tier})
+    else:
+        return frozenset()
+    # Measured non-hi-res peak must not emit a hollow hi_res sibling (#147).
+    rate_hz = release.peak_sample_rate_hz
+    if (
+        QUALITY_FILTER_HI_RES in tiers
+        and rate_hz is not None
+        and rate_hz > 0
+        and not is_acoustic_hi_res(rate_hz)
+    ):
+        tiers = frozenset(tier for tier in tiers if tier != QUALITY_FILTER_HI_RES)
+    return tiers
 
 
 def _effective_bit_depth(depth: int | None, *, rate_hz: int) -> int:
@@ -96,6 +108,13 @@ def _bit_depth_sample_rate_for_tier(
             sample_rate_hz=rate_hz,
         )
         if acoustic == tier:
+            return _effective_bit_depth(depth, rate_hz=rate_hz), rate_hz
+        # Dual-format CD tile under a hi-res peak: synthetic CD display.
+        if tier == QUALITY_FILTER_CD:
+            return 16, 44_100
+        # Claimed hi_res but measured peak is not: keep acoustics for the label
+        # (#147). Do not blank rate/depth and leave the tile unlabeled.
+        if tier == QUALITY_FILTER_HI_RES and acoustic != QUALITY_FILTER_HI_RES:
             return _effective_bit_depth(depth, rate_hz=rate_hz), rate_hz
     if tier == QUALITY_FILTER_CD:
         return 16, 44_100
@@ -148,6 +167,77 @@ def expand_releases_by_quality_tier(releases: list[Release]) -> list[Release]:
         else:
             for tier in ordered:
                 output.append(_tile_for_tier(release, tier, catalog_id=catalog_id))
+    return output
+
+
+def collapse_expanded_releases_to_catalog(releases: list[Release]) -> list[Release]:
+    """Merge quality-tier tiles back to one catalog row per release (full tiers).
+
+    Expanded tiles store ``available_quality_tiers`` as a singleton. Collapsing by
+    first-seen tile alone would drop sibling tiers on re-expand (#147).
+    """
+    if not releases:
+        return []
+
+    groups: dict[str, list[Release]] = {}
+    order: list[str] = []
+    for release in releases:
+        catalog_id = _catalog_id_for_release(release) or release.id
+        if catalog_id not in groups:
+            groups[catalog_id] = []
+            order.append(catalog_id)
+        groups[catalog_id].append(release)
+
+    output: list[Release] = []
+    for catalog_id in order:
+        siblings = groups[catalog_id]
+        base = siblings[0]
+        for sibling in siblings:
+            if len(sibling.available_quality_tiers) > 1:
+                base = sibling
+                break
+
+        tiers: set[str] = set()
+        peak_rate: int | None = None
+        peak_depth: int | None = None
+        ready = False
+        for sibling in siblings:
+            ready = ready or sibling.catalog_quality_ready
+            tiers.update(
+                tier
+                for tier in sibling.available_quality_tiers
+                if tier in _VALID_QUALITY_FILTERS
+            )
+            if sibling.quality_tier in _VALID_QUALITY_FILTERS:
+                tiers.add(sibling.quality_tier)
+            if sibling.peak_quality_tier in _VALID_QUALITY_FILTERS:
+                tiers.add(sibling.peak_quality_tier)
+            suffix = parse_quality_tier_suffix(sibling.id)
+            if suffix is not None:
+                tiers.add(suffix)
+            rate = sibling.peak_sample_rate_hz
+            if rate is not None and rate > 0 and (peak_rate is None or rate > peak_rate):
+                peak_rate = rate
+                peak_depth = sibling.peak_bit_depth
+
+        available = frozenset(tiers)
+        output.append(
+            replace(
+                base,
+                id=catalog_id,
+                catalog_release_id=catalog_id,
+                quality_tier="",
+                available_quality_tiers=available,
+                peak_quality_tier=peak_quality_tier_from_tiers(available),
+                peak_sample_rate_hz=(
+                    peak_rate if peak_rate is not None else base.peak_sample_rate_hz
+                ),
+                peak_bit_depth=(
+                    peak_depth if peak_rate is not None else base.peak_bit_depth
+                ),
+                catalog_quality_ready=ready or base.catalog_quality_ready,
+            ),
+        )
     return output
 
 

@@ -60,6 +60,7 @@ from tunes_player.core.release_quality import (
     playback_preference_from_shell,
 )
 from tunes_player.core.release_quality_tiles import (
+    collapse_expanded_releases_to_catalog,
     expand_releases_by_quality_tier,
     parse_catalog_release_id,
     parse_quality_tier_suffix,
@@ -546,9 +547,10 @@ class PlayerService:
         self._release_summaries[release.id] = release
 
     def expand_releases_with_cache(self, releases: list[Release]) -> list[Release]:
-        for release in releases:
+        collapsed = collapse_expanded_releases_to_catalog(releases)
+        for release in collapsed:
             self.cache_release_summary(release)
-        expanded = expand_releases_by_quality_tier(releases)
+        expanded = expand_releases_by_quality_tier(collapsed)
         for release in expanded:
             self.cache_release_summary(release)
         return expanded
