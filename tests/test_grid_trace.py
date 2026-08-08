@@ -33,8 +33,8 @@ class GridTraceTests(unittest.TestCase):
 
     def test_log_show_grid_marks_spurious_same_ids(self) -> None:
         ids = ("a", "b", "c")
-        previous = ("All Local", ids, None)
-        fingerprint = ("All Local", ids, None)
+        previous = ("Local", ids, None)
+        fingerprint = ("Local", ids, None)
         with mock.patch.dict(os.environ, {"TUNES_GRID_TRACE": "1"}):
             with self.assertLogs("tunes_player.core.grid_trace", level="INFO") as cm:
                 log_show_grid_decision(

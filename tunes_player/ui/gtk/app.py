@@ -81,7 +81,7 @@ _ONBOARDING_MESSAGE = (
 _PRESET_LABELS = {
     ShellBase.NEW_MUSIC: "New Releases",
     ShellBase.SUGGESTION: "Suggest Music",
-    ShellBase.ALL_LOCAL: "All Local",
+    ShellBase.ALL_LOCAL: "Local",
     ShellBase.LABELLED: "Labelled",
 }
 _LOADING_MESSAGES = {
@@ -283,7 +283,7 @@ class TunesWindow(Adw.ApplicationWindow):
         self._labelled_btn.connect("toggled", self._on_labelled_toggled)
         search_row.append(self._labelled_btn)
 
-        self._all_local_btn = Gtk.ToggleButton(label="All Local")
+        self._all_local_btn = Gtk.ToggleButton(label="Local")
         self._all_local_btn.add_css_class("shell-preset-btn")
         self._all_local_btn.connect("toggled", self._on_all_local_toggled)
         search_row.append(self._all_local_btn)
@@ -1304,7 +1304,7 @@ class TunesWindow(Adw.ApplicationWindow):
         if request.base == ShellBase.ALL_LOCAL:
             return (
                 "Could not load your local library.",
-                "Could not load All Local. Try again in a moment.",
+                "Could not load Local. Try again in a moment.",
             )
         if request.base == ShellBase.LABELLED:
             return (
