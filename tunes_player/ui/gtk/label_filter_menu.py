@@ -35,7 +35,7 @@ class LabelFilterMenu(Gtk.Box):
     """Heading plus menu button; popover holds searchable checkmark list."""
 
     def __init__(self, *, on_changed: EnabledLabelsChanged | None = None) -> None:
-        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.add_css_class("genre-filter-row")
         self.add_css_class("shell-source-multi")
         self.set_valign(Gtk.Align.CENTER)
@@ -55,7 +55,6 @@ class LabelFilterMenu(Gtk.Box):
         heading.set_halign(Gtk.Align.START)
         heading.set_valign(Gtk.Align.CENTER)
         heading.set_hexpand(False)
-        heading.set_margin_end(0)
         self.append(heading)
 
         self._menu_label = Gtk.Label(label="All labels")
