@@ -34,8 +34,6 @@ from tunes_player.core.shell_state import (
     prune_enabled_sources,
     refresh_local_peak_quality_tiers,
     genres_in_selection,
-    prune_enabled_genres,
-    prune_enabled_labels,
     labels_in_selection,
     release_to_cache_payload,
     releases_from_cache_payloads,
@@ -502,10 +500,10 @@ class TunesWindow(Adw.ApplicationWindow):
         if identity_changed and clear_selection_history:
             self._clear_selection_history()
         if identity_changed and not restoring_history:
+            # Keep genre/label/quality sticky across views (#149); only drop the
+            # cached catalog (and reset sort) for the new selection identity.
             state = replace(
                 state,
-                enabled_genres=frozenset(),
-                enabled_labels=frozenset(),
                 sort_key=None,
                 cached_releases=(),
             )
@@ -584,20 +582,6 @@ class TunesWindow(Adw.ApplicationWindow):
             self._sort_switch.set_sort_state(sort_key, sort_descending)
         self._schedule_persist()
         self._display_cached_selection(reason="sort_changed")
-
-    def _prune_shell_filter_attr(
-        self,
-        *,
-        attr: str,
-        available: object,
-        prune: object,
-    ) -> None:
-        """Prune a shell filter frozenset attr against *available* (in place on state)."""
-        state = self._shell_state
-        current = getattr(state, attr)
-        pruned = prune(current, available)  # type: ignore[operator]
-        if pruned != current:
-            self._shell_state = replace(state, **{attr: pruned})
 
     def _set_shell_filter_selection(
         self,
@@ -691,13 +675,9 @@ class TunesWindow(Adw.ApplicationWindow):
         return self._shell_state.enabled_quality_tiers
 
     def _sync_genre_filter(self) -> None:
+        # Do not prune enabled_genres against the current grid (#149 Step 2).
         available = genres_in_selection(self._cached_releases)
         show = bool(self._cached_releases)
-        self._prune_shell_filter_attr(
-            attr="enabled_genres",
-            available=available,
-            prune=prune_enabled_genres,
-        )
         state = self._shell_state
 
         self._genre_filter_slot.set_visible(show)
@@ -726,15 +706,11 @@ class TunesWindow(Adw.ApplicationWindow):
         )
 
     def _sync_label_filter(self) -> None:
+        # Do not prune enabled_labels against the current grid (#149 Step 2).
         labels_by_id = self._labels_by_id_for(self._cached_releases)
         available = labels_in_selection(self._cached_releases, labels_by_id)
-        show = bool(self._cached_releases) and bool(available)
-        self._prune_shell_filter_attr(
-            attr="enabled_labels",
-            available=available,
-            prune=prune_enabled_labels,
-        )
         state = self._shell_state
+        show = bool(available) or bool(state.enabled_labels)
 
         self._label_filter_slot.set_visible(show)
         if not show:

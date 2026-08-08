@@ -647,6 +647,16 @@ def prune_enabled_labels(
     return frozenset(label for label in enabled_labels if label in available)
 
 
+def orphan_enabled_filter_values(
+    enabled: frozenset[str],
+    available: tuple[str, ...] | frozenset[str],
+) -> tuple[str, ...]:
+    """Enabled filter values missing from *available*, sorted case-insensitively."""
+    available_set = frozenset(available)
+    orphans = [value for value in enabled if value not in available_set]
+    return tuple(sorted(orphans, key=lambda item: item.casefold()))
+
+
 def labels_in_selection(
     releases: list[Release] | tuple[Release, ...],
     labels_by_id: dict[str, frozenset[str]],

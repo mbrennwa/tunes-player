@@ -10,6 +10,8 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Gtk  # noqa: E402
 
+from tunes_player.core.shell_state import orphan_enabled_filter_values
+
 EnabledGenresChanged = Callable[[frozenset[str]], None]
 
 _SEARCH_MIN_GENRES = 5
@@ -25,6 +27,7 @@ _GENRE_ROW_HEIGHT = 32
 _MENU_BTN_HEIGHT = 18
 _LIST_WIDTH = 240
 _WINDOW_HEIGHT_FRACTION = 0.65
+_ORPHAN_SECTION_LABEL = "Not in this view"
 
 
 def genre_filter_list_max_height(
@@ -57,6 +60,8 @@ class GenreFilterMenu(Gtk.Box):
         self._on_changed = on_changed
         self._updating = False
         self._genres: tuple[str, ...] = ()
+        self._orphan_values: tuple[str, ...] = ()
+        self._orphan_header_row: Gtk.ListBoxRow | None = None
         self._checks: dict[str, Gtk.CheckButton] = {}
         self._rows: dict[str, Gtk.ListBoxRow] = {}
 
@@ -132,18 +137,21 @@ class GenreFilterMenu(Gtk.Box):
         enabled_genres: frozenset[str],
     ) -> None:
         self._genres = genres
-        self._rebuild_list()
+        self._rebuild_list(enabled_genres)
         self.set_enabled_genres(enabled_genres)
         self._update_search_visibility()
 
     def _update_search_visibility(self) -> None:
-        show_search = len(self._genres) >= _SEARCH_MIN_GENRES
+        show_search = (len(self._genres) + len(self._orphan_values)) >= _SEARCH_MIN_GENRES
         self._search_entry.set_visible(show_search)
         if not show_search:
             self._search_entry.set_text("")
             self._apply_search_filter("")
 
     def set_enabled_genres(self, enabled_genres: frozenset[str]) -> None:
+        orphans = orphan_enabled_filter_values(enabled_genres, self._genres)
+        if orphans != self._orphan_values:
+            self._rebuild_list(enabled_genres)
         self._updating = True
         try:
             for genre, check in self._checks.items():
@@ -157,7 +165,21 @@ class GenreFilterMenu(Gtk.Box):
             genre for genre, check in self._checks.items() if check.get_active()
         )
 
-    def _rebuild_list(self) -> None:
+    def _append_check_row(self, value: str) -> None:
+        check = Gtk.CheckButton(label=value)
+        check.set_margin_start(2)
+        check.set_margin_end(2)
+        check.set_margin_top(1)
+        check.set_margin_bottom(1)
+        check.connect("toggled", self._on_check_toggled)
+
+        row = Gtk.ListBoxRow()
+        row.set_child(check)
+        self._list.append(row)
+        self._checks[value] = check
+        self._rows[value] = row
+
+    def _rebuild_list(self, enabled_genres: frozenset[str]) -> None:
         child = self._list.get_first_child()
         while child is not None:
             next_child = child.get_next_sibling()
@@ -165,25 +187,34 @@ class GenreFilterMenu(Gtk.Box):
             child = next_child
         self._checks.clear()
         self._rows.clear()
+        self._orphan_header_row = None
+        self._orphan_values = orphan_enabled_filter_values(enabled_genres, self._genres)
+
+        if self._orphan_values:
+            header = Gtk.Label(label=_ORPHAN_SECTION_LABEL, xalign=0.0)
+            header.add_css_class("genre-filter-orphan-header")
+            header.set_margin_start(2)
+            header.set_margin_end(2)
+            header.set_margin_top(2)
+            header.set_margin_bottom(2)
+            header_row = Gtk.ListBoxRow()
+            header_row.set_child(header)
+            header_row.set_activatable(False)
+            header_row.set_selectable(False)
+            self._list.append(header_row)
+            self._orphan_header_row = header_row
+            for orphan in self._orphan_values:
+                self._append_check_row(orphan)
 
         for genre in self._genres:
-            check = Gtk.CheckButton(label=genre)
-            check.set_margin_start(2)
-            check.set_margin_end(2)
-            check.set_margin_top(1)
-            check.set_margin_bottom(1)
-            check.connect("toggled", self._on_check_toggled)
-
-            row = Gtk.ListBoxRow()
-            row.set_child(check)
-            self._list.append(row)
-            self._checks[genre] = check
-            self._rows[genre] = row
+            self._append_check_row(genre)
 
     def _update_menu_label(self, enabled_genres: frozenset[str]) -> None:
         if not enabled_genres:
             self._menu_label.set_label("All genres")
+            self._menu_btn.remove_css_class("shell-filter-active")
             return
+        self._menu_btn.add_css_class("shell-filter-active")
         ordered = sorted(enabled_genres, key=lambda item: item.casefold())
         if len(ordered) == 1:
             self._menu_label.set_label(ordered[0])
@@ -202,9 +233,12 @@ class GenreFilterMenu(Gtk.Box):
         return _GENRE_ROW_HEIGHT
 
     def _list_natural_height(self) -> int:
-        if not self._genres:
+        count = len(self._genres) + len(self._orphan_values)
+        if self._orphan_values:
+            count += 1
+        if count <= 0:
             return 0
-        return len(self._genres) * self._row_height()
+        return count * self._row_height()
 
     def _popover_chrome_height(self) -> int:
         chrome = _POPOVER_BOX_MARGIN_VERTICAL + _POPOVER_CSS_PADDING_VERTICAL
@@ -296,3 +330,10 @@ class GenreFilterMenu(Gtk.Box):
         for genre, row in self._rows.items():
             visible = not needle or needle in genre.casefold()
             row.set_visible(visible)
+        if self._orphan_header_row is not None:
+            any_orphan_visible = any(
+                self._rows[value].get_visible()
+                for value in self._orphan_values
+                if value in self._rows
+            )
+            self._orphan_header_row.set_visible(any_orphan_visible)

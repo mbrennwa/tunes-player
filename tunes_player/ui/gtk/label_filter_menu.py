@@ -10,6 +10,7 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Gtk  # noqa: E402
 
+from tunes_player.core.shell_state import orphan_enabled_filter_values
 from tunes_player.ui.gtk.genre_filter_menu import genre_filter_list_max_height
 
 EnabledLabelsChanged = Callable[[frozenset[str]], None]
@@ -27,6 +28,7 @@ _LABEL_ROW_HEIGHT = 32
 _MENU_BTN_HEIGHT = 18
 _LIST_WIDTH = 240
 _WINDOW_HEIGHT_FRACTION = 0.65
+_ORPHAN_SECTION_LABEL = "Not in this view"
 
 
 class LabelFilterMenu(Gtk.Box):
@@ -43,6 +45,8 @@ class LabelFilterMenu(Gtk.Box):
         self._on_changed = on_changed
         self._updating = False
         self._labels: tuple[str, ...] = ()
+        self._orphan_values: tuple[str, ...] = ()
+        self._orphan_header_row: Gtk.ListBoxRow | None = None
         self._checks: dict[str, Gtk.CheckButton] = {}
         self._rows: dict[str, Gtk.ListBoxRow] = {}
 
@@ -117,11 +121,14 @@ class LabelFilterMenu(Gtk.Box):
         enabled_labels: frozenset[str],
     ) -> None:
         self._labels = labels
-        self._rebuild_list()
+        self._rebuild_list(enabled_labels)
         self.set_enabled_labels(enabled_labels)
         self._update_search_visibility()
 
     def set_enabled_labels(self, enabled_labels: frozenset[str]) -> None:
+        orphans = orphan_enabled_filter_values(enabled_labels, self._labels)
+        if orphans != self._orphan_values:
+            self._rebuild_list(enabled_labels)
         self._updating = True
         try:
             for label, check in self._checks.items():
@@ -135,7 +142,21 @@ class LabelFilterMenu(Gtk.Box):
             label for label, check in self._checks.items() if check.get_active()
         )
 
-    def _rebuild_list(self) -> None:
+    def _append_check_row(self, value: str) -> None:
+        check = Gtk.CheckButton(label=value)
+        check.set_margin_start(2)
+        check.set_margin_end(2)
+        check.set_margin_top(1)
+        check.set_margin_bottom(1)
+        check.connect("toggled", self._on_check_toggled)
+
+        row = Gtk.ListBoxRow()
+        row.set_child(check)
+        self._list.append(row)
+        self._checks[value] = check
+        self._rows[value] = row
+
+    def _rebuild_list(self, enabled_labels: frozenset[str]) -> None:
         child = self._list.get_first_child()
         while child is not None:
             next_child = child.get_next_sibling()
@@ -143,23 +164,30 @@ class LabelFilterMenu(Gtk.Box):
             child = next_child
         self._checks.clear()
         self._rows.clear()
+        self._orphan_header_row = None
+        self._orphan_values = orphan_enabled_filter_values(enabled_labels, self._labels)
+
+        if self._orphan_values:
+            header = Gtk.Label(label=_ORPHAN_SECTION_LABEL, xalign=0.0)
+            header.add_css_class("genre-filter-orphan-header")
+            header.set_margin_start(2)
+            header.set_margin_end(2)
+            header.set_margin_top(2)
+            header.set_margin_bottom(2)
+            header_row = Gtk.ListBoxRow()
+            header_row.set_child(header)
+            header_row.set_activatable(False)
+            header_row.set_selectable(False)
+            self._list.append(header_row)
+            self._orphan_header_row = header_row
+            for orphan in self._orphan_values:
+                self._append_check_row(orphan)
 
         for label in self._labels:
-            check = Gtk.CheckButton(label=label)
-            check.set_margin_start(2)
-            check.set_margin_end(2)
-            check.set_margin_top(1)
-            check.set_margin_bottom(1)
-            check.connect("toggled", self._on_check_toggled)
-
-            row = Gtk.ListBoxRow()
-            row.set_child(check)
-            self._list.append(row)
-            self._checks[label] = check
-            self._rows[label] = row
+            self._append_check_row(label)
 
     def _update_search_visibility(self) -> None:
-        show_search = len(self._labels) >= _SEARCH_MIN_LABELS
+        show_search = (len(self._labels) + len(self._orphan_values)) >= _SEARCH_MIN_LABELS
         self._search_entry.set_visible(show_search)
         if not show_search:
             self._search_entry.set_text("")
@@ -168,7 +196,9 @@ class LabelFilterMenu(Gtk.Box):
     def _update_menu_label(self, enabled_labels: frozenset[str]) -> None:
         if not enabled_labels:
             self._menu_label.set_label("All labels")
+            self._menu_btn.remove_css_class("shell-filter-active")
             return
+        self._menu_btn.add_css_class("shell-filter-active")
         ordered = sorted(enabled_labels, key=lambda item: item.casefold())
         if len(ordered) == 1:
             self._menu_label.set_label(ordered[0])
@@ -187,9 +217,12 @@ class LabelFilterMenu(Gtk.Box):
         return _LABEL_ROW_HEIGHT
 
     def _list_natural_height(self) -> int:
-        if not self._labels:
+        count = len(self._labels) + len(self._orphan_values)
+        if self._orphan_values:
+            count += 1
+        if count <= 0:
             return 0
-        return len(self._labels) * self._row_height()
+        return count * self._row_height()
 
     def _popover_chrome_height(self) -> int:
         chrome = _POPOVER_BOX_MARGIN_VERTICAL + _POPOVER_CSS_PADDING_VERTICAL
@@ -285,3 +318,10 @@ class LabelFilterMenu(Gtk.Box):
         for label, row in self._rows.items():
             visible = not needle or needle in label.casefold()
             row.set_visible(visible)
+        if self._orphan_header_row is not None:
+            any_orphan_visible = any(
+                self._rows[value].get_visible()
+                for value in self._orphan_values
+                if value in self._rows
+            )
+            self._orphan_header_row.set_visible(any_orphan_visible)
