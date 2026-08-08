@@ -306,7 +306,7 @@ class MprisService:
             self._emit_seeked(int(offset_us))
         elif method_name == "SetVolume":
             (volume,) = parameters.unpack()
-            if self._service.volume_control_enabled():
+            if self._service.volume_adjustable():
                 self._service.set_volume(max(0.0, min(1.0, volume)))
         else:
             invocation.return_dbus_error(
@@ -381,7 +381,7 @@ class MprisService:
                 "Metadata": GLib.Variant("a{sv}", self._metadata(state)),
                 "Volume": GLib.Variant(
                     "d",
-                    state.volume if self._service.volume_control_enabled() else 1.0,
+                    state.volume if self._service.volume_adjustable() else 1.0,
                 ),
                 "Position": GLib.Variant("x", self._position_us(state)),
                 "MinimumRate": GLib.Variant("d", 1.0),
@@ -411,7 +411,7 @@ class MprisService:
                 f"Property {interface_name}.{property_name} is not writable",
             )
         if property_name == "Volume":
-            if self._service.volume_control_enabled():
+            if self._service.volume_adjustable():
                 self._service.set_volume(max(0.0, min(1.0, value.unpack())))
         elif property_name == "LoopStatus":
             loop_status = value.unpack()

@@ -41,8 +41,11 @@ from tunes_player.core.release_quality import (
 
 if TYPE_CHECKING:
     import tidalapi
+    from tidalapi.session import LinkLogin
 
 log = logging.getLogger(__name__)
+
+OAuthStatus = Literal["unavailable", "idle", "pending", "success", "failed"]
 
 
 @contextlib.contextmanager
@@ -212,6 +215,10 @@ class TidalClient:
         self._session_file = session_file
         self._cache_dir = cache_dir or session_file.parent / "tidal-cache"
         self._session: tidalapi.Session | None = None
+        self._oauth_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._oauth_future: concurrent.futures.Future[bool] | None = None
+        self._oauth_link: LinkLogin | None = None
+        self._oauth_error: str | None = None
         self._hi_res_entitled: bool | None = None
         self._stream_cache: dict[tuple[int, str], tuple[dict[str, Any], float]] = {}
         self._missing_album_ids: set[str] = set()
@@ -288,6 +295,8 @@ class TidalClient:
         session = self._ensure_session()
         if session.check_login():
             raise TidalUnavailableError("Already signed in to TIDAL")
+        self._stop_oauth(wait=False)
+        self._oauth_error = None
         return session.pkce_login_url()
 
     def complete_pkce_login(self, redirect_url: str) -> None:
@@ -307,6 +316,7 @@ class TidalClient:
             token = session.pkce_get_auth_token(url)
             session.process_auth_token(token, is_pkce_token=True)
         except Exception as exc:
+            self._oauth_error = str(exc)
             log.exception("TIDAL PKCE login failed")
             raise TidalUnavailableError(str(exc)) from exc
         if not session.check_login():
@@ -316,6 +326,68 @@ class TidalClient:
         self._activate_lossless_api_client(session)
         self._apply_preferred_stream_quality(session)
         self.save_session()
+        self._oauth_error = None
+
+    def begin_oauth(self) -> tuple[str, float]:
+        """Start device-link login.
+
+        Returns (verification URL, expires_in seconds).
+        """
+        session = self._ensure_session()
+        if session.check_login():
+            raise TidalUnavailableError("Already signed in to TIDAL")
+
+        self._stop_oauth(wait=False)
+        self._oauth_error = None
+        link = session.get_link_login()
+        self._oauth_link = link
+        # tidalapi.login_oauth() uses a local ThreadPoolExecutor that can be GC'd
+        # before process_link_login finishes — keep our own executor alive.
+        self._oauth_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="tunes-tidal-oauth",
+        )
+        self._oauth_future = self._oauth_executor.submit(session.process_link_login, link)
+        return (
+            _normalize_oauth_url(link.verification_uri_complete),
+            float(link.expires_in),
+        )
+
+    def poll_oauth(self) -> OAuthStatus:
+        if not tidalapi_available():
+            return "unavailable"
+        future = self._oauth_future
+        if future is None:
+            return "idle"
+        if not future.done():
+            return "pending"
+        try:
+            if not future.result(timeout=0):
+                self._oauth_error = "TIDAL authorization was denied."
+                self._stop_oauth(wait=True)
+                return "failed"
+        except TimeoutError:
+            self._oauth_error = "Sign-in timed out. Try again and finish in the browser promptly."
+            log.warning("TIDAL device login timed out")
+            self._stop_oauth(wait=True)
+            return "failed"
+        except Exception as exc:
+            self._oauth_error = str(exc)
+            log.exception("TIDAL OAuth failed")
+            self._stop_oauth(wait=True)
+            return "failed"
+        self._stop_oauth(wait=True)
+        session = self._ensure_session()
+        if not session.check_login():
+            self._oauth_error = "TIDAL login did not complete."
+            return "failed"
+        self._activate_lossless_api_client(session)
+        self._apply_preferred_stream_quality(session)
+        self.save_session()
+        return "success"
+
+    def oauth_error_message(self) -> str | None:
+        return self._oauth_error
 
     def save_session(self) -> None:
         with self._session_lock:
@@ -324,7 +396,12 @@ class TidalClient:
                 return
             self._save_session_unlocked(session)
 
+    def cancel_oauth(self) -> None:
+        """Abort an in-progress device-link login."""
+        self._stop_oauth(wait=False)
+
     def logout(self) -> None:
+        self.cancel_oauth()
         with self._session_lock:
             self._hi_res_entitled = None
             self._stream_cache.clear()
@@ -336,6 +413,11 @@ class TidalClient:
                 self._session_file.unlink()
             except OSError:
                 log.warning("Could not remove TIDAL session file %s", self._session_file)
+
+    def _invalidate_session(self) -> None:
+        """Forget in-memory and on-disk TIDAL credentials after confirmed auth failure."""
+        with self._session_lock:
+            self._invalidate_session_unlocked()
 
     def _invalidate_session_unlocked(self) -> None:
         self._clear_stored_session()
@@ -448,6 +530,7 @@ class TidalClient:
             collected = _collect_tidal_home_pages(
                 session,
                 include_explore=False,
+                include_legacy_home=False,
                 max_depth=2,
                 rail_filter="new_releases",
             )
@@ -502,6 +585,7 @@ class TidalClient:
             collected = _collect_tidal_home_pages(
                 session,
                 include_explore=False,
+                include_legacy_home=False,
                 max_depth=2,
                 rail_filter="recommendations",
             )
@@ -1019,6 +1103,17 @@ class TidalClient:
             )
         return session
 
+    def _stop_oauth(self, *, wait: bool) -> None:
+        future = self._oauth_future
+        if future is not None and not future.done():
+            future.cancel()
+        self._oauth_future = None
+        self._oauth_link = None
+        executor = self._oauth_executor
+        self._oauth_executor = None
+        if executor is not None:
+            executor.shutdown(wait=wait, cancel_futures=True)
+
 
 def _tidal_album_added_ns(album: object) -> int:
     """When an album became 'new' on TIDAL (stream start), not original release year."""
@@ -1078,6 +1173,7 @@ def _collect_tidal_home_pages(
     session: Any,
     *,
     include_explore: bool = True,
+    include_legacy_home: bool = True,
     max_depth: int = 4,
     rail_filter: TidalRailFilter = "all",
 ) -> list[_CollectedTidalObject]:
@@ -1086,6 +1182,8 @@ def _collect_tidal_home_pages(
     with _quiet_tidalapi_page_warnings():
         pages: list[object] = [session.home()]
         optional_loaders: list[object] = []
+        if include_legacy_home:
+            optional_loaders.append(lambda: session.home(use_legacy_endpoint=True))
         if include_explore:
             optional_loaders.append(session.explore)
         optional_loaders.append(session.for_you)
@@ -1328,3 +1426,9 @@ def _tidal_track_release_date(track: object) -> object | None:
         )
     return None
 
+
+def _normalize_oauth_url(url: str) -> str:
+    value = url.strip()
+    if not value or "://" in value:
+        return value
+    return f"https://{value}"

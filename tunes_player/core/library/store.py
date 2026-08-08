@@ -541,6 +541,22 @@ class LibraryStore:
         with_db_retry(attempt, on_locked=rollback_on_locked)
 
     @_locked_db
+    def last_play_at_ns(self, track_id: str) -> int | None:
+        def query(connection: sqlite3.Connection) -> int | None:
+            row = connection.execute(
+                """
+                SELECT played_at_ns FROM play_history
+                WHERE track_id = ?
+                ORDER BY played_at_ns DESC
+                LIMIT 1
+                """,
+                (track_id,),
+            ).fetchone()
+            return None if row is None else int(row["played_at_ns"])
+
+        return self._with_connection(query)
+
+    @_locked_db
     def list_continue_listening_entries(
         self,
         *,
@@ -1330,6 +1346,13 @@ class LibraryStore:
         return None if row is None else str(row["art_uri"])
 
     @_locked_db
+    def _art_uri_for_release(self, release_id: str) -> str | None:
+        def query(connection: sqlite3.Connection) -> str | None:
+            return self._query_art_uri_for_release(connection, release_id)
+
+        return self._with_connection(query)
+
+    @_locked_db
     def art_uri_map(self, release_ids: list[str]) -> dict[str, str | None]:
         """Return art_uri per release id (missing entries are None)."""
         if not release_ids:
@@ -1339,6 +1362,13 @@ class LibraryStore:
             return self._query_art_uri_map(connection, release_ids)
 
         return self._with_connection(query)
+
+    def _art_uri_map(self, release_ids: list[str]) -> dict[str, str]:
+        return {
+            release_id: art_uri
+            for release_id, art_uri in self.art_uri_map(release_ids).items()
+            if art_uri is not None
+        }
 
     def _row_to_release(self, row: sqlite3.Row, *, art_uri: str | None = None) -> Release:
         track_count = int(row["track_count"])
@@ -1356,21 +1386,21 @@ class LibraryStore:
         )
         duration = row["duration_sec"]
         from tunes_player.core.release_quality import (
-            classify_local_catalog,
             max_quality_tier,
+            tiers_from_local,
         )
 
         max_bit_depth = row["max_bit_depth"]
         max_sample_rate = row["max_sample_rate"]
         has_lossless = bool(int(row["has_lossless"] or 0))
         has_lossy = bool(int(row["has_lossy"] or 0))
-        available_quality_tiers = classify_local_catalog(
+        available_quality_tiers = tiers_from_local(
             max_bit_depth=int(max_bit_depth) if max_bit_depth is not None else None,
             max_sample_rate=int(max_sample_rate) if max_sample_rate is not None else None,
             has_lossless=has_lossless,
             has_lossy=has_lossy,
         )
-        peak_quality_tier = max_quality_tier(*available_quality_tiers) if available_quality_tiers else ""
+        peak_quality_tier = max_quality_tier(*available_quality_tiers)
         release_id = str(row["release_id"])
         return Release(
             id=release_id,

@@ -20,7 +20,7 @@ from tunes_player.core.release_catalog import (
 )
 from tunes_player.core.release_quality import (
     classify_qobuz_catalog,
-    max_quality_tier,
+    peak_quality_tier_from_tiers,
 )
 
 def cover_url(image: Any) -> str | None:
@@ -169,7 +169,7 @@ def release_from_qobuz(
         art_uri,
     ) = _release_common_fields(album, owned_track_count=owned_track_count)
     available_quality_tiers = classify_qobuz_catalog(album)
-    peak_quality_tier = max_quality_tier(*available_quality_tiers) if available_quality_tiers else ""
+    peak_quality_tier = peak_quality_tier_from_tiers(available_quality_tiers)
     catalog_id = qobuz_ids.album_id(album_id)
     return Release(
         id=catalog_id,

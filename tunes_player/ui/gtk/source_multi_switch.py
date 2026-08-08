@@ -11,19 +11,17 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gtk  # noqa: E402
 
 from tunes_player.core.models import Source
-from tunes_player.ui.gtk.shell_filter_chips import (
-    make_chip_toggle,
-    make_filter_heading,
-    make_linked_chip_group,
-)
 
 EnabledSourcesChanged = Callable[[frozenset[Source]], None]
 
+# Compact labels for the source filter row only.
 _CHIP_LABELS: dict[Source, str] = {
     Source.LOCAL: "Local",
     Source.TIDAL: "Tidal",
     Source.QOBUZ: "Qobuz",
 }
+
+_SOURCE_BTN_HEIGHT = 18
 
 
 class SourceMultiSwitch(Gtk.Box):
@@ -46,8 +44,16 @@ class SourceMultiSwitch(Gtk.Box):
         self._available: set[Source] = set()
         self._toggles: dict[Source, Gtk.ToggleButton] = {}
 
-        self.append(make_filter_heading("Source"))
-        self._group = make_linked_chip_group()
+        heading = Gtk.Label(label="Source")
+        heading.add_css_class("shell-source-heading")
+        heading.set_halign(Gtk.Align.START)
+        heading.set_valign(Gtk.Align.CENTER)
+        self.append(heading)
+
+        self._group = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self._group.add_css_class("linked")
+        self._group.add_css_class("source-multi-switch")
+        self._group.set_valign(Gtk.Align.CENTER)
         self.append(self._group)
 
         self.set_sources(sources, enabled_sources)
@@ -66,22 +72,39 @@ class SourceMultiSwitch(Gtk.Box):
         self._toggles.clear()
 
         for source in sorted(sources, key=lambda item: item.value):
-            text = _CHIP_LABELS.get(source, source.value.capitalize())
-            button = make_chip_toggle(
-                text,
-                on_toggled=lambda btn, item=source: self._on_toggle_toggled(btn, item),
-            )
+            button = self._make_source_toggle(source)
             self._group.append(button)
             self._toggles[source] = button
 
         self.set_visible(len(sources) > 1)
         self.set_enabled_sources(enabled_sources)
 
+    def _make_source_toggle(self, source: Source) -> Gtk.ToggleButton:
+        text = _CHIP_LABELS.get(source, source.value.capitalize())
+        label = Gtk.Label(label=text)
+        label.add_css_class("shell-source-btn-label")
+
+        button = Gtk.ToggleButton()
+        button.set_child(label)
+        button.add_css_class("flat")
+        button.add_css_class("shell-source-btn")
+        button.set_valign(Gtk.Align.CENTER)
+        button.set_margin_top(0)
+        button.set_margin_bottom(0)
+        button.set_size_request(-1, _SOURCE_BTN_HEIGHT)
+        button.connect("toggled", self._on_toggle_toggled, source)
+        return button
+
+    def _toggle_active(self, source: Source, enabled_sources: frozenset[Source]) -> bool:
+        if not enabled_sources:
+            return True
+        return source in enabled_sources
+
     def set_enabled_sources(self, enabled_sources: frozenset[Source]) -> None:
         self._updating = True
         try:
             for source, button in self._toggles.items():
-                button.set_active(True if not enabled_sources else source in enabled_sources)
+                button.set_active(self._toggle_active(source, enabled_sources))
         finally:
             self._updating = False
 
@@ -92,7 +115,7 @@ class SourceMultiSwitch(Gtk.Box):
             return frozenset()
         return frozenset(active)
 
-    def _on_toggle_toggled(self, button: Gtk.ToggleButton, _source: Source) -> None:
+    def _on_toggle_toggled(self, button: Gtk.ToggleButton, source: Source) -> None:
         if self._updating:
             return
 

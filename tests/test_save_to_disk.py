@@ -542,22 +542,22 @@ class TestPlayerServiceSaveHook(unittest.TestCase):
 
         with (
             mock.patch(
-                "tunes_player.core.save_to_disk_coordinator.resolve_track",
+                "tunes_player.core.services.resolve_track",
                 side_effect=fake_resolve,
             ),
             mock.patch(
-                "tunes_player.core.save_to_disk_coordinator.download_https",
+                "tunes_player.core.services.download_https",
                 side_effect=lambda url, part, cancel_event=None: part.write_bytes(b"flac"),
             ),
             mock.patch(
-                "tunes_player.core.save_to_disk_coordinator.write_tags",
+                "tunes_player.core.services.write_tags",
             ),
             mock.patch(
-                "tunes_player.core.save_to_disk_coordinator.fetch_cover_bytes",
+                "tunes_player.core.services.fetch_cover_bytes",
                 return_value=None,
             ),
             mock.patch(
-                "tunes_player.core.save_to_disk_coordinator.download_cache_dir",
+                "tunes_player.core.services.download_cache_dir",
                 return_value=root / "download-cache",
             ),
             mock.patch(
@@ -627,22 +627,22 @@ class TestPlayerServiceSaveHook(unittest.TestCase):
 
         patches = [
             mock.patch(
-                "tunes_player.core.save_to_disk_coordinator.resolve_track",
+                "tunes_player.core.services.resolve_track",
                 side_effect=fake_resolve,
             ),
             mock.patch(
-                "tunes_player.core.save_to_disk_coordinator.download_https",
+                "tunes_player.core.services.download_https",
                 side_effect=lambda url, part, cancel_event=None: part.write_bytes(
                     b"flac"
                 ),
             ),
-            mock.patch("tunes_player.core.save_to_disk_coordinator.write_tags"),
+            mock.patch("tunes_player.core.services.write_tags"),
             mock.patch(
-                "tunes_player.core.save_to_disk_coordinator.fetch_cover_bytes",
+                "tunes_player.core.services.fetch_cover_bytes",
                 return_value=None,
             ),
             mock.patch(
-                "tunes_player.core.save_to_disk_coordinator.download_cache_dir",
+                "tunes_player.core.services.download_cache_dir",
                 side_effect=_cache_dir,
             ),
             mock.patch(
@@ -697,7 +697,7 @@ class TestPlayerServiceSaveHook(unittest.TestCase):
                 part.write_bytes(b"flac")
 
             with mock.patch(
-                "tunes_player.core.save_to_disk_coordinator.download_https",
+                "tunes_player.core.services.download_https",
                 side_effect=slow_download,
             ):
                 try:
@@ -756,7 +756,7 @@ class TestPlayerServiceSaveHook(unittest.TestCase):
                 track1_done.set()
 
             with mock.patch(
-                "tunes_player.core.save_to_disk_coordinator.download_https",
+                "tunes_player.core.services.download_https",
                 side_effect=flaky_download,
             ):
                 try:
@@ -801,7 +801,7 @@ class TestPlayerServiceSaveHook(unittest.TestCase):
                 part.write_bytes(b"flac")
 
             with mock.patch(
-                "tunes_player.core.save_to_disk_coordinator.download_https",
+                "tunes_player.core.services.download_https",
                 side_effect=gated_download,
             ):
                 try:
@@ -863,7 +863,7 @@ class TestPlayerServiceSaveHook(unittest.TestCase):
                 part.write_bytes(b"flac")
 
             with mock.patch(
-                "tunes_player.core.save_to_disk_coordinator.download_https",
+                "tunes_player.core.services.download_https",
                 side_effect=tracking_download,
             ):
                 try:
@@ -894,7 +894,7 @@ class TestPlayerServiceSaveHook(unittest.TestCase):
                 raise SaveCancelled()
 
             with mock.patch(
-                "tunes_player.core.save_to_disk_coordinator.download_https",
+                "tunes_player.core.services.download_https",
                 side_effect=slow_download,
             ):
                 tracks = [
@@ -970,7 +970,7 @@ class TestPlayerServiceSaveHook(unittest.TestCase):
                 part.write_bytes(b"flac")
 
             with mock.patch(
-                "tunes_player.core.save_to_disk_coordinator.download_https",
+                "tunes_player.core.services.download_https",
                 side_effect=gated_download,
             ):
                 try:
@@ -1042,7 +1042,7 @@ class TestPlayerServiceSaveHook(unittest.TestCase):
                 part.write_bytes(b"flac")
 
             with mock.patch(
-                "tunes_player.core.save_to_disk_coordinator.download_https",
+                "tunes_player.core.services.download_https",
                 side_effect=gated_download,
             ):
                 try:
@@ -1091,7 +1091,7 @@ class TestPlayerServiceSaveHook(unittest.TestCase):
                 part.write_bytes(b"flac")
 
             with mock.patch(
-                "tunes_player.core.save_to_disk_coordinator.download_https",
+                "tunes_player.core.services.download_https",
                 side_effect=gated_download,
             ):
                 try:
@@ -1133,7 +1133,7 @@ class TestPlayerServiceSaveHook(unittest.TestCase):
                 raise SaveCancelled()
 
             with mock.patch(
-                "tunes_player.core.save_to_disk_coordinator.download_https",
+                "tunes_player.core.services.download_https",
                 side_effect=slow_download,
             ):
                 try:

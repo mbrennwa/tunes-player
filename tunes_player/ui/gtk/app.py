@@ -77,15 +77,6 @@ from tunes_player.ui.gtk.release_grid import RELEASE_GRID_VIEW_MARGIN, release_g
 _APP_WINDOW_TITLE = "Tunes Player"
 _DEFAULT_SIZE = (960, 640)
 _GRID_ROOT_TAG = "grid-root"
-
-# Recreate reasons that should keep the scroll offset (#75 scan growth / enrich).
-# Sort and filter changes must NOT — same offset on a reordered list looks like a
-# different collection (opposite end of the alphabet, etc.).
-def _preserves_grid_scroll(reason: str) -> bool:
-    if reason == "library_updated" or reason.startswith("library_updated/"):
-        return True
-    return "quality_enrich" in reason
-
 _PERSIST_DEBOUNCE_MS = 400
 _ONBOARDING_MESSAGE = (
     "Configure music sources in Settings, then search or choose New Releases."
@@ -595,41 +586,6 @@ class TunesWindow(Adw.ApplicationWindow):
         self._schedule_persist()
         self._display_cached_selection(reason="sort_changed")
 
-    def _prune_shell_filter_attr(
-        self,
-        *,
-        attr: str,
-        available: object,
-        prune: object,
-    ) -> None:
-        """Prune a shell filter frozenset attr against *available* (in place on state)."""
-        state = self._shell_state
-        current = getattr(state, attr)
-        pruned = prune(current, available)  # type: ignore[operator]
-        if pruned != current:
-            self._shell_state = replace(state, **{attr: pruned})
-
-    def _set_shell_filter_selection(
-        self,
-        *,
-        attr: str,
-        enabled: frozenset[str],
-        reason: str,
-        apply_to_widget: object | None = None,
-        after_replace: object | None = None,
-    ) -> None:
-        """Update one enabled-* shell filter, persist, and refresh the grid."""
-        state = self._shell_state
-        if getattr(state, attr) == enabled:
-            return
-        self._shell_state = replace(state, **{attr: enabled})
-        if after_replace is not None:
-            after_replace(enabled)  # type: ignore[operator]
-        if apply_to_widget is not None:
-            apply_to_widget(enabled)  # type: ignore[operator]
-        self._schedule_persist()
-        self._display_cached_selection(reason=reason)
-
     def _sync_release_type_multi(self) -> None:
         show = bool(self._cached_releases)
         self._release_type_slot.set_visible(show)
@@ -650,26 +606,26 @@ class TunesWindow(Adw.ApplicationWindow):
         self._set_enabled_release_types(enabled_release_types)
 
     def _set_enabled_release_types(self, enabled_release_types: frozenset[str]) -> None:
-        self._set_shell_filter_selection(
-            attr="enabled_release_types",
-            enabled=enabled_release_types,
-            reason="release_type_filter",
-            apply_to_widget=(
-                None
-                if self._release_type_multi is None
-                else self._release_type_multi.set_enabled_release_types
-            ),
+        state = self._shell_state
+        if state.enabled_release_types == enabled_release_types:
+            return
+        self._shell_state = replace(
+            state,
+            enabled_release_types=enabled_release_types,
         )
+        if self._release_type_multi is not None:
+            self._release_type_multi.set_enabled_release_types(enabled_release_types)
+        self._schedule_persist()
+        self._display_cached_selection(reason="release_type_filter")
 
     def _sync_quality_filter(self) -> None:
         available = quality_tiers_in_selection(self._cached_releases)
         show = bool(self._cached_releases)
-        self._prune_shell_filter_attr(
-            attr="enabled_quality_tiers",
-            available=available,
-            prune=prune_enabled_quality_tiers,
-        )
         state = self._shell_state
+        pruned = prune_enabled_quality_tiers(state.enabled_quality_tiers, available)
+        if pruned != state.enabled_quality_tiers:
+            self._shell_state = replace(state, enabled_quality_tiers=pruned)
+            state = self._shell_state
 
         self._quality_filter_slot.set_visible(show)
         if not show:
@@ -690,28 +646,27 @@ class TunesWindow(Adw.ApplicationWindow):
         self._set_enabled_quality_tiers(enabled_quality_tiers)
 
     def _set_enabled_quality_tiers(self, enabled_quality_tiers: frozenset[str]) -> None:
-        self._set_shell_filter_selection(
-            attr="enabled_quality_tiers",
-            enabled=enabled_quality_tiers,
-            reason="quality_filter",
-            after_replace=self._service.config.update_shell_quality_tiers,
-            apply_to_widget=(
-                None
-                if self._quality_filter_multi is None
-                else self._quality_filter_multi.set_enabled_quality_tiers
-            ),
-        )
+        state = self._shell_state
+        if state.enabled_quality_tiers == enabled_quality_tiers:
+            return
+        self._shell_state = replace(state, enabled_quality_tiers=enabled_quality_tiers)
+        self._service.config.update_shell_quality_tiers(enabled_quality_tiers)
+        if self._quality_filter_multi is not None:
+            self._quality_filter_multi.set_enabled_quality_tiers(enabled_quality_tiers)
+        self._schedule_persist()
+        self._display_cached_selection(reason="quality_filter")
 
+    def _enabled_quality_tiers_for_playback(self) -> frozenset[str]:
+        return self._shell_state.enabled_quality_tiers
 
     def _sync_genre_filter(self) -> None:
         available = genres_in_selection(self._cached_releases)
         show = bool(self._cached_releases)
-        self._prune_shell_filter_attr(
-            attr="enabled_genres",
-            available=available,
-            prune=prune_enabled_genres,
-        )
         state = self._shell_state
+        pruned = prune_enabled_genres(state.enabled_genres, available)
+        if pruned != state.enabled_genres:
+            self._shell_state = replace(state, enabled_genres=pruned)
+            state = self._shell_state
 
         self._genre_filter_slot.set_visible(show)
         if not show:
@@ -729,25 +684,24 @@ class TunesWindow(Adw.ApplicationWindow):
         self._set_enabled_genres(enabled_genres)
 
     def _set_enabled_genres(self, enabled_genres: frozenset[str]) -> None:
-        self._set_shell_filter_selection(
-            attr="enabled_genres",
-            enabled=enabled_genres,
-            reason="genre_filter",
-            apply_to_widget=(
-                None if self._genre_filter is None else self._genre_filter.set_enabled_genres
-            ),
-        )
+        state = self._shell_state
+        if state.enabled_genres == enabled_genres:
+            return
+        self._shell_state = replace(state, enabled_genres=enabled_genres)
+        if self._genre_filter is not None:
+            self._genre_filter.set_enabled_genres(enabled_genres)
+        self._schedule_persist()
+        self._display_cached_selection(reason="genre_filter")
 
     def _sync_label_filter(self) -> None:
         labels_by_id = self._labels_by_id_for(self._cached_releases)
         available = labels_in_selection(self._cached_releases, labels_by_id)
         show = bool(self._cached_releases) and bool(available)
-        self._prune_shell_filter_attr(
-            attr="enabled_labels",
-            available=available,
-            prune=prune_enabled_labels,
-        )
         state = self._shell_state
+        pruned = prune_enabled_labels(state.enabled_labels, available)
+        if pruned != state.enabled_labels:
+            self._shell_state = replace(state, enabled_labels=pruned)
+            state = self._shell_state
 
         self._label_filter_slot.set_visible(show)
         if not show:
@@ -765,14 +719,14 @@ class TunesWindow(Adw.ApplicationWindow):
         self._set_enabled_labels(enabled_labels)
 
     def _set_enabled_labels(self, enabled_labels: frozenset[str]) -> None:
-        self._set_shell_filter_selection(
-            attr="enabled_labels",
-            enabled=enabled_labels,
-            reason="label_filter",
-            apply_to_widget=(
-                None if self._label_filter is None else self._label_filter.set_enabled_labels
-            ),
-        )
+        state = self._shell_state
+        if state.enabled_labels == enabled_labels:
+            return
+        self._shell_state = replace(state, enabled_labels=enabled_labels)
+        if self._label_filter is not None:
+            self._label_filter.set_enabled_labels(enabled_labels)
+        self._schedule_persist()
+        self._display_cached_selection(reason="label_filter")
 
     def _rebuild_source_filters(self) -> None:
         sources = available_sources(self._service)
@@ -1463,14 +1417,8 @@ class TunesWindow(Adw.ApplicationWindow):
             on_release_grid=on_release_grid,
         )
         # Full recreate resets Gtk.ScrolledWindow; keep the user's place when
-        # All Local grows during a scan (#75 residual scroll jump). Do not keep
-        # it for sort/filter — the same offset on a reordered list shows a
-        # different slice of the catalog.
-        scroll_y = (
-            self._capture_root_grid_scroll_y()
-            if on_release_grid and _preserves_grid_scroll(reason)
-            else None
-        )
+        # All Local grows during a scan (#75 residual scroll jump).
+        scroll_y = self._capture_root_grid_scroll_y() if on_release_grid else None
         view = ReleaseGridView(
             releases=releases,
             on_release_activated=self._open_release,

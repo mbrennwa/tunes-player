@@ -166,6 +166,13 @@ class MpvEngine:
     def is_available(self) -> bool:
         return not self._terminated
 
+    def ping(self) -> None:
+        """No-op for in-process engine (always reachable until quit)."""
+
+    def set_audio_device(self, audio_device: str | None) -> None:
+        self._audio_device = audio_device
+        if audio_device:
+            self._player.audio_device = audio_device
 
     def set_event_callback(self, callback: EngineCallback | None) -> None:
         self._on_event = callback

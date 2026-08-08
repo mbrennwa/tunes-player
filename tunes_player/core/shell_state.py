@@ -15,6 +15,7 @@ from tunes_player.core.models import (
 )
 from tunes_player.core import release_quality as _release_quality
 from tunes_player.core.release_quality import (
+    release_available_quality_tiers,
     release_matches_quality_filter,
 )
 
@@ -195,7 +196,7 @@ def release_to_cache_payload(release: Release) -> dict[str, Any]:
     if release.peak_quality_tier in _VALID_QUALITY_FILTERS:
         payload["peak_quality_tier"] = release.peak_quality_tier
     payload["catalog_quality_ready"] = release.catalog_quality_ready
-    available = release.available_quality_tiers
+    available = release_available_quality_tiers(release)
     if available:
         payload["available_quality_tiers"] = sorted(available)
     if release.catalog_release_id:
@@ -626,7 +627,7 @@ def quality_tiers_in_selection(
     for release in releases:
         if not release.catalog_quality_ready:
             continue
-        present.update(release.available_quality_tiers)
+        present.update(release_available_quality_tiers(release))
     return tuple(tier for tier in _QUALITY_TIER_ORDER if tier in present)
 
 
