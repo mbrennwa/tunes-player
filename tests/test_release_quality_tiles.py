@@ -13,6 +13,7 @@ from tunes_player.core.release_quality import (
 )
 from tunes_player.core.release_quality import catalog_quality_label_for_release
 from tunes_player.core.release_quality_tiles import (
+    collapse_expanded_releases_to_catalog,
     expand_releases_by_quality_tier,
     parse_catalog_release_id,
     parse_quality_tier_suffix,
@@ -116,6 +117,8 @@ class ExpandReleasesByQualityTierTests(unittest.TestCase):
             "local:release:1",
             source=Source.LOCAL,
             tiers=frozenset({QUALITY_FILTER_CD, QUALITY_FILTER_HI_RES}),
+            peak_sample_rate_hz=96_000,
+            peak_bit_depth=24,
         )
         expanded = expand_releases_by_quality_tier([release])
         self.assertEqual(len(expanded), 2)
@@ -177,9 +180,143 @@ class ExpandReleasesByQualityTierTests(unittest.TestCase):
             tiers=frozenset(
                 {QUALITY_FILTER_COMPRESSED, QUALITY_FILTER_CD, QUALITY_FILTER_HI_RES},
             ),
+            peak_sample_rate_hz=96_000,
+            peak_bit_depth=24,
         )
         expanded = expand_releases_by_quality_tier([release])
         self.assertEqual(len(expanded), 3)
+
+    def test_mode_only_cd_peak_expands_to_single_labeled_tile(self) -> None:
+        """Phantom hi_res sibling must not appear for 44.1 peak (#147)."""
+        from types import SimpleNamespace
+
+        from tunes_player.core.release_quality import (
+            classify_tidal_catalog,
+            peak_quality_tier_from_tiers,
+        )
+
+        album = SimpleNamespace(
+            audio_quality="LOSSLESS",
+            media_metadata_tags=["LOSSLESS"],
+            audio_modes=["HI_RES_LOSSLESS"],
+            sample_rate=44_100,
+            bit_depth=24,
+        )
+        tiers = classify_tidal_catalog(album)
+        release = replace(
+            _release(
+                "tidal:album:man-down",
+                tiers=tiers,
+                peak_sample_rate_hz=44_100,
+                peak_bit_depth=24,
+            ),
+            peak_quality_tier=peak_quality_tier_from_tiers(tiers),
+        )
+        expanded = expand_releases_by_quality_tier([release])
+        self.assertEqual(len(expanded), 1)
+        self.assertEqual(expanded[0].id, "tidal:album:man-down")
+        self.assertEqual(expanded[0].quality_tier, QUALITY_FILTER_CD)
+        self.assertEqual(catalog_quality_label_for_release(expanded[0]), "44.1/24")
+
+
+class CollapseExpandedReleasesTests(unittest.TestCase):
+    def test_collapse_preserves_dual_format_for_reexpand(self) -> None:
+        release = _release(
+            "tidal:album:real",
+            tiers=frozenset({QUALITY_FILTER_CD, QUALITY_FILTER_HI_RES}),
+            peak_sample_rate_hz=96_000,
+            peak_bit_depth=24,
+        )
+        expanded = expand_releases_by_quality_tier([release])
+        self.assertEqual(len(expanded), 2)
+        collapsed = collapse_expanded_releases_to_catalog(expanded)
+        self.assertEqual(len(collapsed), 1)
+        catalog = collapsed[0]
+        self.assertEqual(catalog.id, "tidal:album:real")
+        self.assertEqual(
+            catalog.available_quality_tiers,
+            frozenset({QUALITY_FILTER_CD, QUALITY_FILTER_HI_RES}),
+        )
+        self.assertEqual(catalog.peak_sample_rate_hz, 96_000)
+        self.assertEqual(catalog.peak_bit_depth, 24)
+        reexpanded = expand_releases_by_quality_tier(collapsed)
+        self.assertEqual(
+            {tile.id for tile in reexpanded},
+            {"tidal:album:real@cd", "tidal:album:real@hi_res"},
+        )
+
+    def test_naive_first_tile_collapse_would_drop_hi_res(self) -> None:
+        """Document the old finalize bug: keeping @cd alone loses hi_res."""
+        release = _release(
+            "tidal:album:real",
+            tiers=frozenset({QUALITY_FILTER_CD, QUALITY_FILTER_HI_RES}),
+            peak_sample_rate_hz=96_000,
+            peak_bit_depth=24,
+        )
+        expanded = expand_releases_by_quality_tier([release])
+        naive = expand_releases_by_quality_tier([expanded[0]])
+        self.assertEqual([tile.id for tile in naive], ["tidal:album:real"])
+        self.assertEqual(naive[0].available_quality_tiers, frozenset({QUALITY_FILTER_CD}))
+
+    def test_expand_drops_hi_res_when_peak_rate_is_cd(self) -> None:
+        """Stale dual-tier rows with 44.1 peak must not emit unlabeled hi_res (#147)."""
+        release = _release(
+            "tidal:album:stale",
+            tiers=frozenset({QUALITY_FILTER_CD, QUALITY_FILTER_HI_RES}),
+            peak_sample_rate_hz=44_100,
+            peak_bit_depth=24,
+        )
+        expanded = expand_releases_by_quality_tier([release])
+        self.assertEqual(len(expanded), 1)
+        self.assertEqual(expanded[0].quality_tier, QUALITY_FILTER_CD)
+        self.assertEqual(catalog_quality_label_for_release(expanded[0]), "44.1/24")
+
+    def test_mismatched_hi_res_tier_metadata_keeps_measured_peak(self) -> None:
+        """Do not blank rate/depth when claimed hi_res disagrees with peak (#147)."""
+        from tunes_player.core.release_quality_tiles import tier_sample_metadata
+
+        release = _release(
+            "tidal:album:mismatch",
+            tiers=frozenset({QUALITY_FILTER_HI_RES}),
+            peak_sample_rate_hz=44_100,
+            peak_bit_depth=24,
+        )
+        depth, rate_hz = tier_sample_metadata(release, QUALITY_FILTER_HI_RES)
+        self.assertEqual((depth, rate_hz), (24, 44_100))
+        self.assertEqual(catalog_quality_label_for_release(
+            replace(
+                release,
+                id="tidal:album:mismatch@hi_res",
+                quality_tier=QUALITY_FILTER_HI_RES,
+            ),
+        ), "44.1/24")
+
+    def test_collapse_heals_persisted_phantom_hi_res_sibling(self) -> None:
+        cd_tile = replace(
+            _release(
+                "tidal:album:man-down@cd",
+                tiers=frozenset({QUALITY_FILTER_CD}),
+                peak_sample_rate_hz=44_100,
+                peak_bit_depth=24,
+                catalog_release_id="tidal:album:man-down",
+            ),
+            quality_tier=QUALITY_FILTER_CD,
+        )
+        hi_res_tile = replace(
+            _release(
+                "tidal:album:man-down@hi_res",
+                tiers=frozenset({QUALITY_FILTER_HI_RES}),
+                peak_sample_rate_hz=None,
+                peak_bit_depth=None,
+                catalog_release_id="tidal:album:man-down",
+            ),
+            quality_tier=QUALITY_FILTER_HI_RES,
+        )
+        collapsed = collapse_expanded_releases_to_catalog([cd_tile, hi_res_tile])
+        expanded = expand_releases_by_quality_tier(collapsed)
+        self.assertEqual(len(expanded), 1)
+        self.assertEqual(expanded[0].id, "tidal:album:man-down")
+        self.assertEqual(catalog_quality_label_for_release(expanded[0]), "44.1/24")
 
 
 class PlaybackTierForReleaseIdTests(unittest.TestCase):
