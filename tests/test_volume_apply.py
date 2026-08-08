@@ -17,6 +17,7 @@ from tunes_player.core.volume import (
     VolumeListener,
     VolumeSubscriptionHub,
 )
+from tunes_player.core.volume_apply import _CHASE_MAX_STEP
 from tunes_player.engines.mpv import MpvEngine
 from tunes_player.platform.linux.audio import WpctlVolumeController
 
@@ -77,21 +78,23 @@ class _SlowSinkController:
 
 
 class VolumeApplyTests(unittest.TestCase):
-    def test_rapid_set_volume_coalesces_to_last_level(self) -> None:
+    def test_rapid_set_volume_chases_to_last_level(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = ConfigManager(Path(tmp) / "config.json")
             config.load()
-            controller = _SlowSinkController(config.config, delay=0.03)
+            controller = _SlowSinkController(config.config, delay=0.0)
             service = PlayerService(config=config, volume_controller=controller)
 
             for level in (0.1, 0.2, 0.3, 0.4, 0.55):
                 service.set_volume(level, notify=False)
             service.flush_pending_volume_apply()
 
-            self.assertEqual(controller.get_level(), 0.55)
-            # Must not apply every intermediate tick while coalescing.
-            self.assertLessEqual(len(controller.set_level_calls), 3)
+            self.assertAlmostEqual(controller.get_level(), 0.55)
             self.assertEqual(controller.set_level_calls[-1], 0.55)
+            previous = 0.5  # controller seed before chase
+            for level in controller.set_level_calls:
+                self.assertLessEqual(abs(level - previous), _CHASE_MAX_STEP + 1e-9)
+                previous = level
 
     def test_set_volume_does_not_block_on_slow_controller(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -158,6 +161,70 @@ class VolumeApplyTests(unittest.TestCase):
             controller.notify_external_level(0.22)
             self.assertAlmostEqual(service.get_playback_state().volume, 0.22)
             self.assertIn("volume_changed", events)
+
+    def test_volume_gesture_chases_but_ignores_inbound(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ConfigManager(Path(tmp) / "config.json")
+            config.load()
+            controller = _SlowSinkController(config.config, delay=0.0)
+            service = PlayerService(config=config, volume_controller=controller)
+            service.set_volume(0.50, notify=False)
+            service.flush_pending_volume_apply()
+            controller.set_level_calls.clear()
+
+            service.begin_volume_gesture()
+            for level in (0.20, 0.08, 0.12, 0.05):
+                service.set_volume(level, notify=False)
+            service.flush_pending_volume_apply()
+            self.assertAlmostEqual(controller.set_level_calls[-1], 0.05)
+            self.assertAlmostEqual(service.get_playback_state().volume, 0.05)
+            previous = 0.50
+            for level in controller.set_level_calls:
+                self.assertLessEqual(abs(level - previous), _CHASE_MAX_STEP + 1e-9)
+                previous = level
+
+            controller.notify_external_level(0.99)
+            self.assertAlmostEqual(service.get_playback_state().volume, 0.05)
+
+            service.end_volume_gesture()
+            controller.notify_external_level(0.33)
+            self.assertAlmostEqual(service.get_playback_state().volume, 0.33)
+
+    def test_chase_retargets_while_worker_runs(self) -> None:
+        """A newer schedule_apply becomes the chase target mid-flight."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ConfigManager(Path(tmp) / "config.json")
+            config.load()
+            controller = _SlowSinkController(config.config, delay=0.02)
+            service = PlayerService(config=config, volume_controller=controller)
+            service.set_volume(0.50, notify=False)
+            service.flush_pending_volume_apply()
+            controller.set_level_calls.clear()
+
+            service.set_volume(0.10, notify=False)
+            time.sleep(0.05)
+            service.set_volume(0.90, notify=False)
+            service.flush_pending_volume_apply(timeout=5.0)
+
+            self.assertAlmostEqual(controller.get_level(), 0.90)
+            self.assertAlmostEqual(controller.set_level_calls[-1], 0.90)
+            previous = 0.50
+            for level in controller.set_level_calls:
+                self.assertLessEqual(abs(level - previous), _CHASE_MAX_STEP + 1e-9)
+                previous = level
+
+    def test_set_level_sync_snaps_without_chase(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = ConfigManager(Path(tmp) / "config.json")
+            config.load()
+            controller = _SlowSinkController(config.config, delay=0.0)
+            service = PlayerService(config=config, volume_controller=controller)
+            controller.set_level_calls.clear()
+
+            service._set_device_volume_sync(0.12)
+
+            self.assertEqual(controller.set_level_calls, [0.12])
+            self.assertAlmostEqual(controller.get_level(), 0.12)
 
 
 class WpctlTargetCacheTests(unittest.TestCase):

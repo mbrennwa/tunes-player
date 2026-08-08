@@ -72,6 +72,8 @@ from tunes_player.core.volume import (
     VolumeController,
     VolumeEndpoint,
     VolumeMode,
+    debug_isolate_volume_from_stack,
+    debug_volume_trace,
     derive_volume_mode,
     is_alsa_endpoint_id,
 )
@@ -257,8 +259,17 @@ class PlayerService:
             run_on_main_thread=self._run_on_main_thread,
             apply_inbound_level=self._apply_inbound_device_volume,
         )
+        self._debug_volume_no_stack_sync = debug_isolate_volume_from_stack()
+        if self._debug_volume_no_stack_sync:
+            log.warning(
+                "TUNES_DEBUG_VOLUME_NO_STACK_SYNC: inbound OS/GNOME → Tunes "
+                "volume sync disabled (Tunes → device volume still active)"
+            )
         self._volume_controller_unsubscribe: VolumeUnsubscribe | None = None
-        if self._volume_controller is not None:
+        if (
+            self._volume_controller is not None
+            and not self._debug_volume_no_stack_sync
+        ):
             self._volume_controller_unsubscribe = self._volume_controller.subscribe(
                 self._volume_apply.on_device_volume_level
             )
@@ -1853,6 +1864,13 @@ class PlayerService:
         self._volume = max(0.0, min(1.0, level))
         if self._muted and self._volume > 0:
             self._muted = False
+        debug_volume_trace(
+            "set_volume level=%.4f muted=%s notify=%s -> output=%.4f",
+            self._volume,
+            self._muted,
+            notify,
+            self._output_volume_level(),
+        )
         self._push_volume_to_output(notify=notify)
 
     def toggle_mute(self) -> None:
@@ -1872,13 +1890,22 @@ class PlayerService:
 
     def begin_volume_gesture(self) -> None:
         """Ignore inbound stack volume while the UI slider is being dragged."""
+        pause = getattr(self._volume_controller, "begin_volume_gesture", None)
+        if callable(pause):
+            pause()
         self._volume_apply.begin_gesture()
 
     def end_volume_gesture(self) -> None:
+        """Clear gesture suppress and flush any coalesced device-volume apply."""
         self._volume_apply.end_gesture()
+        resume = getattr(self._volume_controller, "end_volume_gesture", None)
+        if callable(resume):
+            resume()
 
     def _apply_inbound_device_volume(self, level: float) -> None:
         """Main-thread update after coordinator filters suppress/gesture."""
+        if self._debug_volume_no_stack_sync:
+            return
         if abs(self._volume - level) < 1e-4 and not (self._muted and level > 0):
             return
         self._volume = level
@@ -1898,13 +1925,25 @@ class PlayerService:
         if not self.volume_adjustable():
             return
         level = self._output_volume_level()
-        if self._routes_volume_to_sink() and self._volume_controller is not None:
+        route_sink = (
+            self._routes_volume_to_sink() and self._volume_controller is not None
+        )
+        mpv_level = self._mpv_volume_level()
+        debug_volume_trace(
+            "push_volume output=%.4f route_sink=%s schedule_device=%s mpv=%.4f unity_gain=%s",
+            level,
+            self._routes_volume_to_sink(),
+            route_sink,
+            mpv_level,
+            self._unity_gain_profile(),
+        )
+        if route_sink:
             self._volume_apply.schedule_apply(level)
         engine = self._engine
         if engine is not None:
             if hasattr(engine, "set_bit_perfect"):
                 engine.set_bit_perfect(self._unity_gain_profile())
-            engine.set_volume(self._mpv_volume_level())
+            engine.set_volume(mpv_level)
         if notify:
             self._emit("volume_changed")
 

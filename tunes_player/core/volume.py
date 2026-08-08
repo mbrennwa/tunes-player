@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Callable, Literal, Protocol
 
@@ -22,6 +23,32 @@ def derive_volume_mode(
     if mpv_soft_volume:
         return "software"
     return "fixed"
+
+
+def debug_isolate_volume_from_stack() -> bool:
+    """Debug: ignore inbound OS/GNOME → Tunes volume updates.
+
+    When ``TUNES_DEBUG_VOLUME_NO_STACK_SYNC`` is set (``1``/``true``/``yes``/``on``):
+    stack watcher / subscribe changes do not move Tunes' volume. Outbound
+    Tunes → device/sink applies stay enabled (hardware volume still works).
+    """
+    raw = os.environ.get("TUNES_DEBUG_VOLUME_NO_STACK_SYNC", "").strip().casefold()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def debug_volume_trace_enabled() -> bool:
+    """When ``TUNES_DEBUG_VOLUME=1`` (or true/yes/on), log slider vs device applies."""
+    raw = os.environ.get("TUNES_DEBUG_VOLUME", "").strip().casefold()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def debug_volume_trace(msg: str, *args: object) -> None:
+    """Emit a volume-debug line when :func:`debug_volume_trace_enabled`."""
+    if not debug_volume_trace_enabled():
+        return
+    import logging
+
+    logging.getLogger("tunes_player.volume").info(msg, *args)
 
 SYSTEM_DEFAULT_SINK_ID = "__system_default__"
 
