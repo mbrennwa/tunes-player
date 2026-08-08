@@ -14,8 +14,12 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 from tunes_player.core.services import PlaybackState, PlayerService
+from tunes_player.core.volume import debug_volume_trace
 from tunes_player.ui.gtk.art import ArtLoader
 from tunes_player.ui.gtk.util import format_duration, join_detail, source_label
+
+# Fallback clear for keyboard/scroll volume changes (real drags use GestureDrag).
+_VOLUME_GESTURE_FALLBACK_MS = 500
 
 _TIME_LABEL_CHARS = 7  # wide enough for "0:00:00"
 # Keep UI seeks inside mpv-safe range (see engines/mpv._SEEK_END_MARGIN_SEC).
@@ -171,6 +175,11 @@ class NowPlayingBar(Gtk.Box):
         self._volume.set_size_request(_VOLUME_SLIDER_WIDTH, -1)
         self._volume.set_draw_value(False)
         self._volume.connect("change-value", self._on_volume_change_value)
+        self._attach_drag_gesture(
+            self._volume,
+            self._begin_volume_drag,
+            self._end_volume_drag,
+        )
         self._volume_box.append(self._volume)
 
         queue_btn = Gtk.Button()
@@ -221,6 +230,7 @@ class NowPlayingBar(Gtk.Box):
         self._queue_handler: Callable[[], None] | None = None
         self._art_click_handler: Callable[[], None] | None = None
         self._volume_dragging = False
+        self._volume_drag_from_gesture = False
         self._volume_drag_clear_id: int | None = None
         self._updating_volume = False
         self._seeking = False
@@ -383,6 +393,20 @@ class NowPlayingBar(Gtk.Box):
         self._mute_btn.set_icon_name(icon)
         self._mute_btn.set_tooltip_text("Unmute" if state.muted else "Mute")
 
+    def _begin_volume_drag(self) -> None:
+        if not self._service.volume_adjustable():
+            return
+        if self._volume_drag_clear_id is not None:
+            GLib.source_remove(self._volume_drag_clear_id)
+            self._volume_drag_clear_id = None
+        if not self._volume_dragging:
+            self._service.begin_volume_gesture()
+        self._volume_dragging = True
+        self._volume_drag_from_gesture = True
+
+    def _end_volume_drag(self) -> None:
+        self._finish_volume_gesture(notify=True)
+
     def _on_volume_change_value(
         self,
         _scale: Gtk.Scale,
@@ -391,26 +415,52 @@ class NowPlayingBar(Gtk.Box):
     ) -> bool:
         if self._updating_volume or not self._service.volume_adjustable():
             return False
-        # Drag flag suppresses inbound slider sync; device-volume applies are
-        # coalesced off-thread in PlayerService (see #106). Ignore stack
-        # readbacks for the whole gesture so OS echo cannot fight the drag.
+        # Gesture suppresses inbound slider sync; device level chases the thumb
+        # in small steps (#129). Thumb position is the stack linear volume (same
+        # currency as GNOME/wpctl on this system — no extra UI curve).
         if not self._volume_dragging:
             self._service.begin_volume_gesture()
-        self._volume_dragging = True
-        if self._volume_drag_clear_id is not None:
-            GLib.source_remove(self._volume_drag_clear_id)
-        self._volume_drag_clear_id = GLib.timeout_add(150, self._clear_volume_drag)
+            self._volume_dragging = True
+        if not self._volume_drag_from_gesture:
+            if self._volume_drag_clear_id is not None:
+                GLib.source_remove(self._volume_drag_clear_id)
+            self._volume_drag_clear_id = GLib.timeout_add(
+                _VOLUME_GESTURE_FALLBACK_MS,
+                self._clear_volume_drag_fallback,
+            )
         self._service.set_volume(value, notify=False)
+        debug_volume_trace(
+            "slider change-value position=%.4f (signal) scale.get_value=%.4f",
+            value,
+            self._volume.get_value(),
+        )
         return False
 
-    def _clear_volume_drag(self) -> bool:
+    def _clear_volume_drag_fallback(self) -> bool:
         self._volume_drag_clear_id = None
-        if self._service.volume_adjustable():
-            # Flush final level + emit volume_changed for MPRIS / UI listeners.
-            self._service.set_volume(self._volume.get_value(), notify=True)
-        self._service.end_volume_gesture()
-        self._volume_dragging = False
+        self._finish_volume_gesture(notify=True)
         return False
+
+    def _finish_volume_gesture(self, *, notify: bool) -> None:
+        if self._volume_drag_clear_id is not None:
+            GLib.source_remove(self._volume_drag_clear_id)
+            self._volume_drag_clear_id = None
+        if not self._volume_dragging:
+            return
+        # Keep the level from the last change-value (signal value can lead
+        # Adjustment.get_value()). Re-reading the scale on release caused
+        # audible drops (#129).
+        self._volume_dragging = False
+        self._volume_drag_from_gesture = False
+        if notify and self._service.volume_adjustable():
+            level = self._service.get_playback_state().volume
+            debug_volume_trace(
+                "slider gesture-end keep service volume=%.4f scale.get_value=%.4f",
+                level,
+                self._volume.get_value(),
+            )
+            self._service.set_volume(level, notify=True)
+        self._service.end_volume_gesture()
 
     def _on_service_event(self, event: str) -> None:
         GLib.idle_add(self._sync_from_service, event)

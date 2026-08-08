@@ -330,6 +330,7 @@ class _SubprocessVolumeController(ABC):
             text=True,
         )
 
+
 class WpctlVolumeController(_SubprocessVolumeController):
     _command = "wpctl"
 
@@ -375,6 +376,7 @@ class WpctlVolumeController(_SubprocessVolumeController):
     def _mpv_device_for(self, endpoint: VolumeEndpoint) -> str | None:
         # mpv pulse output works with PipeWire via pipewire-pulse (pactl CLI not required).
         return f"pulse/{endpoint.name}"
+
 
 class PactlVolumeController(_SubprocessVolumeController):
     _command = "pactl"
@@ -452,13 +454,23 @@ class LinuxOutputController:
             if pactl.available():
                 self._sink_backend = pactl
         self._software_level = 0.72
+        self._outbound_volume_depth = 0
+        self._volume_gesture_active = False
+        from tunes_player.core.volume import debug_isolate_volume_from_stack
         from tunes_player.platform.linux.volume_watch import StackVolumeWatcher
 
         self._stack_watcher = StackVolumeWatcher(
-            should_watch=lambda: self.uses_device_volume,
+            should_watch=lambda: (
+                self.uses_device_volume and not debug_isolate_volume_from_stack()
+            ),
             read_level=self.get_level,
             on_external=self.notify_external_level,
             watch_mode=self._stack_watch_mode,
+            # Avoid concurrent wpctl get-volume while set-volume runs (or while
+            # the UI is dragging). CLI-only set storms are smooth; Tunes was not.
+            allow_read=lambda: (
+                self._outbound_volume_depth == 0 and not self._volume_gesture_active
+            ),
         )
         self._stack_watcher.start()
 
@@ -480,6 +492,10 @@ class LinuxOutputController:
         watcher = getattr(self, "_stack_watcher", None)
         if watcher is not None:
             watcher.stop()
+        backend = self._sink_backend
+        closer = getattr(backend, "close", None)
+        if callable(closer):
+            closer()
 
     def _active_alsa_endpoint_id(self) -> str | None:
         active = self.get_active_endpoint_id()
@@ -539,24 +555,41 @@ class LinuxOutputController:
             return self._sink_backend.get_level()
         return self._software_level
 
+    def begin_volume_gesture(self) -> None:
+        """Pause inbound stack reads while the UI slider is dragged."""
+        self._volume_gesture_active = True
+
+    def end_volume_gesture(self) -> None:
+        self._volume_gesture_active = False
+        watcher = getattr(self, "_stack_watcher", None)
+        if watcher is not None and self.uses_device_volume:
+            try:
+                watcher.note_applied_level(self.get_level())
+            except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+                pass
+
     def set_level(self, level: float) -> None:
         clamped = max(0.0, min(1.0, level))
-        endpoint_id = self._active_alsa_endpoint_id()
-        if endpoint_id is not None and self._alsa_has_hardware_volume():
-            from tunes_player.platform.linux.alsa_mixer import alsa_set_level_for_endpoint
+        self._outbound_volume_depth += 1
+        try:
+            endpoint_id = self._active_alsa_endpoint_id()
+            if endpoint_id is not None and self._alsa_has_hardware_volume():
+                from tunes_player.platform.linux.alsa_mixer import alsa_set_level_for_endpoint
 
-            alsa_set_level_for_endpoint(endpoint_id, clamped)
+                alsa_set_level_for_endpoint(endpoint_id, clamped)
+                self._note_applied_level(clamped)
+                self._subscriptions.notify(clamped)
+                return
+            if self.uses_device_volume and self._sink_backend is not None:
+                self._sink_backend.set_level(clamped)
+                self._note_applied_level(clamped)
+                self._subscriptions.notify(clamped)
+                return
+            self._software_level = clamped
             self._note_applied_level(clamped)
             self._subscriptions.notify(clamped)
-            return
-        if self.uses_device_volume and self._sink_backend is not None:
-            self._sink_backend.set_level(clamped)
-            self._note_applied_level(clamped)
-            self._subscriptions.notify(clamped)
-            return
-        self._software_level = clamped
-        self._note_applied_level(clamped)
-        self._subscriptions.notify(clamped)
+        finally:
+            self._outbound_volume_depth = max(0, self._outbound_volume_depth - 1)
 
     def _note_applied_level(self, level: float) -> None:
         watcher = getattr(self, "_stack_watcher", None)

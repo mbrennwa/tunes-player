@@ -49,6 +49,7 @@ class StackVolumeWatcher:
         watch_mode: Callable[[], WatchMode],
         poll_interval_sec: float = _DEFAULT_POLL_INTERVAL_SEC,
         pactl_path: str | None = None,
+        allow_read: Callable[[], bool] | None = None,
     ) -> None:
         self._should_watch = should_watch
         self._read_level = read_level
@@ -56,6 +57,7 @@ class StackVolumeWatcher:
         self._watch_mode = watch_mode
         self._poll_interval_sec = max(0.05, poll_interval_sec)
         self._pactl_path = pactl_path
+        self._allow_read = allow_read
         self._stop = threading.Event()
         self._reset = threading.Event()
         self._thread: threading.Thread | None = None
@@ -200,6 +202,8 @@ class StackVolumeWatcher:
 
     def _poll_once(self) -> None:
         if not self._should_watch():
+            return
+        if self._allow_read is not None and not self._allow_read():
             return
         try:
             level = max(0.0, min(1.0, float(self._read_level())))
