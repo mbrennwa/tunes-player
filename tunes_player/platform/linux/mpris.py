@@ -38,6 +38,18 @@ SUPPORTED_MIME_TYPES = [
     "application/ogg",
 ]
 
+
+def _unwrap_dbus_value(value: object) -> object:
+    """Return the Python value from a D-Bus property Set payload.
+
+    Gio's property setter passes a ``GLib.Variant``. ``Properties.Set`` via
+    ``parameters.unpack()`` often already unwraps the nested ``v`` to a
+    Python scalar (e.g. ``float`` for Volume).
+    """
+    if isinstance(value, GLib.Variant):
+        return value.unpack()
+    return value
+
 _INTROSPECTION = """
 <node>
   <interface name="org.freedesktop.DBus.Properties">
@@ -402,7 +414,7 @@ class MprisService:
         self,
         interface_name: str,
         property_name: str,
-        value: GLib.Variant,
+        value: object,
     ) -> None:
         if interface_name != PLAYER_INTERFACE:
             raise GLib.Error.new_literal(
@@ -412,9 +424,10 @@ class MprisService:
             )
         if property_name == "Volume":
             if self._service.volume_control_enabled():
-                self._service.set_volume(max(0.0, min(1.0, value.unpack())))
+                level = float(_unwrap_dbus_value(value))
+                self._service.set_volume(max(0.0, min(1.0, level)))
         elif property_name == "LoopStatus":
-            loop_status = value.unpack()
+            loop_status = str(_unwrap_dbus_value(value))
             if loop_status not in {"None", "Track", "Playlist"}:
                 raise GLib.Error.new_literal(
                     Gio.dbus_error_quark(),
@@ -423,7 +436,7 @@ class MprisService:
                 )
             self._loop_status = loop_status
         elif property_name == "Rate":
-            rate = value.unpack()
+            rate = float(_unwrap_dbus_value(value))
             if rate != 1.0:
                 raise GLib.Error.new_literal(
                     Gio.dbus_error_quark(),
@@ -431,7 +444,7 @@ class MprisService:
                     "Changing playback rate is not supported",
                 )
         elif property_name == "Shuffle":
-            self._shuffle = bool(value.unpack())
+            self._shuffle = bool(_unwrap_dbus_value(value))
         else:
             raise GLib.Error.new_literal(
                 Gio.dbus_error_quark(),
