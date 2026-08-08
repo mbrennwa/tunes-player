@@ -1499,15 +1499,6 @@ class PlayerService:
         )
         return playback_preference_from_shell(enabled or frozenset())
 
-    def _playback_preference_for_shell(
-        self,
-        *,
-        enabled_quality_tiers: frozenset[str] | None = None,
-    ) -> PlaybackPreference:
-        return self.playback_preference_for_shell(
-            enabled_quality_tiers=enabled_quality_tiers,
-        )
-
     def enrich_catalog_quality(self, release_id: str) -> Release | None:
         """Classify streaming catalog quality via album lookup; local is already ready."""
         if release_id.startswith("local:"):
@@ -1554,7 +1545,7 @@ class PlayerService:
                 self._start_playlist(
                     tracks,
                     start_index=start_index,
-                    playback_preference=self._playback_preference_for_shell(),
+                    playback_preference=self.playback_preference_for_shell(),
                 )
 
             self._run_on_main_thread(apply)
@@ -1580,7 +1571,7 @@ class PlayerService:
         self._start_playlist(
             tracks,
             start_index=start_index,
-            playback_preference=self._playback_preference_for_shell(),
+            playback_preference=self.playback_preference_for_shell(),
         )
 
     def _play_qobuz_track(self, track_id: str) -> None:
@@ -1603,7 +1594,7 @@ class PlayerService:
         self._start_playlist(
             tracks,
             start_index=start_index,
-            playback_preference=self._playback_preference_for_shell(),
+            playback_preference=self.playback_preference_for_shell(),
         )
 
     def play_release(
@@ -1693,7 +1684,7 @@ class PlayerService:
         self._start_playlist(
             tracks,
             start_index=start_index,
-            playback_preference=self._playback_preference_for_shell(),
+            playback_preference=self.playback_preference_for_shell(),
             catalog_release_id=catalog_release_id or release_id,
         )
 

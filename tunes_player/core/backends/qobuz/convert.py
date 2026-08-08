@@ -5,10 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from tunes_player.core.backends.qobuz import ids as qobuz_ids
-from tunes_player.core.library.release_logic import (
-    infer_release_completeness,
-    release_type_from_metadata,
-)
+from tunes_player.core.library.release_logic import infer_release_metadata
 from tunes_player.core.models import (
     Release,
     Source,
@@ -82,13 +79,13 @@ def _release_common_fields(
             track_count = expected or 0
     product_type = album.get("product_type")
     type_raw = str(product_type) if product_type is not None else None
-    completeness, expected = infer_release_completeness(
+    completeness, release_type, expected = infer_release_metadata(
         track_count=track_count,
         is_synthetic=False,
         total_tracks_tag=expected,
         max_track_number=None,
+        release_type_tag=type_raw,
     )
-    release_type = release_type_from_metadata(type_raw, is_synthetic=False)
     duration = album.get("duration")
     duration_sec = float(duration) if duration is not None else None
     genre = album.get("genre")
