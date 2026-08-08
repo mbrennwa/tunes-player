@@ -530,7 +530,6 @@ class TidalClient:
             collected = _collect_tidal_home_pages(
                 session,
                 include_explore=False,
-                include_legacy_home=False,
                 max_depth=2,
                 rail_filter="new_releases",
             )
@@ -585,7 +584,6 @@ class TidalClient:
             collected = _collect_tidal_home_pages(
                 session,
                 include_explore=False,
-                include_legacy_home=False,
                 max_depth=2,
                 rail_filter="recommendations",
             )
@@ -1173,7 +1171,6 @@ def _collect_tidal_home_pages(
     session: Any,
     *,
     include_explore: bool = True,
-    include_legacy_home: bool = True,
     max_depth: int = 4,
     rail_filter: TidalRailFilter = "all",
 ) -> list[_CollectedTidalObject]:
@@ -1182,8 +1179,6 @@ def _collect_tidal_home_pages(
     with _quiet_tidalapi_page_warnings():
         pages: list[object] = [session.home()]
         optional_loaders: list[object] = []
-        if include_legacy_home:
-            optional_loaders.append(lambda: session.home(use_legacy_endpoint=True))
         if include_explore:
             optional_loaders.append(session.explore)
         optional_loaders.append(session.for_you)

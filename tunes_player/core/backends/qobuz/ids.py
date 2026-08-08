@@ -11,10 +11,6 @@ def album_id(qobuz_album_id: int | str) -> str:
     return f"qobuz:album:{qobuz_album_id}"
 
 
-def artist_id(qobuz_artist_id: int | str) -> str:
-    return f"qobuz:artist:{qobuz_artist_id}"
-
-
 def parse_prefixed_id(value: str, kind: str) -> str | None:
     prefix = f"qobuz:{kind}:"
     if not value.startswith(prefix):
