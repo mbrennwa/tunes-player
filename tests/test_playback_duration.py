@@ -223,8 +223,6 @@ class PlaybackDurationTests(unittest.TestCase):
             bit_perfect_playback=False,
             playback_note=None,
             device_volume=False,
-            mpv_soft_volume=False,
-            no_volume_control=False,
             volume_mode="software",
             output_using_fallback=False,
             position_sec=60.0,

@@ -169,8 +169,6 @@ class PlaybackState:
     bit_perfect_playback: bool
     playback_note: str | None
     device_volume: bool
-    mpv_soft_volume: bool
-    no_volume_control: bool
     volume_mode: VolumeMode
     output_using_fallback: bool
     position_sec: float
@@ -1396,7 +1394,6 @@ class PlayerService:
 
     def get_playback_state(self) -> PlaybackState:
         volume_mode = self._volume_mode()
-        mpv_soft_volume = volume_mode == "software"
         return PlaybackState(
             current_track=self._current_track,
             is_playing=self._is_playing,
@@ -1408,8 +1405,6 @@ class PlayerService:
             bit_perfect_playback=self._bit_perfect_playback,
             playback_note=self._playback_note,
             device_volume=self._device_volume,
-            mpv_soft_volume=mpv_soft_volume,
-            no_volume_control=volume_mode == "fixed",
             volume_mode=volume_mode,
             output_using_fallback=self._output_using_fallback(),
             position_sec=self._position_sec,
@@ -1422,10 +1417,6 @@ class PlayerService:
 
     def volume_control_enabled(self) -> bool:
         return self._volume_mode() != "fixed"
-
-    def volume_adjustable(self) -> bool:
-        """Alias for volume_control_enabled (transport / MPRIS call sites)."""
-        return self.volume_control_enabled()
 
     def refresh_output_volume_detection(self) -> None:
         """Re-probe whether the active output supports hardware volume."""
@@ -1823,7 +1814,7 @@ class PlayerService:
         self._emit("position_changed")
 
     def set_volume(self, level: float, *, notify: bool = True) -> None:
-        if not self.volume_adjustable():
+        if not self.volume_control_enabled():
             return
         self._volume = max(0.0, min(1.0, level))
         if self._muted and self._volume > 0:
@@ -1838,7 +1829,7 @@ class PlayerService:
         self._push_volume_to_output(notify=notify)
 
     def toggle_mute(self) -> None:
-        if not self.volume_adjustable():
+        if not self.volume_control_enabled():
             return
         self._muted = not self._muted
         self._push_volume_to_output(notify=True)
@@ -1886,7 +1877,7 @@ class PlayerService:
         self._volume_apply.flush(timeout=timeout)
 
     def _push_volume_to_output(self, *, notify: bool = True) -> None:
-        if not self.volume_adjustable():
+        if not self.volume_control_enabled():
             return
         level = self._output_volume_level()
         route_sink = (
@@ -1912,7 +1903,7 @@ class PlayerService:
             self._emit("volume_changed")
 
     def adjust_volume(self, delta: float) -> None:
-        if not self.volume_adjustable():
+        if not self.volume_control_enabled():
             return
         self.set_volume(self._volume + delta)
 

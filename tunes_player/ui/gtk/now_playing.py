@@ -394,7 +394,7 @@ class NowPlayingBar(Gtk.Box):
         self._mute_btn.set_tooltip_text("Unmute" if state.muted else "Mute")
 
     def _begin_volume_drag(self) -> None:
-        if not self._service.volume_adjustable():
+        if not self._service.volume_control_enabled():
             return
         if self._volume_drag_clear_id is not None:
             GLib.source_remove(self._volume_drag_clear_id)
@@ -413,7 +413,7 @@ class NowPlayingBar(Gtk.Box):
         _scroll_type: Gtk.ScrollType,
         value: float,
     ) -> bool:
-        if self._updating_volume or not self._service.volume_adjustable():
+        if self._updating_volume or not self._service.volume_control_enabled():
             return False
         # Gesture suppresses inbound slider sync; device level chases the thumb
         # in small steps (#129). Thumb position is the stack linear volume (same
@@ -452,7 +452,7 @@ class NowPlayingBar(Gtk.Box):
         # audible drops (#129).
         self._volume_dragging = False
         self._volume_drag_from_gesture = False
-        if notify and self._service.volume_adjustable():
+        if notify and self._service.volume_control_enabled():
             level = self._service.get_playback_state().volume
             debug_volume_trace(
                 "slider gesture-end keep service volume=%.4f scale.get_value=%.4f",
@@ -650,11 +650,11 @@ def _handle_media_key(keyval: int, service: PlayerService) -> bool:
         service.pause()
         return True
     if keyval == _KEY_VOLUME_UP:
-        if service.volume_adjustable():
+        if service.volume_control_enabled():
             service.adjust_volume(0.05)
         return True
     if keyval == _KEY_VOLUME_DOWN:
-        if service.volume_adjustable():
+        if service.volume_control_enabled():
             service.adjust_volume(-0.05)
         return True
     return False
