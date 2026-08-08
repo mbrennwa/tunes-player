@@ -946,12 +946,19 @@ class TunesWindow(Adw.ApplicationWindow):
         self._service.config.set_shell_state(self._shell_state_for_persist())
         app = self.get_application()
         request_quit = getattr(app, "request_quit", None) if app is not None else None
-        if callable(request_quit):
-            # Window close must quit the application: MPRIS/pollers otherwise
-            # keep the process alive with no window (filters look "lost" after kill).
+        if not callable(request_quit):
+            return False
+
+        # Never call Application.quit() synchronously from close-request: that
+        # re-enters window teardown and freezes the UI. Defer quit to idle.
+        def _quit_later() -> bool:
             request_quit()
-            return True
-        return False
+            return False
+
+        GLib.idle_add(_quit_later)
+        # Keep the window if a download confirm dialog may be shown; otherwise
+        # allow the default close and let idle quit tear down the app.
+        return bool(self._service.is_saving_to_disk())
 
     def _refresh_cached_release_quality(self, releases: list[Release]) -> list[Release]:
         if not any(release.source == Source.LOCAL for release in releases):
