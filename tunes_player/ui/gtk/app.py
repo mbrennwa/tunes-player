@@ -35,10 +35,8 @@ from tunes_player.core.shell_state import (
     refresh_local_peak_quality_tiers,
     genres_in_selection,
     prune_enabled_genres,
-    prune_enabled_quality_tiers,
     prune_enabled_labels,
     labels_in_selection,
-    quality_tiers_in_selection,
     release_to_cache_payload,
     releases_from_cache_payloads,
 )
@@ -654,13 +652,8 @@ class TunesWindow(Adw.ApplicationWindow):
         )
 
     def _sync_quality_filter(self) -> None:
-        available = quality_tiers_in_selection(self._cached_releases)
+        # Do not prune enabled_quality_tiers against the current grid (#149 Step 1).
         show = bool(self._cached_releases)
-        self._prune_shell_filter_attr(
-            attr="enabled_quality_tiers",
-            available=available,
-            prune=prune_enabled_quality_tiers,
-        )
         state = self._shell_state
 
         self._quality_filter_slot.set_visible(show)
