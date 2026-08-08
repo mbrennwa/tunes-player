@@ -946,7 +946,9 @@ class TunesWindow(Adw.ApplicationWindow):
         self._service.config.set_shell_state(self._shell_state_for_persist())
         app = self.get_application()
         request_quit = getattr(app, "request_quit", None) if app is not None else None
-        if callable(request_quit) and self._service.is_saving_to_disk():
+        if callable(request_quit):
+            # Window close must quit the application: MPRIS/pollers otherwise
+            # keep the process alive with no window (filters look "lost" after kill).
             request_quit()
             return True
         return False

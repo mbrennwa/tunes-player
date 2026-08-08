@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import re
 from collections.abc import Callable
 
@@ -14,7 +16,6 @@ gi.require_version("GLib", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
 from tunes_player.core.art import resolve_art_url  # noqa: E402
-from tunes_player.core.backends.resolve import resolve_track  # noqa: E402
 from tunes_player.core.services import PlaybackState, PlayerService  # noqa: E402
 
 BUS_NAME = "org.mpris.MediaPlayer2.tunes_player"
@@ -526,9 +527,15 @@ class MprisService:
             metadata["xesam:album"] = GLib.Variant("s", track.release_title)
         if state.duration_sec is not None:
             metadata["xesam:duration"] = GLib.Variant("x", int(state.duration_sec * 1_000_000))
-        source = resolve_track(self._service.store, track.id, tidal=self._service.tidal)
-        if source is not None:
-            metadata["xesam:url"] = GLib.Variant("s", source.uri)
+        # Never call resolve_track here: MPRIS property flushes run on the GTK
+        # main loop and stream negotiation (esp. TIDAL 429 retries) freezes the UI.
+        if track.id.startswith("local:"):
+            file_meta = self._service.store.get_file_metadata(track.id)
+            if file_meta is not None and file_meta.path:
+                metadata["xesam:url"] = GLib.Variant(
+                    "s",
+                    Path(file_meta.path).resolve().as_uri(),
+                )
         art_url = resolve_art_url(
             track.art_uri,
             data_dir=self._service.config.data_dir,
