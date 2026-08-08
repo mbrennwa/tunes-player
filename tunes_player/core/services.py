@@ -3755,21 +3755,32 @@ class PlayerService:
         if path_info is not None:
             self._apply_path_info(self._finalize_playback_path_info(path_info))
 
+    def _resolve_quality_hint(
+        self,
+        track: Track,
+        *,
+        format_label: str | None = None,
+        playback_note: str | None = None,
+    ) -> str:
+        """Resolve tidal/qobuz/local format text and attach playback-note suffix."""
+        if format_label is not None:
+            base_hint = format_label
+        elif track.id.startswith("tidal:") or track.source.value == "tidal":
+            base_hint = self._tidal_quality_hint_for_track(track.id)
+        elif track.id.startswith("qobuz:") or track.source.value == "qobuz":
+            base_hint = self._qobuz_quality_hint_for_track(track.id)
+        else:
+            metadata = self._store.get_file_metadata(track.id)
+            base_hint = LibraryStore.quality_hint(metadata)
+        note = self._playback_note if playback_note is None else playback_note
+        return format_playback_status(base_hint, playback_note=note)
+
     def _refresh_quality_hint(self) -> None:
         """Rebuild now-playing format line including the active audio layer."""
         track = self._current_track
         if track is None:
             return
-        if track.id.startswith("tidal:"):
-            base_hint = self._tidal_quality_hint_for_track(track.id)
-        elif track.id.startswith("qobuz:"):
-            base_hint = self._qobuz_quality_hint_for_track(track.id)
-        else:
-            metadata = self._store.get_file_metadata(track.id)
-            base_hint = LibraryStore.quality_hint(metadata)
-        self._quality_hint = format_playback_status(
-            base_hint, playback_note=self._playback_note
-        )
+        self._quality_hint = self._resolve_quality_hint(track)
 
     def _qobuz_quality_hint_for_track(self, track_id: str) -> str:
         if (
@@ -4146,18 +4157,10 @@ class PlayerService:
         )
         playback_note = self._playback_note_for_source(path_info, source)
         release_id = self._release_id_for_playback(track)
-        format_label = source.format_label
-        if format_label is not None:
-            base_hint = format_label
-        elif track.source.value == "tidal":
-            base_hint = self._tidal_quality_hint_for_track(track.id)
-        elif track.source.value == "qobuz":
-            base_hint = self._qobuz_quality_hint_for_track(track.id)
-        else:
-            metadata = self._store.get_file_metadata(track.id)
-            base_hint = LibraryStore.quality_hint(metadata)
-        quality_hint = format_playback_status(
-            base_hint, playback_note=playback_note
+        quality_hint = self._resolve_quality_hint(
+            track,
+            format_label=source.format_label,
+            playback_note=playback_note,
         )
         return _PreparedTrackLoad(
             generation=generation,
@@ -4713,8 +4716,8 @@ class PlayerService:
         if track.source.value != "qobuz":
             self._qobuz_playback_format_track_id = None
             self._qobuz_playback_format_label = None
+        # Format-cache side effects stay here; hint text resolves below.
         if format_label is not None:
-            base_hint = format_label
             if track.source.value == "tidal":
                 self._tidal_playback_format_track_id = track.id
                 self._tidal_playback_format_label = format_label
@@ -4724,21 +4727,18 @@ class PlayerService:
         elif track.source.value == "tidal":
             self._tidal_playback_format_track_id = None
             self._tidal_playback_format_label = None
-            base_hint = self._tidal_quality_hint_for_track(track.id)
         elif track.source.value == "qobuz":
             self._qobuz_playback_format_track_id = None
             self._qobuz_playback_format_label = None
-            base_hint = self._qobuz_quality_hint_for_track(track.id)
-        else:
-            metadata = self._store.get_file_metadata(track.id)
-            base_hint = LibraryStore.quality_hint(metadata)
         if playback_note is not None:
             self._playback_note = playback_note
         if quality_hint is not None:
             self._quality_hint = quality_hint
         else:
-            self._quality_hint = format_playback_status(
-                base_hint, playback_note=self._playback_note
+            self._quality_hint = self._resolve_quality_hint(
+                track,
+                format_label=format_label,
+                playback_note=self._playback_note,
             )
         self._duration_sec = None
         if reset_position:
