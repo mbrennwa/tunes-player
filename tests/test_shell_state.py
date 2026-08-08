@@ -606,6 +606,89 @@ class TestQualityFilter(unittest.TestCase):
         self.assertEqual(pruned, frozenset({QUALITY_FILTER_CD}))
 
 
+class TestFilterPruneAcrossSelectionChange(unittest.TestCase):
+    """Mock two catalog caches (view A → view B), as GTK sync does on selection change.
+
+    Sibling chips (quality/type) on the *same* cache do not change genres_in_selection;
+    only a new cached selection does. That is why UI smoke for genre prune needs a
+    different preset/search, not toggling Compressed on the same view.
+    """
+
+    def test_genre_enabled_cleared_when_missing_from_new_selection(self) -> None:
+        view_a = [
+            _release("a1", Source.LOCAL, genre="Rock"),
+            _release("a2", Source.LOCAL, genre="Jazz"),
+        ]
+        view_b = [
+            _release("b1", Source.LOCAL, genre="Jazz"),
+            _release("b2", Source.LOCAL, genre="Classical"),
+        ]
+        enabled = frozenset({"Rock"})
+        self.assertIn("Rock", genres_in_selection(view_a))
+        available_b = genres_in_selection(view_b)
+        self.assertNotIn("Rock", available_b)
+        self.assertEqual(prune_enabled_genres(enabled, available_b), frozenset())
+
+    def test_sibling_quality_chip_does_not_change_genre_catalog(self) -> None:
+        cached = [
+            _release(
+                "r1",
+                Source.LOCAL,
+                genre="Rock",
+                peak_quality_tier=QUALITY_FILTER_HI_RES,
+            ),
+            _release(
+                "r2",
+                Source.LOCAL,
+                genre="Jazz",
+                peak_quality_tier=QUALITY_FILTER_COMPRESSED,
+            ),
+        ]
+        before = genres_in_selection(cached)
+        visible = apply_quality_filter(cached, frozenset({QUALITY_FILTER_COMPRESSED}))
+        self.assertEqual([r.id for r in visible], ["r2"])
+        # Genre menu/prune still see the full cached selection, not post-chip rows.
+        self.assertEqual(genres_in_selection(cached), before)
+        self.assertIn("Rock", before)
+
+    def test_label_enabled_cleared_when_missing_from_new_selection(self) -> None:
+        view_a = [_release("a1", Source.LOCAL), _release("a2", Source.LOCAL)]
+        view_b = [_release("b1", Source.LOCAL), _release("b2", Source.LOCAL)]
+        labels_a = {
+            "a1": frozenset({"buy"}),
+            "a2": frozenset({"listen"}),
+        }
+        labels_b = {
+            "b1": frozenset({"listen"}),
+            "b2": frozenset({"listen"}),
+        }
+        enabled = frozenset({"buy"})
+        self.assertIn("buy", labels_in_selection(view_a, labels_a))
+        available_b = labels_in_selection(view_b, labels_b)
+        self.assertNotIn("buy", available_b)
+        self.assertEqual(prune_enabled_labels(enabled, available_b), frozenset())
+
+    def test_source_pruned_when_no_longer_configured(self) -> None:
+        enabled = frozenset({Source.LOCAL, Source.TIDAL})
+        configured = {Source.LOCAL, Source.QOBUZ}
+        self.assertEqual(
+            prune_enabled_sources(enabled, configured),
+            frozenset({Source.LOCAL}),
+        )
+
+    def test_quality_helper_would_clear_but_step1_keeps_sticky_intent(self) -> None:
+        """Document Step 1: helper still prunes; GTK sync no longer calls it."""
+        view_cd_only = [
+            _release("c1", Source.LOCAL, peak_quality_tier=QUALITY_FILTER_CD),
+        ]
+        enabled = frozenset({QUALITY_FILTER_COMPRESSED})
+        available = quality_tiers_in_selection(view_cd_only)
+        self.assertEqual(available, (QUALITY_FILTER_CD,))
+        self.assertEqual(prune_enabled_quality_tiers(enabled, available), frozenset())
+        # Sticky intent after Step 1: keep the user's enabled set across views.
+        self.assertEqual(enabled, frozenset({QUALITY_FILTER_COMPRESSED}))
+
+
 class TestEnsureSourceEnabled(unittest.TestCase):
     def test_all_sources_unchanged(self) -> None:
         available = {Source.LOCAL, Source.TIDAL}
