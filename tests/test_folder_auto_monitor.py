@@ -159,6 +159,24 @@ class FolderAutoMonitorServiceTests(unittest.TestCase):
 
         enqueue.assert_not_called()
 
+    def test_enqueue_startup_scans_skips_complete_empty_auto_monitor_folder(self) -> None:
+        self._config.add_music_folder(self._folder, auto_monitor=True)
+        self._config.record_folder_scan(
+            self._folder,
+            errors=0,
+            scan_kind="full",
+            catalog_total=0,
+        )
+
+        with (
+            patch.object(self._service, "_run_startup_reconcile"),
+            patch.object(self._service, "count_indexed_files", return_value=0),
+            patch.object(self._service, "enqueue_scan") as enqueue,
+        ):
+            self._service.enqueue_startup_scans()
+
+        enqueue.assert_not_called()
+
     def test_disable_auto_monitor_stops_active_scan(self) -> None:
         from tunes_player.core.services import _ScanJob
 

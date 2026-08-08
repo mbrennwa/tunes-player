@@ -334,7 +334,7 @@ class LibraryScanCoordinator:
 
     def folder_scan_is_complete(self, folder: str) -> bool:
         catalog_total = self._config_manager.folder_catalog_total(folder)
-        if catalog_total is None or catalog_total <= 0:
+        if catalog_total is None:
             return False
         errors = self._config_manager.folder_last_scan_errors(folder)
         if errors is not None and errors not in (0, FOLDER_SCAN_INCOMPLETE):
@@ -358,7 +358,7 @@ class LibraryScanCoordinator:
         if errors == FOLDER_SCAN_INCOMPLETE:
             return True
         catalog_total = self._config_manager.folder_catalog_total(folder)
-        if catalog_total is None or catalog_total <= 0:
+        if catalog_total is None:
             return False
         return self._count_indexed_files(folder) < catalog_total
 

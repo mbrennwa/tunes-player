@@ -84,7 +84,7 @@ def _format_status_detail(
     if errors is None:
         return "incomplete"
 
-    catalog_known = catalog_total is not None and catalog_total > 0
+    catalog_known = catalog_total is not None and catalog_total >= 0
     fully_indexed = (
         catalog_known
         and indexed_files is not None
@@ -126,7 +126,7 @@ def format_folder_last_scan_line(
         last_scan_kind=last_scan_kind,
     )
 
-    if detail == "complete" and indexed_files is not None and indexed_files > 0:
+    if detail == "complete" and indexed_files is not None and indexed_files >= 0:
         return f"Last scan: {stamp} · {indexed_files:,} files"
 
     parts = [f"Last scan: {stamp}"]
