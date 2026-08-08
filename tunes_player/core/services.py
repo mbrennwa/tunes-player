@@ -2690,6 +2690,9 @@ class PlayerService:
         if engine is not None:
             pos = engine.get_position()
             playing = engine.is_playing()
+        elif self._playback_intended or self._is_playing:
+            pos = self._position_sec
+            playing = self._playback_intended or self._is_playing
         self._reset_engine()
         if track is None:
             return
@@ -2716,7 +2719,9 @@ class PlayerService:
             track,
             format_label=source.format_label,
             playback_note=path_info.playback_note,
+            reset_position=False,
         )
+        self._reset_playback_position(pos)
         self._configure_engine_playback_path(engine, track, source=source)
         playback_target = self._playback_target_for_engine(source)
         engine.load(
@@ -2726,6 +2731,9 @@ class PlayerService:
         )
         if not playing:
             engine.pause()
+        self._playback_intended = playing
+        self._is_playing = playing
+        self._sync_from_engine()
 
     def _reset_engine(self) -> None:
         self._reset_engine_unlocked()

@@ -65,6 +65,53 @@ class MpvEngineTimelineTests(unittest.TestCase):
         engine._notify_track_started()
         self.assertAlmostEqual(engine._cached_time_pos(), 0.0)
 
+    def test_notify_track_started_preserves_resume_start(self) -> None:
+        engine = self._engine()
+        engine._loaded_uri = "/music/next.flac"
+        engine._last_track_started_uri = None
+        engine._time_pos_sec = 0.0
+        engine._emit = MagicMock()  # type: ignore[method-assign]
+        engine._notify_track_started(start_sec=42.5)
+        self.assertAlmostEqual(engine._cached_time_pos(), 42.5)
+
+    def test_load_with_start_sec_uses_loadfile_start(self) -> None:
+        engine = self._engine()
+        engine._loaded_uri = None
+        engine._last_track_started_uri = None
+        engine._output_profile = None
+        engine._keep_alsa_open_on_track_change = False
+        engine._direct_alsa_device_open = False
+        engine._player = MagicMock()
+        engine._emit = MagicMock()  # type: ignore[method-assign]
+        engine.refresh_playback_path_info = MagicMock()  # type: ignore[method-assign]
+        engine._apply_buffer_policy = MagicMock()  # type: ignore[method-assign]
+
+        engine.load("/music/track.flac", start_sec=15.0)
+
+        engine._player.loadfile.assert_called_once_with(
+            "/music/track.flac", "replace", start=15.0
+        )
+        engine._player.play.assert_not_called()
+        self.assertAlmostEqual(engine._cached_time_pos(), 15.0)
+
+    def test_load_without_start_sec_uses_play(self) -> None:
+        engine = self._engine()
+        engine._loaded_uri = None
+        engine._last_track_started_uri = None
+        engine._output_profile = None
+        engine._keep_alsa_open_on_track_change = False
+        engine._direct_alsa_device_open = False
+        engine._player = MagicMock()
+        engine._emit = MagicMock()  # type: ignore[method-assign]
+        engine.refresh_playback_path_info = MagicMock()  # type: ignore[method-assign]
+        engine._apply_buffer_policy = MagicMock()  # type: ignore[method-assign]
+
+        engine.load("/music/track.flac")
+
+        engine._player.play.assert_called_once_with("/music/track.flac")
+        engine._player.loadfile.assert_not_called()
+        self.assertAlmostEqual(engine._cached_time_pos(), 0.0)
+
     def test_snapshot_health_properties(self) -> None:
         engine = self._engine()
         values = {

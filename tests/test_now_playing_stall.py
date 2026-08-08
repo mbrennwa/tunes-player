@@ -43,6 +43,24 @@ class NowPlayingStallTests(unittest.TestCase):
         )
         self.assertGreater(shown, 14.0)
 
+    def test_same_track_reported_drop_rewinds_shown(self) -> None:
+        bar = NowPlayingBar.__new__(NowPlayingBar)
+        bar._progress_track_id = "t1"
+        bar._shown_sec = 25.0
+        bar._shown_anchor_sec = 25.0
+        bar._shown_anchor_at = time.monotonic()
+        bar._set_progress_fraction = lambda *_a, **_k: None  # type: ignore[method-assign]
+
+        shown = bar._sync_shown_position(
+            track_id="t1",
+            reported_sec=12.0,
+            duration_sec=180.0,
+            is_playing=True,
+            position_stalled=False,
+        )
+        self.assertAlmostEqual(shown, 12.0)
+        self.assertAlmostEqual(bar._shown_sec, 12.0)
+
 
 if __name__ == "__main__":
     unittest.main()
