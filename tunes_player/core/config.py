@@ -378,7 +378,7 @@ class ConfigManager:
         self._config.music_folder_last_scan_at[path] = scanned_at if scanned_at is not None else time.time()
         self._config.music_folder_last_scan_errors[path] = int(errors)
         self._config.music_folder_last_scan_kind[path] = scan_kind
-        if scan_kind == "full" and catalog_total is not None and catalog_total > 0:
+        if scan_kind == "full" and catalog_total is not None and catalog_total >= 0:
             self._config.music_folder_catalog_total[path] = int(catalog_total)
         if scan_kind == "full":
             if checkpoint == "clear":

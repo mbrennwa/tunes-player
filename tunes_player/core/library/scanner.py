@@ -301,20 +301,14 @@ class LibraryScanner:
                 for folder in self._config.music_folders
             ]
             removed += self._purge_files_outside_roots(connection, configured_roots)
+            # No-op scans (empty folder / nothing changed) must not run
+            # whole-library art backfill — that can stall UI on "Discovering…".
             if indexed > 0 or removed > 0:
                 art_added, art_repaired = maintain_album_art(
                     connection,
                     data_dir=self._data_dir,
                 )
-            else:
-                from tunes_player.core.library.art_cache import backfill_missing_album_art
-
-                art_added = backfill_missing_album_art(
-                    connection,
-                    data_dir=self._data_dir,
-                )
-                art_repaired = 0
-            art_indexed += art_added + art_repaired
+                art_indexed += art_added + art_repaired
             last_batch_notify = self._commit_scan_batch(
                 connection,
                 batch_notify=batch_notify,
@@ -435,15 +429,7 @@ class LibraryScanner:
                     connection,
                     data_dir=self._data_dir,
                 )
-            else:
-                from tunes_player.core.library.art_cache import backfill_missing_album_art
-
-                art_added = backfill_missing_album_art(
-                    connection,
-                    data_dir=self._data_dir,
-                )
-                art_repaired = 0
-            art_indexed += art_added + art_repaired
+                art_indexed += art_added + art_repaired
             self._commit_scan_batch(
                 connection,
                 batch_notify=batch_notify,

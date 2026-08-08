@@ -1048,7 +1048,7 @@ class LibraryScannerScopedTests(unittest.TestCase):
         self.assertEqual(result_path, path_str)
         self.assertFalse(wrote)
 
-    def test_scan_backfills_art_when_files_unchanged(self) -> None:
+    def test_scan_skips_art_work_when_files_unchanged(self) -> None:
         scan_root = self._folder_a / "unchanged"
         scan_root.mkdir()
         track = scan_root / "track.flac"
@@ -1094,11 +1094,32 @@ class LibraryScannerScopedTests(unittest.TestCase):
             result = scanner.scan(scan_folders=[str(scan_root.resolve())])
 
         maintain.assert_not_called()
-        backfill.assert_called_once()
+        backfill.assert_not_called()
         self.assertEqual(result.indexed, 0)
         self.assertEqual(result.skipped, 1)
         self.assertEqual(result.removed, 0)
-        self.assertEqual(result.art_indexed, 1)
+        self.assertEqual(result.art_indexed, 0)
+
+    def test_empty_folder_scan_skips_art_backfill(self) -> None:
+        scan_root = self._folder_a / "empty"
+        scan_root.mkdir()
+        config = AppConfig(music_folders=[str(scan_root.resolve())])
+        scanner = LibraryScanner(db_path=self._db_path, config=config)
+        with (
+            patch(
+                "tunes_player.core.library.art_cache.backfill_missing_album_art",
+                return_value=1,
+            ) as backfill,
+            patch("tunes_player.core.library.scanner.maintain_album_art") as maintain,
+        ):
+            result = scanner.scan(scan_folders=[str(scan_root.resolve())])
+
+        maintain.assert_not_called()
+        backfill.assert_not_called()
+        self.assertEqual(result.indexed, 0)
+        self.assertEqual(result.removed, 0)
+        self.assertEqual(result.total_candidates, 0)
+        self.assertEqual(result.art_indexed, 0)
 
     def test_iter_audio_candidates_skips_junk_directories(self) -> None:
         scan_root = self._folder_a / "prune"

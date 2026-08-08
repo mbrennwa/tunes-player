@@ -61,6 +61,18 @@ class FolderScanStatusFormatTests(unittest.TestCase):
         self.assertEqual(line, "Last scan: 2023-11-14 23:13 · 18,050 files")
         self.assertNotIn(DIAGNOSTICS_SCAN_HINT, line)
 
+    def test_complete_after_empty_full_scan(self) -> None:
+        line = format_folder_last_scan_line(
+            scanned_at=1_700_000_000.0,
+            errors=0,
+            indexed_files=0,
+            catalog_total=0,
+            last_scan_kind="full",
+        )
+        self.assertEqual(line, "Last scan: 2023-11-14 23:13 · 0 files")
+        self.assertNotIn("incomplete", line)
+        self.assertNotIn(DIAGNOSTICS_SCAN_HINT, line)
+
     def test_successful_scan_with_errors_refers_to_diagnostics(self) -> None:
         line = format_folder_last_scan_line(
             scanned_at=1_700_000_000.0,
@@ -163,6 +175,19 @@ class FolderScanStatusConfigTests(unittest.TestCase):
         self.assertEqual(self._config.folder_last_scan_at(self._folder), 1_700_000_100.0)
         self.assertEqual(self._config.folder_last_scan_errors(self._folder), 2)
         self.assertEqual(self._config.folder_catalog_total(self._folder), 18_050)
+        self.assertEqual(self._config.folder_last_scan_kind(self._folder), "full")
+
+    def test_record_folder_scan_persists_zero_catalog_total(self) -> None:
+        self._config.record_folder_scan(
+            self._folder,
+            errors=0,
+            scanned_at=1_700_000_100.0,
+            scan_kind="full",
+            catalog_total=0,
+        )
+        self._config.load()
+        self.assertEqual(self._config.folder_catalog_total(self._folder), 0)
+        self.assertEqual(self._config.folder_last_scan_errors(self._folder), 0)
         self.assertEqual(self._config.folder_last_scan_kind(self._folder), "full")
 
     def test_incremental_scan_does_not_update_catalog_total(self) -> None:
