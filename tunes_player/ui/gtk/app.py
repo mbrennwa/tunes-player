@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from dataclasses import dataclass, replace
 
@@ -900,10 +901,20 @@ class TunesWindow(Adw.ApplicationWindow):
         self._service.config.set_shell_state(self._shell_state_for_persist())
         app = self.get_application()
         request_quit = getattr(app, "request_quit", None) if app is not None else None
-        if callable(request_quit) and self._service.is_saving_to_disk():
+        if not callable(request_quit):
+            return False
+
+        # Window close must quit: MPRIS/pollers otherwise keep the process
+        # alive with no window. Never call Application.quit() synchronously
+        # from close-request (re-enters teardown and freezes the UI); defer.
+        def _quit_later() -> bool:
             request_quit()
-            return True
-        return False
+            return False
+
+        GLib.idle_add(_quit_later)
+        # Keep the window if a download confirm dialog may be shown; otherwise
+        # allow the default close and let idle quit tear down the app.
+        return bool(self._service.is_saving_to_disk())
 
     def _refresh_cached_release_quality(self, releases: list[Release]) -> list[Release]:
         if not any(release.source == Source.LOCAL for release in releases):
@@ -1154,17 +1165,23 @@ class TunesWindow(Adw.ApplicationWindow):
         def work() -> None:
             import concurrent.futures
 
-            with concurrent.futures.ThreadPoolExecutor(
+            from tunes_player.core.concurrency import DaemonThreadPoolExecutor
+
+            # Daemon workers + non-blocking shutdown: default ThreadPoolExecutor
+            # workers are non-daemon and can keep the process alive after GTK quit
+            # (especially while stuck in TIDAL 429 retries).
+            pool = DaemonThreadPoolExecutor(
                 max_workers=_CATALOG_ENRICH_CONCURRENCY,
                 thread_name_prefix="tunes-catalog-enrich",
-            ) as pool:
+            )
+            try:
                 futures = {
                     pool.submit(self._service.enrich_catalog_quality, release_id): release_id
                     for release_id in pending_ids
                 }
                 for future in concurrent.futures.as_completed(futures):
                     if token != self._load_token:
-                        return
+                        break
                     release_id = futures[future]
                     try:
                         enriched = future.result()
@@ -1178,7 +1195,12 @@ class TunesWindow(Adw.ApplicationWindow):
                     if enriched is None:
                         continue
                     GLib.idle_add(self._patch_enriched_release, token, enriched)
-            GLib.idle_add(self._finalize_catalog_enrich, token, visible_ids_before)
+                else:
+                    GLib.idle_add(
+                        self._finalize_catalog_enrich, token, visible_ids_before
+                    )
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
 
         threading.Thread(
             target=work,
@@ -1938,4 +1960,7 @@ def run() -> int:
 
     GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, _quit_on_signal)
     GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, _quit_on_signal)
-    return app.run(None)
+    code = app.run(None)
+    # do_shutdown already ran. Non-daemon pool workers (or other leftovers) can
+    # still keep the interpreter alive; exit hard so ./run.sh returns.
+    os._exit(int(code) if isinstance(code, int) else 0)
