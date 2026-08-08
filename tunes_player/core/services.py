@@ -417,7 +417,9 @@ class PlayerService:
             limit=NEW_MUSIC_LOCAL_LIMIT,
         )
         streaming_futures: dict[str, concurrent.futures.Future[list[RecentlyAddedItem]]] = {}
-        with concurrent.futures.ThreadPoolExecutor(
+        from tunes_player.core.concurrency import DaemonThreadPoolExecutor
+
+        with DaemonThreadPoolExecutor(
             max_workers=2,
             thread_name_prefix="tunes-new-music",
         ) as executor:
@@ -473,7 +475,9 @@ class PlayerService:
                 ),
             )
         streaming_futures: dict[str, concurrent.futures.Future[list[RecentlyAddedItem]]] = {}
-        with concurrent.futures.ThreadPoolExecutor(
+        from tunes_player.core.concurrency import DaemonThreadPoolExecutor
+
+        with DaemonThreadPoolExecutor(
             max_workers=2,
             thread_name_prefix="tunes-suggestions",
         ) as executor:
