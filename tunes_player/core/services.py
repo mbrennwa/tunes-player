@@ -28,7 +28,7 @@ from tunes_player.core.home import (
     RecentlyAddedItem,
     suggestion_added_ns,
 )
-from tunes_player.core.library import LibraryScanner, LibraryStore, ScanResult
+from tunes_player.core.library import LibraryScanner, LibraryStore
 from tunes_player.core.library.db import connect, is_locked_error, with_db_retry
 from tunes_player.core.library.store import FileMetadata
 from tunes_player.core.library.scan_process import terminate_orphan_library_scans
@@ -962,18 +962,6 @@ class PlayerService:
     def scan_progress(self) -> tuple[int, int, str] | None:
         return self._library_scan.scan_progress
 
-    @property
-    def scan_finished_folder(self) -> str | None:
-        return self._library_scan.scan_finished_folder
-
-    @property
-    def scan_last_result(self) -> ScanResult | None:
-        return self._library_scan.scan_last_result
-
-    @property
-    def scan_last_error(self) -> str | None:
-        return self._library_scan.scan_last_error
-
     def scan_library(self, *, folder: str) -> None:
         """Queue a priority scan for one configured folder."""
         self._library_scan.scan_library(folder=folder)
@@ -1008,9 +996,6 @@ class PlayerService:
 
     def _folder_needs_scan_resume(self, folder: str) -> bool:
         return self._library_scan.folder_needs_scan_resume(folder)
-
-    def _record_interrupted_scan(self) -> None:
-        self._library_scan.record_interrupted_scan()
 
     def _apply_scan_progress_update(
         self,
@@ -1387,9 +1372,6 @@ class PlayerService:
         """Call after user label associations change."""
         self._emit("flags_changed")
 
-    def notify_labels_sync_changed(self) -> None:
-        self._emit("labels_sync_changed")
-
     def refresh_local_release_art_uris(self, releases: list[Release]) -> list[Release]:
         """Refresh art_uri on local releases from the library store."""
         local_ids = [release.id for release in releases if release.source == Source.LOCAL]
@@ -1411,22 +1393,6 @@ class PlayerService:
             if refreshed is not None:
                 self._current_track = refreshed
         self._emit("art_updated")
-
-    _SCAN_UI_FLUSH_INTERVAL_SEC = 1.0
-
-    def _maybe_flush_scan_catalog_ui(self) -> None:
-        pending = self._scan_pending_batch
-        if pending is None or not self.is_scanning():
-            return
-        now = time.monotonic()
-        if now - self._scan_ui_flush_at < self._SCAN_UI_FLUSH_INTERVAL_SEC:
-            return
-        indexed, art_indexed = pending
-        self._scan_ui_flush_at = now
-        if indexed > 0:
-            self.notify_library_updated()
-        if art_indexed > 0:
-            self.notify_art_updated()
 
     def get_playback_state(self) -> PlaybackState:
         volume_mode = self._volume_mode()
@@ -1620,7 +1586,6 @@ class PlayerService:
         if not tracks:
             self._report_error("TIDAL track not found.")
             return
-        release_id = self.release_id_for_track(tracks[start_index])
         self._start_playlist(
             tracks,
             start_index=start_index,
@@ -1644,7 +1609,6 @@ class PlayerService:
         if not tracks:
             self._report_error("Qobuz track not found.")
             return
-        release_id = self.release_id_for_track(tracks[start_index])
         self._start_playlist(
             tracks,
             start_index=start_index,
@@ -1991,15 +1955,6 @@ class PlayerService:
             return None
         return probe_linux_audio_stack()
 
-    def set_allow_software_volume_fallback(self, enabled: bool) -> None:
-        if enabled == self._allow_software_volume_fallback:
-            return
-        self._allow_software_volume_fallback = enabled
-        self._config_manager.config.allow_software_volume_fallback = enabled
-        self._config_manager.save()
-        self._apply_engine_volume_policy()
-        self._emit("playback_changed")
-
     def set_volume_control_enabled(self, enabled: bool) -> None:
         if enabled == self.volume_control_enabled():
             return
@@ -2162,10 +2117,6 @@ class PlayerService:
 
     def is_saving_to_disk(self) -> bool:
         return self._save_to_disk.is_saving_to_disk()
-
-    def is_save_to_disk_cancel_requested(self) -> bool:
-        """True after the user cancels the active job, until the worker exits."""
-        return self._save_to_disk.is_cancel_requested()
 
     def has_download_activity(self) -> bool:
         """True when a job is running or queued."""
@@ -2905,9 +2856,6 @@ class PlayerService:
         return not (
             self._volume_mode() == "software" and not self._device_volume
         )
-
-    def _no_volume_control(self) -> bool:
-        return self._volume_mode() == "fixed"
 
     def _output_using_fallback(self) -> bool:
         configured = self._config_manager.config.output_sink_id

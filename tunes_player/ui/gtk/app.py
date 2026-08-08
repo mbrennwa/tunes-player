@@ -674,9 +674,6 @@ class TunesWindow(Adw.ApplicationWindow):
             ),
         )
 
-    def _enabled_quality_tiers_for_playback(self) -> frozenset[str]:
-        return self._shell_state.enabled_quality_tiers
-
     def _sync_genre_filter(self) -> None:
         # Do not prune enabled_genres against the current grid (#149 Step 2).
         available = genres_in_selection(self._cached_releases)
