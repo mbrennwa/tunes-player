@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import multiprocessing
 import os
 import socket
 import sqlite3
 import threading
 import time
+import uuid
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
@@ -19,7 +22,13 @@ from tunes_player.core.backends.qobuz import QobuzClient, QobuzUnavailableError
 from tunes_player.core.backends.resolve import resolve_track
 from tunes_player.core.backends.tidal import TidalClient, TidalUnavailableError
 from tunes_player.core.config import ConfigManager
+from tunes_player.core.folder_scan_status import (
+    FOLDER_SCAN_FAILED,
+    FOLDER_SCAN_INCOMPLETE,
+    log_folder_scan_failure,
+)
 from tunes_player.core.labels_sync import LabelSyncService, LabelSyncStatus
+from tunes_player.core.logging_config import diagnostics_log_path
 from tunes_player.core.home import (
     NEW_MUSIC_LOCAL_LIMIT,
     NEW_MUSIC_MERGE_LIMIT,
@@ -28,19 +37,55 @@ from tunes_player.core.home import (
     RecentlyAddedItem,
     suggestion_added_ns,
 )
-from tunes_player.core.library import LibraryScanner, LibraryStore
-from tunes_player.core.library.db import is_locked_error, with_db_retry
+from tunes_player.core.library import LibraryScanner, LibraryStore, ScanResult
+from tunes_player.core.library.db import connect, is_locked_error, with_db_retry
 from tunes_player.core.library.store import FileMetadata
+from tunes_player.core.library.scanner import ScanFileError
 from tunes_player.core.library.scan_process import terminate_orphan_library_scans
-from tunes_player.core.library_scan import LibraryScanCoordinator, _ScanJob
+from tunes_player.core.library.scan_worker import close_scan_queue, create_scan_process
 from tunes_player.core.models import Release, Source, Track
 from tunes_player.core.search_query import parse_search_query, release_matches_query
 from tunes_player.core.save_to_disk import (
+    MAX_SAVE_CONCURRENCY,
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    STATUS_INTERRUPTED,
+    STATUS_RUNNING,
+    CompletedDownload,
+    DownloadJobInfo,
+    DownloadJobManifest,
     DownloadJobsSnapshot,
     ExistingLocalMatch,
+    PendingDownloadJob,
+    SaveCancelled,
+    SaveToDiskError,
+    StagedTrack,
+    build_track_path,
     cleanup_download_cache,
+    deserialize_track,
+    discard_download_job,
+    download_cache_dir,
+    download_https,
+    download_job_label,
+    album_folder_for_save,
+    fetch_cover_bytes,
+    find_existing_local_match,
+    find_staged_file,
+    infer_extension,
+    is_mpd_uri,
+    is_writable_dir,
+    list_interrupted_jobs,
+    load_job_manifest,
+    music_folder_for_path,
+    promote_part_to_destination,
+    promote_staged_tracks,
+    remux_mpd,
+    save_job_manifest,
+    serialize_track,
+    staging_part_path,
+    tracks_need_disc_prefix,
+    write_tags,
 )
-from tunes_player.core.save_to_disk_coordinator import SaveToDiskCoordinator
 from tunes_player.core.shell_state import refresh_local_release_art_uris
 from tunes_player.core.playback.engine import EngineEvent, PlaybackEngine
 from tunes_player.core.playback.health_monitor import (
@@ -74,7 +119,6 @@ from tunes_player.core.volume import (
     derive_volume_mode,
     is_alsa_endpoint_id,
 )
-from tunes_player.core.volume_apply import VolumeApplyCoordinator
 
 EventCallback = Callable[[str], None]
 Unsubscribe = Callable[[], None]
@@ -84,44 +128,6 @@ _QUEUE_END_MARGIN_SEC = 1.0
 _UNSET_PLAYBACK_PREFERENCE = object()
 
 MainThreadHook: TypeAlias = Callable[[Callable[[], None]], None]
-
-# Scan SM state lives on LibraryScanCoordinator; forward for tests / call sites.
-_SCAN_STATE_ATTRS = frozenset(
-    {
-        "_scan_process",
-        "_scan_queue",
-        "_scanning_folder",
-        "_scan_progress",
-        "_scan_progress_pinned_total",
-        "_scan_last_error",
-        "_current_scan_job",
-        "_pending_scan_jobs",
-        "_scan_catalog_total_persisted",
-        "_scan_last_checkpoint_at",
-        "_scan_pending_batch",
-        "_scan_ui_flush_at",
-        "_incremental_coalesce",
-    }
-)
-
-# Download SM state lives on SaveToDiskCoordinator; forward for tests / call sites.
-_DOWNLOAD_STATE_ATTRS = frozenset(
-    {
-        "_download_thread",
-        "_download_cancel",
-        "_download_lock",
-        "_download_progress",
-        "_download_last_error",
-        "_download_saved_count",
-        "_download_persist_on_cancel",
-        "_download_active_job_dir",
-        "_download_active_manifest",
-        "_download_active_label",
-        "_download_pending",
-        "_download_completed",
-        "_download_skip_drain",
-    }
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +159,17 @@ class _PreparedTrackLoad:
 
 
 @dataclass(frozen=True, slots=True)
+class _ScanJob:
+    folder: str
+    add_paths: tuple[str, ...] = ()
+    remove_paths: tuple[str, ...] = ()
+
+    @property
+    def is_incremental(self) -> bool:
+        return bool(self.add_paths or self.remove_paths)
+
+
+@dataclass(frozen=True, slots=True)
 class PlaybackState:
     current_track: Track | None
     is_playing: bool
@@ -175,32 +192,6 @@ class PlaybackState:
 
 class PlayerService:
     """Stable API for GTK (and future) frontends."""
-
-    def __getattr__(self, name: str) -> object:
-        if name in _SCAN_STATE_ATTRS:
-            library_scan = self.__dict__.get("_library_scan")
-            if library_scan is not None:
-                return getattr(library_scan, name)
-        if name in _DOWNLOAD_STATE_ATTRS:
-            save_to_disk = self.__dict__.get("_save_to_disk")
-            if save_to_disk is not None:
-                return getattr(save_to_disk, name)
-        raise AttributeError(
-            f"{type(self).__name__!r} object has no attribute {name!r}"
-        )
-
-    def __setattr__(self, name: str, value: object) -> None:
-        if name in _SCAN_STATE_ATTRS:
-            library_scan = self.__dict__.get("_library_scan")
-            if library_scan is not None:
-                setattr(library_scan, name, value)
-                return
-        if name in _DOWNLOAD_STATE_ATTRS:
-            save_to_disk = self.__dict__.get("_save_to_disk")
-            if save_to_disk is not None:
-                setattr(save_to_disk, name, value)
-                return
-        super().__setattr__(name, value)
 
     def __init__(
         self,
@@ -249,15 +240,15 @@ class PlayerService:
         )
         if callable(normalize) and normalize():
             self._config_manager.save()
-        self._volume_apply = VolumeApplyCoordinator(
-            get_controller=lambda: self._volume_controller,
-            run_on_main_thread=self._run_on_main_thread,
-            apply_inbound_level=self._apply_inbound_device_volume,
-        )
+        self._volume_apply_lock = threading.Lock()
+        self._volume_pending: float | None = None
+        self._volume_apply_inflight = False
+        self._volume_suppress_inbound_depth = 0
+        self._volume_gesture_active = False
         self._volume_controller_unsubscribe: VolumeUnsubscribe | None = None
         if self._volume_controller is not None:
             self._volume_controller_unsubscribe = self._volume_controller.subscribe(
-                self._volume_apply.on_device_volume_level
+                self._on_device_volume_level
             )
         self._device_output_fallback = False
         self._is_playing = False
@@ -289,28 +280,25 @@ class PlayerService:
         self._direct_alsa_recovery_attempts = 0
         self._queue_index = -1
         self._auto_advanced_from_index: int | None = None
+        self._scan_process: multiprocessing.Process | None = None
+        self._scan_queue: multiprocessing.Queue | None = None
+        self._scanning_folder: str | None = None
+        self._scan_progress: tuple[int, int, str] | None = None
+        self._scan_progress_pinned_total: int | None = None
+        self._scan_finished_folder: str | None = None
+        self._scan_last_result: ScanResult | None = None
+        self._scan_last_error: str | None = None
+        self._current_scan_job: _ScanJob | None = None
+        self._pending_scan_jobs: list[_ScanJob] = []
+        self._scan_catalog_total_persisted = False
+        self._scan_last_checkpoint_at = 0
+        self._scan_pending_batch: tuple[int, int] | None = None
+        self._scan_ui_flush_at = 0.0
         self._pending_startup_art_maintenance = False
         self._art_maintenance_running = False
         self._catalog_reconcile_running = False
         self._library_db_write_lock = threading.Lock()
-        self._library_scan = LibraryScanCoordinator(
-            config_manager=self._config_manager,
-            library_db_write_lock=self._library_db_write_lock,
-            is_catalog_reconcile_running=lambda: self._catalog_reconcile_running,
-            is_art_maintenance_running=lambda: self._art_maintenance_running,
-            close_store=lambda: self._store.close(),
-            reconnect_store=lambda: self._store.reconnect(),
-            flush_deferred_plays=lambda: self._flush_deferred_plays(),
-            flush_deferred_label_ops=lambda: self._flush_deferred_label_ops(),
-            emit=lambda *events: self._emit(*events),
-            notify_library_updated=lambda: self.notify_library_updated(),
-            notify_art_updated=lambda: self.notify_art_updated(),
-            try_start_art_maintenance=lambda: self._try_start_art_maintenance(),
-            count_indexed_files=lambda folder: self.count_indexed_files(folder),
-            try_start_scan=lambda: self._try_start_scan(),
-            start_scan_job=lambda job: self._start_scan_job(job),
-            any_folder_still_needs_scan=lambda: self._any_folder_still_needs_scan(),
-        )
+        self._incremental_coalesce: dict[str, tuple[set[str], set[str]]] = {}
         self._last_recorded_track_id: str | None = None
         self._last_recorded_at_ns = 0
         self._deferred_plays: list[_DeferredPlay] = []
@@ -323,6 +311,19 @@ class PlayerService:
         self._pending_track_loads: Queue[_PreparedTrackLoad] = Queue()
         self._discover_fetch_lock = threading.Lock()
         self._engine_init_lock = threading.Lock()
+        self._download_thread: threading.Thread | None = None
+        self._download_cancel = threading.Event()
+        self._download_lock = threading.Lock()
+        self._download_progress: tuple[int, int, str] | None = None
+        self._download_last_error: str | None = None
+        self._download_saved_count = 0
+        self._download_persist_on_cancel = False
+        self._download_active_job_dir: Path | None = None
+        self._download_active_manifest: DownloadJobManifest | None = None
+        self._download_active_label: str = ""
+        self._download_pending: deque[PendingDownloadJob] = deque()
+        self._download_completed: deque[CompletedDownload] = deque(maxlen=20)
+        self._download_skip_drain = False
         self._playback_position_stalled = False
         self._soft_stall_message: str | None = None
         self._direct_alsa_soft_stall_attempts = 0
@@ -340,18 +341,6 @@ class PlayerService:
             cache_dir=data_dir / "tidal-cache",
         )
         self._qobuz = self._make_qobuz_client(data_dir)
-        self._save_to_disk = SaveToDiskCoordinator(
-            config_manager=self._config_manager,
-            emit=lambda *events: self._emit(*events),
-            run_on_main_thread=self._run_on_main_thread,
-            get_store=lambda: self._store,
-            get_tidal=lambda: self._tidal,
-            get_qobuz=lambda: self._qobuz,
-            get_playback_preference=lambda: self.playback_preference_for_shell(),
-            enqueue_incremental_scan=lambda **kwargs: self.enqueue_incremental_scan(
-                **kwargs
-            ),
-        )
         self._release_external_playback_contention()
         if self._volume_mode() == "fixed":
             self._apply_fixed_mode_hardware_output(reset_app_volume=True)
@@ -409,25 +398,17 @@ class PlayerService:
         with self._discover_fetch_lock:
             return self._list_recently_added_items_locked()
 
-    def _dedupe_expand_truncate_discover(
-        self,
-        items: list[RecentlyAddedItem],
-        limit: int,
-    ) -> list[RecentlyAddedItem]:
-        by_release_id: dict[str, RecentlyAddedItem] = {}
-        for item in items:
-            existing = by_release_id.get(item.release.id)
-            if existing is None or item.added_ns > existing.added_ns:
-                by_release_id[item.release.id] = item
-        deduped = sorted(
-            by_release_id.values(),
-            key=lambda item: (-item.added_ns, item.release.title.casefold()),
+    def _tidal_new_release_items(self, within_days: int) -> list[RecentlyAddedItem]:
+        return self._tidal.list_new_release_items(
+            limit=NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
+            within_days=within_days,
         )
-        expanded = self._expand_discover_items(deduped)
-        return sorted(
-            expanded,
-            key=lambda item: (-item.added_ns, item.release.title.casefold()),
-        )[:limit]
+
+    def _qobuz_new_release_items(self, within_days: int) -> list[RecentlyAddedItem]:
+        return self._qobuz.list_new_release_items(
+            limit=NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
+            within_days=within_days,
+        )
 
     def _list_recently_added_items_locked(self) -> list[RecentlyAddedItem]:
         within_days = self._config_manager.config.new_music_within_days
@@ -442,17 +423,13 @@ class PlayerService:
         ) as executor:
             if self._tidal.is_logged_in():
                 streaming_futures["tidal"] = executor.submit(
-                    lambda: self._tidal.list_new_release_items(
-                        limit=NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
-                        within_days=within_days,
-                    ),
+                    self._tidal_new_release_items,
+                    within_days,
                 )
             if self._qobuz.is_logged_in():
                 streaming_futures["qobuz"] = executor.submit(
-                    lambda: self._qobuz.list_new_release_items(
-                        limit=NEW_MUSIC_STREAMING_PER_SOURCE_LIMIT,
-                        within_days=within_days,
-                    ),
+                    self._qobuz_new_release_items,
+                    within_days,
                 )
             for name, future in streaming_futures.items():
                 try:
@@ -461,7 +438,20 @@ class PlayerService:
                     pass
                 except Exception:
                     log.exception("Failed to load %s new releases", name)
-        return self._dedupe_expand_truncate_discover(items, NEW_MUSIC_MERGE_LIMIT)
+        by_release_id: dict[str, RecentlyAddedItem] = {}
+        for item in items:
+            existing = by_release_id.get(item.release.id)
+            if existing is None or item.added_ns > existing.added_ns:
+                by_release_id[item.release.id] = item
+        deduped = sorted(
+            by_release_id.values(),
+            key=lambda item: (-item.added_ns, item.release.title.casefold()),
+        )
+        expanded = self._expand_discover_items(deduped)
+        return sorted(
+            expanded,
+            key=lambda item: (-item.added_ns, item.release.title.casefold()),
+        )[:NEW_MUSIC_MERGE_LIMIT]
 
     def list_suggestion_items(self) -> list[RecentlyAddedItem]:
         with self._discover_fetch_lock:
@@ -534,7 +524,20 @@ class PlayerService:
                     )
             except TidalUnavailableError:
                 pass
-        return self._dedupe_expand_truncate_discover(items, SUGGESTIONS_MERGE_LIMIT)
+        by_release_id: dict[str, RecentlyAddedItem] = {}
+        for item in items:
+            existing = by_release_id.get(item.release.id)
+            if existing is None or item.added_ns > existing.added_ns:
+                by_release_id[item.release.id] = item
+        deduped = sorted(
+            by_release_id.values(),
+            key=lambda item: (-item.added_ns, item.release.title.casefold()),
+        )
+        expanded = self._expand_discover_items(deduped)
+        return sorted(
+            expanded,
+            key=lambda item: (-item.added_ns, item.release.title.casefold()),
+        )[:SUGGESTIONS_MERGE_LIMIT]
 
     def cache_release_summary(self, release: Release) -> None:
         self._release_summaries[release.id] = release
@@ -856,7 +859,7 @@ class PlayerService:
         if (
             self._art_maintenance_running
             or self.is_scanning()
-            or self._library_scan.has_pending_jobs()
+            or self._pending_scan_jobs
             or self._catalog_reconcile_running
         ):
             return
@@ -911,7 +914,12 @@ class PlayerService:
     def remove_music_folder(self, folder: str) -> int:
         """Drop a configured folder and purge its indexed tracks from the catalog."""
         resolved = str(Path(folder).expanduser().resolve())
-        self._library_scan.drop_folder_jobs(resolved)
+        self._pending_scan_jobs = [
+            job
+            for job in self._pending_scan_jobs
+            if job.folder != resolved
+        ]
+        self._incremental_coalesce.pop(resolved, None)
         if self.is_scanning():
             self._terminate_active_scan()
         terminate_orphan_library_scans(db_path=self._config_manager.database_path)
@@ -936,29 +944,80 @@ class PlayerService:
         return removed
 
     def _terminate_active_scan(self) -> None:
-        self._library_scan.terminate_active_scan()
+        process = self._scan_process
+        queue = self._scan_queue
+        if process is not None and process.is_alive():
+            process.terminate()
+            process.join(timeout=5.0)
+        close_scan_queue(queue)
+        self._scan_process = None
+        self._scan_queue = None
+        self._scanning_folder = None
+        self._scan_progress = None
+        self._scan_progress_pinned_total = None
 
     def _cancel_scan_for_folder(self, folder: str) -> None:
-        self._library_scan.cancel_scan_for_folder(folder)
+        resolved = str(Path(folder).expanduser().resolve())
+        self._pending_scan_jobs = [
+            job
+            for job in self._pending_scan_jobs
+            if job.folder != resolved
+        ]
+        self._incremental_coalesce.pop(resolved, None)
+        if self._scanning_folder != resolved or not self.is_scanning():
+            return
+        self._record_interrupted_scan()
+        self._terminate_active_scan()
+        self._emit("scan_finished")
+        self.notify_library_updated()
+        self._try_start_scan()
 
     @property
     def scanning_folder(self) -> str | None:
-        return self._library_scan.scanning_folder
+        return self._scanning_folder
 
     @property
     def scan_progress(self) -> tuple[int, int, str] | None:
-        return self._library_scan.scan_progress
+        return self._scan_progress
+
+    @property
+    def scan_finished_folder(self) -> str | None:
+        return self._scan_finished_folder
+
+    @property
+    def scan_last_result(self) -> ScanResult | None:
+        return self._scan_last_result
 
     @property
     def scan_last_error(self) -> str | None:
-        return self._library_scan.scan_last_error
+        return self._scan_last_error
 
     def scan_library(self, *, folder: str) -> None:
         """Queue a priority scan for one configured folder."""
-        self._library_scan.scan_library(folder=folder)
+        self.enqueue_scan(folder=folder, priority=True)
 
     def enqueue_scan(self, *, folder: str, priority: bool = False) -> None:
-        self._library_scan.enqueue_scan(folder=folder, priority=priority)
+        resolved = str(Path(folder).expanduser().resolve())
+        configured = {
+            str(Path(item).expanduser().resolve())
+            for item in self._config_manager.config.music_folders
+        }
+        if resolved not in configured:
+            return
+        job = _ScanJob(folder=resolved)
+        if self._scanning_folder == resolved:
+            return
+        self._pending_scan_jobs = [
+            pending
+            for pending in self._pending_scan_jobs
+            if pending.folder != resolved
+        ]
+        self._incremental_coalesce.pop(resolved, None)
+        if priority:
+            self._pending_scan_jobs.insert(0, job)
+        else:
+            self._pending_scan_jobs.append(job)
+        self._try_start_scan()
 
     def enqueue_incremental_scan(
         self,
@@ -967,29 +1026,238 @@ class PlayerService:
         add_paths: list[str] | None = None,
         remove_paths: list[str] | None = None,
     ) -> None:
-        self._library_scan.enqueue_incremental_scan(
+        resolved = str(Path(folder).expanduser().resolve())
+        configured = {
+            str(Path(item).expanduser().resolve())
+            for item in self._config_manager.config.music_folders
+        }
+        if resolved not in configured:
+            return
+        adds = [str(Path(path).resolve()) for path in (add_paths or [])]
+        removes = [str(Path(path).resolve()) for path in (remove_paths or [])]
+        if not adds and not removes:
+            return
+        if self._scanning_folder == resolved:
+            self._accumulate_incremental(resolved, adds, removes)
+            return
+        if any(
+            pending.folder == resolved and not pending.is_incremental
+            for pending in self._pending_scan_jobs
+        ):
+            return
+        for index, pending in enumerate(self._pending_scan_jobs):
+            if pending.folder == resolved and pending.is_incremental:
+                merged_adds = set(pending.add_paths)
+                merged_removes = set(pending.remove_paths)
+                self._merge_incremental_paths(merged_adds, merged_removes, adds, removes)
+                self._pending_scan_jobs[index] = _ScanJob(
+                    folder=resolved,
+                    add_paths=tuple(sorted(merged_adds)),
+                    remove_paths=tuple(sorted(merged_removes)),
+                )
+                self._try_start_scan()
+                return
+        self._pending_scan_jobs.append(
+            _ScanJob(
+                folder=resolved,
+                add_paths=tuple(sorted(set(adds))),
+                remove_paths=tuple(sorted(set(removes))),
+            ),
+        )
+        self._try_start_scan()
+
+    def _merge_incremental_paths(
+        self,
+        adds: set[str],
+        removes: set[str],
+        new_adds: list[str],
+        new_removes: list[str],
+    ) -> None:
+        for path in new_adds:
+            removes.discard(path)
+            adds.add(path)
+        for path in new_removes:
+            if path in adds:
+                adds.discard(path)
+            else:
+                removes.add(path)
+
+    def _accumulate_incremental(
+        self,
+        folder: str,
+        add_paths: list[str],
+        remove_paths: list[str],
+    ) -> None:
+        adds, removes = self._incremental_coalesce.get(folder, (set(), set()))
+        merged_adds = set(adds)
+        merged_removes = set(removes)
+        self._merge_incremental_paths(merged_adds, merged_removes, add_paths, remove_paths)
+        if merged_adds or merged_removes:
+            self._incremental_coalesce[folder] = (merged_adds, merged_removes)
+        else:
+            self._incremental_coalesce.pop(folder, None)
+
+    def _drain_incremental_coalesce(self, folder: str) -> _ScanJob | None:
+        entry = self._incremental_coalesce.pop(folder, None)
+        if entry is None:
+            return None
+        adds, removes = entry
+        if not adds and not removes:
+            return None
+        return _ScanJob(
             folder=folder,
-            add_paths=add_paths,
-            remove_paths=remove_paths,
+            add_paths=tuple(sorted(adds)),
+            remove_paths=tuple(sorted(removes)),
         )
 
     def _any_folder_still_needs_scan(self) -> bool:
-        return self._library_scan.any_folder_still_needs_scan()
+        if self._pending_scan_jobs:
+            return True
+        for folder in self._config_manager.config.music_folders:
+            if not self._folder_scan_is_complete(folder):
+                return True
+            if self._folder_needs_scan_resume(folder):
+                return True
+        return False
 
     def _try_start_scan(self) -> None:
-        self._library_scan.try_start_scan()
+        if self._catalog_reconcile_running or self._art_maintenance_running:
+            return
+        if self._scan_queue is not None or not self._pending_scan_jobs:
+            return
+        with self._library_db_write_lock:
+            if self._catalog_reconcile_running or self._art_maintenance_running:
+                return
+            if self._scan_queue is not None or not self._pending_scan_jobs:
+                return
+            job = self._pending_scan_jobs.pop(0)
+            self._start_scan_job(job)
 
     def count_indexed_files(self, folder: str) -> int:
         return self._store.count_files_under_folder(folder)
 
+    def _count_indexed_files_snapshot(self, folder: str) -> int:
+        root = str(Path(folder).expanduser().resolve())
+        connection = connect(self._config_manager.database_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM files
+                WHERE path = ? OR path LIKE ?
+                """,
+                (root, root + os.sep + "%"),
+            ).fetchone()
+            return int(row["count"])
+        finally:
+            connection.close()
+
     def _folder_scan_is_complete(self, folder: str) -> bool:
-        return self._library_scan.folder_scan_is_complete(folder)
+        catalog_total = self._config_manager.folder_catalog_total(folder)
+        if catalog_total is None or catalog_total <= 0:
+            return False
+        errors = self._config_manager.folder_last_scan_errors(folder)
+        if errors is not None and errors not in (0, FOLDER_SCAN_INCOMPLETE):
+            return False
+        return self.count_indexed_files(folder) >= catalog_total
 
     def _folder_needs_scan_resume(self, folder: str) -> bool:
-        return self._library_scan.folder_needs_scan_resume(folder)
+        if self._folder_scan_is_complete(folder):
+            errors = self._config_manager.folder_last_scan_errors(folder)
+            checkpoint = self._config_manager.folder_scan_checkpoint(folder)
+            if errors == FOLDER_SCAN_INCOMPLETE or checkpoint:
+                catalog_total = self._config_manager.folder_catalog_total(folder)
+                self._config_manager.record_folder_scan(
+                    folder,
+                    errors=0,
+                    checkpoint="clear",
+                    catalog_total=catalog_total,
+                )
+            return False
+        errors = self._config_manager.folder_last_scan_errors(folder)
+        if errors == FOLDER_SCAN_INCOMPLETE:
+            return True
+        catalog_total = self._config_manager.folder_catalog_total(folder)
+        if catalog_total is None or catalog_total <= 0:
+            return False
+        return self.count_indexed_files(folder) < catalog_total
+
+    def _scan_progress_checkpoint_path(self) -> str | None:
+        if self._scan_progress is None:
+            return None
+        current, total, path = self._scan_progress
+        if total <= 0 or current <= 0 or not path:
+            return None
+        if path.startswith(("Discovering", "Found ", "Finalizing", "Loading library")):
+            return None
+        if not path:
+            return None
+        try:
+            return str(Path(path).expanduser().resolve())
+        except (OSError, ValueError):
+            return None
 
     def _record_interrupted_scan(self) -> None:
-        self._library_scan.record_interrupted_scan()
+        folder = self._scanning_folder
+        job = self._current_scan_job
+        if folder is None or job is None or job.is_incremental:
+            return
+        checkpoint = self._scan_progress_checkpoint_path()
+        catalog_total = None
+        if self._scan_progress is not None and self._scan_progress[1] > 0:
+            catalog_total = self._scan_progress[1]
+        self._config_manager.record_folder_scan(
+            folder,
+            errors=FOLDER_SCAN_INCOMPLETE,
+            scan_kind="full",
+            catalog_total=catalog_total,
+            checkpoint=checkpoint,
+        )
+
+    def _maybe_persist_scan_checkpoint(self) -> None:
+        folder = self._scanning_folder
+        job = self._current_scan_job
+        if folder is None or job is None or job.is_incremental:
+            return
+        if self._scan_progress is None:
+            return
+        current, total, _path = self._scan_progress
+        if total <= 0:
+            return
+        if not self._scan_catalog_total_persisted:
+            self._scan_catalog_total_persisted = True
+            self._maybe_invalidate_scan_checkpoint_for_catalog_change(folder, total)
+            stored = self._config_manager.folder_catalog_total(folder)
+            if stored != total:
+                self._config_manager.record_folder_scan(
+                    folder,
+                    errors=FOLDER_SCAN_INCOMPLETE,
+                    scan_kind="full",
+                    catalog_total=total,
+                )
+        checkpoint = self._scan_progress_checkpoint_path()
+        if checkpoint is None:
+            return
+        if current != total and current - self._scan_last_checkpoint_at < 50:
+            return
+        self._scan_last_checkpoint_at = current
+        self._config_manager.set_folder_scan_checkpoint(folder, checkpoint)
+
+    def _maybe_invalidate_scan_checkpoint_for_catalog_change(
+        self,
+        folder: str,
+        catalog_total: int,
+    ) -> None:
+        stored = self._config_manager.folder_catalog_total(folder)
+        checkpoint = self._config_manager.folder_scan_checkpoint(folder)
+        if checkpoint and stored is not None and stored != catalog_total:
+            log.info(
+                "Catalog size changed for %s (%d -> %d); scan checkpoint cleared",
+                folder,
+                stored,
+                catalog_total,
+            )
+            self._config_manager.set_folder_scan_checkpoint(folder, None)
 
     def _apply_scan_progress_update(
         self,
@@ -997,17 +1265,223 @@ class PlayerService:
         total: int,
         path: str,
     ) -> None:
-        self._library_scan.apply_scan_progress_update(current, total, path)
+        """Keep scan progress monotonic across worker lock retries and phase messages."""
+        pinned_total = self._scan_progress_pinned_total
+        if pinned_total is not None and pinned_total > 0:
+            total = max(total, pinned_total)
+        elif total > 0:
+            self._scan_progress_pinned_total = total
+            pinned_total = total
+
+        previous = self._scan_progress
+        if previous is not None:
+            previous_current, previous_total, previous_path = previous
+            if current == 0 and total == 0:
+                if previous_current > 0:
+                    self._scan_progress = (
+                        previous_current,
+                        max(previous_total, pinned_total or 0),
+                        path or previous_path,
+                    )
+                    return
+            else:
+                if previous_current > 0:
+                    current = max(current, previous_current)
+                if previous_total > 0:
+                    total = max(total, previous_total)
+                if pinned_total is not None:
+                    total = max(total, pinned_total)
+
+        self._scan_progress = (current, total, path)
 
     def _start_scan_job(self, job: _ScanJob) -> None:
-        self._library_scan.start_scan_job(job)
+        self._current_scan_job = job
+        self._scanning_folder = job.folder
+        self._scan_progress = None
+        self._scan_progress_pinned_total = None
+        self._scan_finished_folder = None
+        self._scan_last_result = None
+        self._scan_last_error = None
+        self._scan_catalog_total_persisted = False
+        self._scan_last_checkpoint_at = 0
+        self._scan_pending_batch = None
+        self._scan_ui_flush_at = 0.0
+        checkpoint_path = None
+        if not job.is_incremental:
+            # Checkpoints are persisted for status only. The scanner always walks
+            # the full catalog and fast-skips files already indexed in the DB.
+            pass
+        terminate_orphan_library_scans(db_path=self._config_manager.database_path)
+        expected_total = self._config_manager.folder_catalog_total(job.folder)
+        if expected_total is None or expected_total <= 0:
+            indexed = self._count_indexed_files_snapshot(job.folder)
+            expected_total = indexed if indexed > 0 else None
+        if expected_total is not None and expected_total > 0:
+            self._scan_progress_pinned_total = expected_total
+        self._store.close()
+        time.sleep(0.1)
+        self._scan_process, self._scan_queue = create_scan_process(
+            db_path=self._config_manager.database_path,
+            music_folders=self._config_manager.config.music_folders,
+            music_folder_added_at=self._config_manager.config.music_folder_added_at,
+            scan_folders=[job.folder],
+            add_paths=list(job.add_paths) if job.is_incremental else None,
+            remove_paths=list(job.remove_paths) if job.is_incremental else None,
+            checkpoint_path=checkpoint_path,
+            expected_total=expected_total,
+        )
+        self._scan_process.start()
+        self._emit("scan_started")
 
     def poll_scan(self) -> bool:
         """Drain scan events on the GTK main thread. Returns True while scan runs."""
-        return self._library_scan.poll_scan()
+        if self._scan_queue is None:
+            return False
+
+        while True:
+            try:
+                message = self._scan_queue.get_nowait()
+            except Empty:
+                break
+
+            kind = message[0]
+            if kind == "progress":
+                self._apply_scan_progress_update(message[1], message[2], message[3])
+                self._maybe_persist_scan_checkpoint()
+                self._emit("scan_progress")
+            elif kind == "batch":
+                self._scan_pending_batch = (int(message[1]), int(message[2]))
+                self._maybe_flush_scan_catalog_ui()
+            elif kind == "done":
+                file_errors = tuple(
+                    ScanFileError(path, reason)
+                    for path, reason in (message[6] if len(message) > 6 else ())
+                )
+                result = ScanResult(
+                    indexed=message[1],
+                    removed=message[2],
+                    skipped=message[3],
+                    errors=message[4],
+                    art_indexed=message[5] if len(message) > 5 else 0,
+                    file_errors=file_errors,
+                    total_candidates=message[7] if len(message) > 7 else 0,
+                )
+                finished_folder = self._scanning_folder
+                job = self._current_scan_job
+                scan_kind = "incremental" if job is not None and job.is_incremental else "full"
+                self._scan_last_result = result
+                self._scan_finished_folder = finished_folder
+                if finished_folder is not None:
+                    if result.errors > 0 or file_errors:
+                        log_folder_scan_failure(
+                            finished_folder,
+                            errors=result.errors,
+                            log_path=diagnostics_log_path(self._config_manager.state_dir),
+                            file_errors=file_errors,
+                        )
+                    self._config_manager.record_folder_scan(
+                        finished_folder,
+                        errors=result.errors,
+                        scan_kind=scan_kind,
+                        catalog_total=result.total_candidates if scan_kind == "full" else None,
+                    )
+                self._cleanup_scan()
+                self._emit("scan_finished")
+                self.notify_library_updated()
+                if result.art_indexed > 0 or result.indexed > 0:
+                    self.notify_art_updated()
+                return False
+            elif kind == "error":
+                finished_folder = self._scanning_folder
+                self._scan_last_error = message[1]
+                self._scan_finished_folder = finished_folder
+                if finished_folder is not None:
+                    log_folder_scan_failure(
+                        finished_folder,
+                        errors=FOLDER_SCAN_FAILED,
+                        log_path=diagnostics_log_path(self._config_manager.state_dir),
+                        fatal_error=message[1],
+                    )
+                    self._config_manager.record_folder_scan(
+                        finished_folder,
+                        errors=FOLDER_SCAN_FAILED,
+                        scan_kind=(
+                            "incremental"
+                            if self._current_scan_job is not None
+                            and self._current_scan_job.is_incremental
+                            else "full"
+                        ),
+                    )
+                self._cleanup_scan()
+                self._emit("scan_error")
+                return False
+
+        if self._scan_process is not None and self._scan_process.is_alive():
+            self._maybe_flush_scan_catalog_ui()
+            return True
+
+        if self._scan_process is not None:
+            code = self._scan_process.exitcode
+            if code not in (0, None):
+                finished_folder = self._scanning_folder
+                job = self._current_scan_job
+                self._scan_last_error = f"Scan process exited with code {code}"
+                self._scan_finished_folder = finished_folder
+                partial = False
+                if finished_folder is not None:
+                    progress = self._scan_progress
+                    partial = (
+                        job is not None
+                        and not job.is_incremental
+                        and progress is not None
+                        and progress[1] > 0
+                        and progress[0] > 0
+                    )
+                    if partial:
+                        self._record_interrupted_scan()
+                    else:
+                        log_folder_scan_failure(
+                            finished_folder,
+                            errors=FOLDER_SCAN_FAILED,
+                            log_path=diagnostics_log_path(self._config_manager.state_dir),
+                            fatal_error=self._scan_last_error,
+                        )
+                        self._config_manager.record_folder_scan(
+                            finished_folder,
+                            errors=FOLDER_SCAN_FAILED,
+                            scan_kind=(
+                                "incremental"
+                                if job is not None and job.is_incremental
+                                else "full"
+                            ),
+                        )
+                self._cleanup_scan()
+                self._emit("scan_error" if not partial else "scan_finished")
+        else:
+            self._cleanup_scan()
+        return False
 
     def _cleanup_scan(self) -> None:
-        self._library_scan.cleanup_scan()
+        finished_folder = self._scanning_folder
+        if self._scan_process is not None:
+            self._scan_process.join(timeout=2.0)
+            self._scan_process = None
+        close_scan_queue(self._scan_queue)
+        self._scan_queue = None
+        self._scanning_folder = None
+        self._scan_progress = None
+        self._scan_progress_pinned_total = None
+        self._current_scan_job = None
+        self._store.reconnect()
+        self._flush_deferred_plays()
+        self._flush_deferred_label_ops()
+        if finished_folder is not None:
+            coalesced = self._drain_incremental_coalesce(finished_folder)
+            if coalesced is not None:
+                self._pending_scan_jobs.insert(0, coalesced)
+        self._try_start_scan()
+        if not self._any_folder_still_needs_scan():
+            self._try_start_art_maintenance()
 
     def _flush_deferred_plays(self) -> None:
         pending = self._deferred_plays
@@ -1142,7 +1616,7 @@ class PlayerService:
         self._label_sync.schedule_sync()
 
     def is_scanning(self) -> bool:
-        return self._library_scan.is_scanning()
+        return self._scan_queue is not None
 
     def notify_library_updated(self) -> None:
         """Call from the GTK main thread after a scan completes."""
@@ -1366,6 +1840,9 @@ class PlayerService:
         """Call after user label associations change."""
         self._emit("flags_changed")
 
+    def notify_labels_sync_changed(self) -> None:
+        self._emit("labels_sync_changed")
+
     def refresh_local_release_art_uris(self, releases: list[Release]) -> list[Release]:
         """Refresh art_uri on local releases from the library store."""
         local_ids = [release.id for release in releases if release.source == Source.LOCAL]
@@ -1387,6 +1864,22 @@ class PlayerService:
             if refreshed is not None:
                 self._current_track = refreshed
         self._emit("art_updated")
+
+    _SCAN_UI_FLUSH_INTERVAL_SEC = 1.0
+
+    def _maybe_flush_scan_catalog_ui(self) -> None:
+        pending = self._scan_pending_batch
+        if pending is None or not self.is_scanning():
+            return
+        now = time.monotonic()
+        if now - self._scan_ui_flush_at < self._SCAN_UI_FLUSH_INTERVAL_SEC:
+            return
+        indexed, art_indexed = pending
+        self._scan_ui_flush_at = now
+        if indexed > 0:
+            self.notify_library_updated()
+        if art_indexed > 0:
+            self.notify_art_updated()
 
     def get_playback_state(self) -> PlaybackState:
         volume_mode = self._volume_mode()
@@ -1416,6 +1909,10 @@ class PlayerService:
 
     def volume_control_enabled(self) -> bool:
         return self._volume_mode() != "fixed"
+
+    def volume_adjustable(self) -> bool:
+        """Alias for volume_control_enabled (transport / MPRIS call sites)."""
+        return self.volume_control_enabled()
 
     def refresh_output_volume_detection(self) -> None:
         """Re-probe whether the active output supports hardware volume."""
@@ -1498,6 +1995,15 @@ class PlayerService:
         )
         return playback_preference_from_shell(enabled or frozenset())
 
+    def _playback_preference_for_shell(
+        self,
+        *,
+        enabled_quality_tiers: frozenset[str] | None = None,
+    ) -> PlaybackPreference:
+        return self.playback_preference_for_shell(
+            enabled_quality_tiers=enabled_quality_tiers,
+        )
+
     def enrich_catalog_quality(self, release_id: str) -> Release | None:
         """Classify streaming catalog quality via album lookup; local is already ready."""
         if release_id.startswith("local:"):
@@ -1540,7 +2046,7 @@ class PlayerService:
                 self._start_playlist(
                     tracks,
                     start_index=start_index,
-                    playback_preference=self.playback_preference_for_shell(),
+                    playback_preference=self._playback_preference_for_shell(),
                 )
 
             self._run_on_main_thread(apply)
@@ -1567,7 +2073,7 @@ class PlayerService:
         self._start_playlist(
             tracks,
             start_index=start_index,
-            playback_preference=self.playback_preference_for_shell(),
+            playback_preference=self._playback_preference_for_shell(),
         )
 
     def _play_qobuz_track(self, track_id: str) -> None:
@@ -1591,7 +2097,7 @@ class PlayerService:
         self._start_playlist(
             tracks,
             start_index=start_index,
-            playback_preference=self.playback_preference_for_shell(),
+            playback_preference=self._playback_preference_for_shell(),
         )
 
     def play_release(
@@ -1677,7 +2183,7 @@ class PlayerService:
         self._start_playlist(
             tracks,
             start_index=start_index,
-            playback_preference=self.playback_preference_for_shell(),
+            playback_preference=self._playback_preference_for_shell(),
             catalog_release_id=catalog_release_id or release_id,
         )
 
@@ -1798,7 +2304,7 @@ class PlayerService:
         self._emit("position_changed")
 
     def set_volume(self, level: float, *, notify: bool = True) -> None:
-        if not self.volume_control_enabled():
+        if not self.volume_adjustable():
             return
         self._volume = max(0.0, min(1.0, level))
         if self._muted and self._volume > 0:
@@ -1806,7 +2312,7 @@ class PlayerService:
         self._push_volume_to_output(notify=notify)
 
     def toggle_mute(self) -> None:
-        if not self.volume_control_enabled():
+        if not self.volume_adjustable():
             return
         self._muted = not self._muted
         self._push_volume_to_output(notify=True)
@@ -1822,34 +2328,102 @@ class PlayerService:
 
     def begin_volume_gesture(self) -> None:
         """Ignore inbound stack volume while the UI slider is being dragged."""
-        self._volume_apply.begin_gesture()
+        self._volume_gesture_active = True
 
     def end_volume_gesture(self) -> None:
-        self._volume_apply.end_gesture()
+        self._volume_gesture_active = False
 
-    def _apply_inbound_device_volume(self, level: float) -> None:
-        """Main-thread update after coordinator filters suppress/gesture."""
-        if abs(self._volume - level) < 1e-4 and not (self._muted and level > 0):
+    def _on_device_volume_level(self, level: float) -> None:
+        """Inbound device/stack volume from VolumeController.subscribe()."""
+        if self._volume_suppress_inbound_depth > 0:
             return
-        self._volume = level
-        if self._muted and level > 0:
-            self._muted = False
-        self._emit("volume_changed")
+        if self._volume_gesture_active:
+            return
+        clamped = max(0.0, min(1.0, level))
+
+        def apply() -> None:
+            if self._volume_suppress_inbound_depth > 0:
+                return
+            if self._volume_gesture_active:
+                return
+            if abs(self._volume - clamped) < 1e-4 and not (
+                self._muted and clamped > 0
+            ):
+                return
+            self._volume = clamped
+            if self._muted and clamped > 0:
+                self._muted = False
+            self._emit("volume_changed")
+
+        self._run_on_main_thread(apply)
+
+    def _schedule_device_volume_apply(self, level: float) -> None:
+        """Coalesce sink/mixer applies off the caller thread (latest wins)."""
+        with self._volume_apply_lock:
+            self._volume_pending = max(0.0, min(1.0, level))
+            if self._volume_apply_inflight:
+                return
+            self._volume_apply_inflight = True
+        threading.Thread(
+            target=self._device_volume_apply_worker,
+            name="volume-apply",
+            daemon=True,
+        ).start()
 
     def _set_device_volume_sync(self, level: float) -> None:
         """Blocking device-volume write (mode transitions); echo-suppressed."""
-        self._volume_apply.set_level_sync(level)
+        controller = self._volume_controller
+        if controller is None:
+            return
+        with self._volume_apply_lock:
+            self._volume_pending = None
+        self._volume_suppress_inbound_depth += 1
+        try:
+            controller.set_level(max(0.0, min(1.0, level)))
+        except OSError:
+            log.debug("Could not set device volume", exc_info=True)
+        finally:
+            self._volume_suppress_inbound_depth = max(
+                0, self._volume_suppress_inbound_depth - 1
+            )
+
+    def _device_volume_apply_worker(self) -> None:
+        controller = self._volume_controller
+        while True:
+            with self._volume_apply_lock:
+                pending = self._volume_pending
+                if pending is None:
+                    self._volume_apply_inflight = False
+                    return
+                self._volume_pending = None
+            if controller is None:
+                continue
+            self._volume_suppress_inbound_depth += 1
+            try:
+                controller.set_level(pending)
+            except OSError:
+                log.debug("Device volume apply failed", exc_info=True)
+            finally:
+                self._volume_suppress_inbound_depth = max(
+                    0, self._volume_suppress_inbound_depth - 1
+                )
 
     def flush_pending_volume_apply(self, *, timeout: float = 2.0) -> None:
         """Block until coalesced device-volume applies finish (tests / shutdown)."""
-        self._volume_apply.flush(timeout=timeout)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._volume_apply_lock:
+                if not self._volume_apply_inflight and self._volume_pending is None:
+                    return
+            time.sleep(0.005)
+        raise TimeoutError("device volume apply did not drain")
 
     def _push_volume_to_output(self, *, notify: bool = True) -> None:
-        if not self.volume_control_enabled():
+        if not self.volume_adjustable():
             return
         level = self._output_volume_level()
         if self._routes_volume_to_sink() and self._volume_controller is not None:
-            self._volume_apply.schedule_apply(level)
+            self._schedule_device_volume_apply(level)
         engine = self._engine
         if engine is not None:
             if hasattr(engine, "set_bit_perfect"):
@@ -1859,7 +2433,7 @@ class PlayerService:
             self._emit("volume_changed")
 
     def adjust_volume(self, delta: float) -> None:
-        if not self.volume_control_enabled():
+        if not self.volume_adjustable():
             return
         self.set_volume(self._volume + delta)
 
@@ -1902,6 +2476,14 @@ class PlayerService:
             return None
         return probe_linux_audio_stack()
 
+    def set_allow_software_volume_fallback(self, enabled: bool) -> None:
+        if enabled == self._allow_software_volume_fallback:
+            return
+        self._allow_software_volume_fallback = enabled
+        self._config_manager.config.allow_software_volume_fallback = enabled
+        self._config_manager.save()
+        self._apply_engine_volume_policy()
+        self._emit("playback_changed")
 
     def set_volume_control_enabled(self, enabled: bool) -> None:
         if enabled == self.volume_control_enabled():
@@ -2019,7 +2601,7 @@ class PlayerService:
         self._volume_controller_unsubscribe = None
         if unsub is not None:
             unsub()
-        self._volume_apply.prepare_shutdown()
+        self._volume_gesture_active = False
         controller = self._volume_controller
         if controller is not None:
             close = getattr(controller, "close", None)
@@ -2028,6 +2610,8 @@ class PlayerService:
                     close()
                 except Exception:
                     log.debug("Volume controller close failed", exc_info=True)
+        with self._volume_apply_lock:
+            self._volume_pending = None
         try:
             self.flush_pending_volume_apply(timeout=1.0)
         except TimeoutError:
@@ -2039,7 +2623,12 @@ class PlayerService:
         if monitor is not None:
             monitor.stop()
         self._tidal.save_session()
-        self._library_scan.prepare_shutdown()
+        self._pending_scan_jobs.clear()
+        self._incremental_coalesce.clear()
+        if self.is_scanning():
+            self._record_interrupted_scan()
+        self._terminate_active_scan()
+        self._current_scan_job = None
         self._release_exclusive_session()
         engine = self._engine
         self._engine = None
@@ -2064,41 +2653,128 @@ class PlayerService:
         self._store.close()
 
     def is_saving_to_disk(self) -> bool:
-        return self._save_to_disk.is_saving_to_disk()
+        thread = self._download_thread
+        return thread is not None and thread.is_alive()
+
+    def is_save_to_disk_cancel_requested(self) -> bool:
+        """True after the user cancels the active job, until the worker exits."""
+        return self._download_cancel.is_set()
 
     def has_download_activity(self) -> bool:
         """True when a job is running or queued."""
-        return self._save_to_disk.has_download_activity()
+        with self._download_lock:
+            return self.is_saving_to_disk() or bool(self._download_pending)
 
     @property
     def download_progress(self) -> tuple[int, int, str] | None:
-        return self._save_to_disk.download_progress
+        return self._download_progress
 
     @property
     def download_last_error(self) -> str | None:
-        return self._save_to_disk.download_last_error
+        return self._download_last_error
 
     @property
     def download_saved_count(self) -> int:
-        return self._save_to_disk.download_saved_count
+        return self._download_saved_count
 
     def set_download_folder(self, folder: str | None) -> None:
-        self._save_to_disk.set_download_folder(folder)
+        self._config_manager.set_download_folder(folder)
 
     def download_jobs(self) -> DownloadJobsSnapshot:
         """Snapshot of active, queued, and in-session completed downloads."""
-        return self._save_to_disk.download_jobs()
+        with self._download_lock:
+            active: DownloadJobInfo | None = None
+            manifest = self._download_active_manifest
+            if self.is_saving_to_disk() and manifest is not None:
+                active = DownloadJobInfo(
+                    job_id=manifest.job_id,
+                    label=self._download_active_label or download_job_label(
+                        [deserialize_track(t) for t in manifest.tracks if isinstance(t, dict)]
+                    ),
+                    track_count=len(manifest.track_ids),
+                    dest_dir=manifest.dest_dir,
+                    status="active",
+                    progress=self._download_progress,
+                )
+            pending = tuple(
+                DownloadJobInfo(
+                    job_id=job.job_id,
+                    label=job.label,
+                    track_count=len(job.track_ids),
+                    dest_dir=job.dest_dir,
+                    status="pending",
+                )
+                for job in self._download_pending
+            )
+            completed = tuple(
+                DownloadJobInfo(
+                    job_id=item.job_id,
+                    label=item.label,
+                    track_count=item.track_count,
+                    dest_dir=item.dest_dir,
+                    status="completed" if item.finished_ok else "failed",
+                    error=item.error,
+                )
+                for item in self._download_completed
+            )
+            return DownloadJobsSnapshot(
+                active=active,
+                pending=pending,
+                completed=completed,
+            )
 
     def cancel_save_to_disk(self, job_id: str | None = None) -> None:
         """Cancel the active job (discard staging) or remove a queued job by id."""
-        self._save_to_disk.cancel_save_to_disk(job_id)
+        with self._download_lock:
+            if job_id is not None:
+                for index, job in enumerate(self._download_pending):
+                    if job.job_id == job_id:
+                        del self._download_pending[index]
+                        self._emit("download_queued")
+                        return
+                manifest = self._download_active_manifest
+                if (
+                    manifest is None
+                    or manifest.job_id != job_id
+                    or not self.is_saving_to_disk()
+                ):
+                    return
+            self._download_persist_on_cancel = False
+            self._download_cancel.set()
+            self._download_progress = None
+            self._emit("download_cancelling")
 
     def pause_save_to_disk_for_quit(self) -> None:
         """Stop the active download and persist it for resume on next start.
 
         In-memory queued jobs are dropped (not persisted across quit).
         """
-        self._save_to_disk.pause_save_to_disk_for_quit()
+        with self._download_lock:
+            self._download_pending.clear()
+            self._download_skip_drain = True
+        if not self.is_saving_to_disk():
+            self._mark_active_download_interrupted()
+            return
+        self._download_persist_on_cancel = True
+        self._download_cancel.set()
+        thread = self._download_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=30.0)
+        self._mark_active_download_interrupted()
+
+    def _mark_active_download_interrupted(self) -> None:
+        with self._download_lock:
+            manifest = self._download_active_manifest
+            job_dir = self._download_active_job_dir
+        if manifest is None or job_dir is None:
+            return
+        if manifest.status == STATUS_COMPLETED:
+            return
+        manifest.status = STATUS_INTERRUPTED
+        try:
+            save_job_manifest(job_dir, manifest)
+        except OSError:
+            log.exception("Failed persisting interrupted download job %s", job_dir)
 
     def find_save_to_disk_conflict(
         self,
@@ -2107,9 +2783,11 @@ class PlayerService:
         dest_dir: str | Path,
     ) -> ExistingLocalMatch | None:
         """Return a local/Downloads match for the tracks, if any."""
-        return self._save_to_disk.find_save_to_disk_conflict(
+        return find_existing_local_match(
             tracks,
-            dest_dir=dest_dir,
+            get_release=self._store.get_release,
+            search_releases=self._store.search_releases,
+            download_folder=Path(dest_dir),
         )
 
     def start_save_to_disk(
@@ -2120,16 +2798,568 @@ class PlayerService:
         dest_dir: str,
     ) -> None:
         """Start or enqueue a save job for streaming tracks into dest_dir."""
-        self._save_to_disk.start_save_to_disk(
-            track_ids=track_ids,
-            tracks=tracks,
-            dest_dir=dest_dir,
+        track_list = list(tracks or [])
+        ids = [t.id for t in track_list] if track_list else [tid for tid in (track_ids or []) if tid]
+        if not ids:
+            raise SaveToDiskError("No tracks to save.")
+        by_id = {t.id: t for t in track_list}
+        ordered_tracks = tuple(
+            by_id[tid]
+            if tid in by_id
+            else Track(
+                id=tid,
+                title=tid,
+                artist_name="Unknown Artist",
+                release_title=None,
+                source=Source.TIDAL
+                if tid.startswith("tidal:")
+                else Source.QOBUZ
+                if tid.startswith("qobuz:")
+                else Source.LOCAL,
+            )
+            for tid in ids
         )
+        dest = Path(dest_dir).expanduser()
+        if not is_writable_dir(dest):
+            raise SaveToDiskError(f"Folder is not writable: {dest}")
+        job = PendingDownloadJob(
+            job_id=uuid.uuid4().hex,
+            dest_dir=str(dest.resolve()),
+            track_ids=tuple(ids),
+            tracks=ordered_tracks,
+            label=download_job_label(ordered_tracks),
+            enqueued_at=time.time(),
+        )
+        with self._download_lock:
+            if self.is_saving_to_disk():
+                self._download_pending.append(job)
+                self._emit("download_queued")
+                return
+            self._begin_download_job_locked(
+                track_ids=list(job.track_ids),
+                dest_dir=job.dest_dir,
+                tracks_by_id={t.id: t for t in job.tracks},
+                job_id=job.job_id,
+                existing_job_dir=None,
+                completed_indices=[],
+                resumed=False,
+                label=job.label,
+            )
+        self._emit("download_started")
 
     def resume_interrupted_save_to_disk(self) -> bool:
         """Resume the first interrupted download job, if any. Returns True if started."""
-        return self._save_to_disk.resume_interrupted_save_to_disk()
+        with self._download_lock:
+            if self.is_saving_to_disk():
+                return False
+        jobs = list_interrupted_jobs(self._config_manager.data_dir)
+        if not jobs:
+            return False
+        job_dir, manifest = jobs[0]
+        if not is_writable_dir(Path(manifest.dest_dir)):
+            log.warning(
+                "Skipping resume of download job %s; dest not writable: %s",
+                manifest.job_id,
+                manifest.dest_dir,
+            )
+            return False
+        by_id = {
+            t["id"]: deserialize_track(t)
+            for t in manifest.tracks
+            if isinstance(t, dict) and t.get("id")
+        }
+        for track_id in manifest.track_ids:
+            by_id.setdefault(
+                track_id,
+                Track(
+                    id=track_id,
+                    title=track_id,
+                    artist_name="Unknown Artist",
+                    release_title=None,
+                    source=Source.TIDAL
+                    if track_id.startswith("tidal:")
+                    else Source.QOBUZ
+                    if track_id.startswith("qobuz:")
+                    else Source.LOCAL,
+                ),
+            )
+        completed = sorted({int(i) for i in manifest.completed_indices if int(i) > 0})
+        label = download_job_label(
+            [by_id[tid] for tid in manifest.track_ids if tid in by_id]
+        )
+        with self._download_lock:
+            if self.is_saving_to_disk():
+                return False
+            self._begin_download_job_locked(
+                track_ids=list(manifest.track_ids),
+                dest_dir=str(Path(manifest.dest_dir).resolve()),
+                tracks_by_id=by_id,
+                job_id=manifest.job_id,
+                existing_job_dir=job_dir,
+                completed_indices=completed,
+                resumed=True,
+                label=label,
+            )
+        self._emit("download_resumed")
+        return True
 
+    def _begin_download_job_locked(
+        self,
+        *,
+        track_ids: list[str],
+        dest_dir: str,
+        tracks_by_id: dict[str, Track],
+        job_id: str | None,
+        existing_job_dir: Path | None,
+        completed_indices: list[int],
+        resumed: bool,
+        label: str,
+    ) -> None:
+        """Start the download worker. Caller must hold ``_download_lock``."""
+        self._download_cancel = threading.Event()
+        self._download_progress = None
+        self._download_last_error = None
+        self._download_saved_count = 0
+        self._download_persist_on_cancel = False
+        self._download_skip_drain = False
+        self._download_active_label = label
+        thread = threading.Thread(
+            target=self._run_save_to_disk_job,
+            args=(
+                list(track_ids),
+                dest_dir,
+                tracks_by_id,
+                job_id,
+                existing_job_dir,
+                completed_indices,
+                resumed,
+            ),
+            name="tunes-save-to-disk",
+            daemon=True,
+        )
+        self._download_thread = thread
+        thread.start()
+
+    def _record_completed_download(
+        self,
+        *,
+        job_id: str,
+        label: str,
+        track_count: int,
+        dest_dir: str,
+        finished_ok: bool,
+        error: str | None = None,
+    ) -> None:
+        with self._download_lock:
+            self._download_completed.appendleft(
+                CompletedDownload(
+                    job_id=job_id,
+                    label=label,
+                    track_count=track_count,
+                    dest_dir=dest_dir,
+                    finished_ok=finished_ok,
+                    error=error,
+                )
+            )
+
+    def _drain_download_queue(self) -> None:
+        """Start the next queued job if idle. Must not be called while holding the lock."""
+        with self._download_lock:
+            if self._download_skip_drain:
+                return
+            if self.is_saving_to_disk():
+                return
+            if not self._download_pending:
+                return
+            job = self._download_pending.popleft()
+            self._begin_download_job_locked(
+                track_ids=list(job.track_ids),
+                dest_dir=job.dest_dir,
+                tracks_by_id={t.id: t for t in job.tracks},
+                job_id=job.job_id,
+                existing_job_dir=None,
+                completed_indices=[],
+                resumed=False,
+                label=job.label,
+            )
+        self._emit("download_started")
+
+    def _run_save_to_disk_job(
+        self,
+        track_ids: list[str],
+        dest_dir: str,
+        tracks_by_id: dict[str, Track],
+        job_id: str | None,
+        existing_job_dir: Path | None,
+        completed_indices: list[int],
+        resumed: bool,
+    ) -> None:
+        del resumed  # reserved for logging / UI differentiation
+        cache_root = download_cache_dir(self._config_manager.data_dir)
+        resolved_job_id = job_id or uuid.uuid4().hex
+        job_dir = (
+            Path(existing_job_dir)
+            if existing_job_dir is not None
+            else cache_root / resolved_job_id
+        )
+        album_atomic = len(track_ids) > 1
+        staged: list[StagedTrack] = []
+        saved_paths: list[Path] = []
+        cancelled = False
+        persist = False
+        errors: list[str] = []
+        completed = {int(i) for i in completed_indices}
+        known_tracks = [tracks_by_id[tid] for tid in track_ids if tid in tracks_by_id]
+        include_disc = tracks_need_disc_prefix(known_tracks)
+        manifest = DownloadJobManifest(
+            version=1,
+            job_id=resolved_job_id,
+            dest_dir=dest_dir,
+            track_ids=list(track_ids),
+            tracks=[
+                serialize_track(tracks_by_id[tid])
+                for tid in track_ids
+                if tid in tracks_by_id
+            ],
+            completed_indices=sorted(completed),
+            status=STATUS_RUNNING,
+        )
+        with self._download_lock:
+            self._download_active_job_dir = job_dir
+            self._download_active_manifest = manifest
+        try:
+            job_dir.mkdir(parents=True, exist_ok=True)
+            save_job_manifest(job_dir, manifest)
+            for index in sorted(completed):
+                if index < 1 or index > len(track_ids):
+                    continue
+                existing = find_staged_file(job_dir, index)
+                if existing is None:
+                    # Staged file missing (e.g. single-track already promoted); drop marker.
+                    completed.discard(index)
+                    continue
+                track_id = track_ids[index - 1]
+                staged.append(
+                    StagedTrack(
+                        track_id=track_id,
+                        index=index,
+                        staged_path=existing,
+                        dest_path=self._dest_path_for_staged(
+                            existing,
+                            dest_root=Path(dest_dir),
+                            track=tracks_by_id.get(track_id),
+                            track_id=track_id,
+                            include_disc=include_disc,
+                        ),
+                    )
+                )
+            manifest.completed_indices = sorted(completed)
+            save_job_manifest(job_dir, manifest)
+            total = len(track_ids)
+            pending = [
+                index
+                for index in range(1, total + 1)
+                if index not in completed
+            ]
+            stage_lock = threading.Lock()
+            active_labels: dict[int, str] = {}
+
+            def _should_stop() -> bool:
+                if self._download_cancel.is_set():
+                    return True
+                if album_atomic and errors:
+                    return True
+                return False
+
+            def _stage_index(index: int) -> None:
+                nonlocal cancelled
+                track_id = track_ids[index - 1]
+                track = tracks_by_id.get(track_id)
+                label = track.title if track is not None else track_id
+                with stage_lock:
+                    if _should_stop():
+                        if self._download_cancel.is_set():
+                            cancelled = True
+                        return
+                    active_labels[index] = label
+                    if self._download_cancel.is_set():
+                        cancelled = True
+                        active_labels.pop(index, None)
+                        return
+                    progress_index = len(completed) + 1
+                    self._download_progress = (progress_index, total, label)
+                    self._emit("download_progress")
+                stale = find_staged_file(job_dir, index)
+                if stale is not None:
+                    try:
+                        stale.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                try:
+                    staged_item = self._stage_one_track(
+                        track_id,
+                        dest_root=Path(dest_dir),
+                        job_dir=job_dir,
+                        job_id=resolved_job_id,
+                        cache_root=cache_root,
+                        index=index,
+                        include_disc=include_disc,
+                        track=track,
+                    )
+                except SaveCancelled:
+                    with stage_lock:
+                        cancelled = True
+                        active_labels.pop(index, None)
+                    return
+                except SaveToDiskError as exc:
+                    with stage_lock:
+                        errors.append(f"{label}: {exc}")
+                        active_labels.pop(index, None)
+                        if album_atomic:
+                            self._download_cancel.set()
+                    log.warning("Save to disk failed for %s: %s", track_id, exc)
+                    return
+                except Exception as exc:
+                    with stage_lock:
+                        errors.append(f"{label}: {exc}")
+                        active_labels.pop(index, None)
+                        if album_atomic:
+                            self._download_cancel.set()
+                    log.exception("Save to disk failed for %s", track_id)
+                    return
+                with stage_lock:
+                    active_labels.pop(index, None)
+                    # Keep successful stages even if a sibling failed/cancelled so
+                    # album-atomic resume can skip completed_indices.
+                    staged.append(staged_item)
+                    completed.add(index)
+                    manifest.completed_indices = sorted(completed)
+                    manifest.status = STATUS_RUNNING
+                    save_job_manifest(job_dir, manifest)
+                    if self._download_cancel.is_set():
+                        cancelled = True
+                    if not album_atomic:
+                        final = promote_part_to_destination(
+                            staged_item.staged_path,
+                            staged_item.dest_path,
+                        )
+                        saved_paths.append(final)
+                    # Do not publish progress after the user cancelled.
+                    if self._download_cancel.is_set():
+                        return
+                    if active_labels:
+                        next_label = next(iter(active_labels.values()))
+                        self._download_progress = (
+                            len(completed) + 1,
+                            total,
+                            next_label,
+                        )
+                        self._emit("download_progress")
+
+            if pending:
+                if self._download_cancel.is_set():
+                    cancelled = True
+                else:
+                    workers = min(MAX_SAVE_CONCURRENCY, len(pending))
+                    with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=workers,
+                        thread_name_prefix="tunes-save-track",
+                    ) as pool:
+                        futures = [
+                            pool.submit(_stage_index, index) for index in pending
+                        ]
+                        concurrent.futures.wait(futures)
+            if self._download_cancel.is_set():
+                cancelled = True
+            persist = cancelled and self._download_persist_on_cancel
+            # Errors win over sibling-stop cancel (album-atomic failure sets cancel
+            # so the other worker aborts). Quit-persist still wins when no errors.
+            job_label = self._download_active_label or download_job_label(known_tracks)
+            open_folder = str(
+                album_folder_for_save(
+                    dest_dir,
+                    tracks=known_tracks,
+                    saved_paths=saved_paths,
+                )
+            )
+            if cancelled and persist and not errors:
+                manifest.status = STATUS_INTERRUPTED
+                manifest.completed_indices = sorted(completed)
+                save_job_manifest(job_dir, manifest)
+                self._download_saved_count = len(saved_paths)
+                # No toast: quit path persists for resume.
+            elif errors:
+                self._download_last_error = errors[0]
+                if album_atomic:
+                    manifest.status = STATUS_FAILED
+                    manifest.completed_indices = sorted(completed)
+                    save_job_manifest(job_dir, manifest)
+                    self._download_saved_count = 0
+                else:
+                    self._download_saved_count = len(saved_paths)
+                    if saved_paths:
+                        self._enqueue_saved_paths_scan(saved_paths)
+                    discard_download_job(job_dir)
+                self._record_completed_download(
+                    job_id=resolved_job_id,
+                    label=job_label,
+                    track_count=len(track_ids),
+                    dest_dir=open_folder,
+                    finished_ok=False,
+                    error=errors[0],
+                )
+                self._emit("download_error")
+            elif cancelled:
+                self._download_saved_count = len(saved_paths)
+                discard_download_job(job_dir)
+                self._emit("download_cancelled")
+            else:
+                if album_atomic:
+                    saved_paths = promote_staged_tracks(staged)
+                self._download_saved_count = len(saved_paths)
+                if saved_paths:
+                    self._enqueue_saved_paths_scan(saved_paths)
+                manifest.status = STATUS_COMPLETED
+                save_job_manifest(job_dir, manifest)
+                discard_download_job(job_dir)
+                open_folder = str(
+                    album_folder_for_save(
+                        dest_dir,
+                        tracks=known_tracks,
+                        saved_paths=saved_paths,
+                    )
+                )
+                self._record_completed_download(
+                    job_id=resolved_job_id,
+                    label=job_label,
+                    track_count=len(track_ids),
+                    dest_dir=open_folder,
+                    finished_ok=True,
+                )
+                self._emit("download_finished")
+        finally:
+            self._download_progress = None
+            with self._download_lock:
+                if self._download_thread is threading.current_thread():
+                    self._download_thread = None
+                remaining = (
+                    load_job_manifest(job_dir) if job_dir.is_dir() else None
+                )
+                if remaining is not None and remaining.status in {
+                    STATUS_INTERRUPTED,
+                    STATUS_FAILED,
+                    STATUS_RUNNING,
+                }:
+                    self._download_active_job_dir = job_dir
+                    self._download_active_manifest = remaining
+                else:
+                    self._download_active_job_dir = None
+                    self._download_active_manifest = None
+                self._download_persist_on_cancel = False
+            # Drain next queued job unless quitting (skip_drain) or still busy.
+            self._drain_download_queue()
+
+    def _dest_path_for_staged(
+        self,
+        staged_path: Path,
+        *,
+        dest_root: Path,
+        track: Track | None,
+        track_id: str,
+        include_disc: bool,
+    ) -> Path:
+        name = staged_path.name
+        if name.endswith(".tunes-partial"):
+            name = name[: -len(".tunes-partial")]
+        # name like 0001.flac
+        ext = Path(name).suffix or ".flac"
+        meta = track or Track(
+            id=track_id,
+            title=track_id,
+            artist_name="Unknown Artist",
+            release_title=None,
+            source=Source.TIDAL,
+        )
+        return build_track_path(dest_root, meta, ext, include_disc=include_disc)
+
+    def _stage_one_track(
+        self,
+        track_id: str,
+        *,
+        dest_root: Path,
+        job_dir: Path,
+        job_id: str,
+        cache_root: Path,
+        index: int,
+        include_disc: bool,
+        track: Track | None,
+    ) -> StagedTrack:
+        if self._download_cancel.is_set():
+            raise SaveCancelled()
+        if track_id.startswith("local:"):
+            raise SaveToDiskError("Local tracks are already on disk.")
+        if not (
+            track_id.startswith("tidal:") or track_id.startswith("qobuz:")
+        ):
+            raise SaveToDiskError("Only TIDAL and Qobuz tracks can be saved.")
+        try:
+            source = resolve_track(
+                self._store,
+                track_id,
+                tidal=self._tidal,
+                qobuz=self._qobuz,
+                playback_preference=self._playback_preference_for_shell(),
+            )
+        except (TidalUnavailableError, QobuzUnavailableError) as exc:
+            raise SaveToDiskError(str(exc)) from exc
+        if source is None:
+            raise SaveToDiskError("Could not resolve stream URL.")
+        meta = track or source.metadata
+        for_mpd = is_mpd_uri(source.uri)
+        ext = infer_extension(source.uri, source.stream_metadata, for_mpd=for_mpd)
+        part_path = staging_part_path(cache_root, job_id, index, ext)
+        # Ensure parent is job_dir (staging_part_path uses cache_root/job_id).
+        if part_path.parent != job_dir:
+            part_path = job_dir / part_path.name
+        if for_mpd:
+            remux_mpd(source.uri, part_path, cancel_event=self._download_cancel)
+        else:
+            if not source.uri.startswith(("http://", "https://")):
+                raise SaveToDiskError("Unsupported stream URL for download.")
+            download_https(source.uri, part_path, cancel_event=self._download_cancel)
+        cover = fetch_cover_bytes(meta.art_uri)
+        try:
+            write_tags(part_path, meta, cover_bytes=cover)
+        except Exception:
+            log.exception("Failed writing tags for %s", track_id)
+        dest_path = build_track_path(
+            dest_root,
+            meta,
+            ext,
+            include_disc=include_disc,
+        )
+        return StagedTrack(
+            track_id=track_id,
+            index=index,
+            staged_path=part_path,
+            dest_path=dest_path,
+        )
+
+    def _enqueue_saved_paths_scan(self, paths: list[Path]) -> None:
+        by_folder: dict[str, list[str]] = {}
+        folders = list(self._config_manager.config.music_folders)
+        for path in paths:
+            folder = music_folder_for_path(path, folders)
+            if folder is None:
+                continue
+            by_folder.setdefault(folder, []).append(str(path.resolve()))
+        for folder, add_paths in by_folder.items():
+            self._run_on_main_thread(
+                lambda f=folder, p=list(add_paths): self.enqueue_incremental_scan(
+                    folder=f,
+                    add_paths=p,
+                )
+            )
     def subscribe(self, callback: EventCallback) -> Unsubscribe:
         self._listeners.append(callback)
 
@@ -2535,32 +3765,21 @@ class PlayerService:
         if path_info is not None:
             self._apply_path_info(self._finalize_playback_path_info(path_info))
 
-    def _resolve_quality_hint(
-        self,
-        track: Track,
-        *,
-        format_label: str | None = None,
-        playback_note: str | None = None,
-    ) -> str:
-        """Resolve tidal/qobuz/local format text and attach playback-note suffix."""
-        if format_label is not None:
-            base_hint = format_label
-        elif track.id.startswith("tidal:") or track.source.value == "tidal":
-            base_hint = self._tidal_quality_hint_for_track(track.id)
-        elif track.id.startswith("qobuz:") or track.source.value == "qobuz":
-            base_hint = self._qobuz_quality_hint_for_track(track.id)
-        else:
-            metadata = self._store.get_file_metadata(track.id)
-            base_hint = LibraryStore.quality_hint(metadata)
-        note = self._playback_note if playback_note is None else playback_note
-        return format_playback_status(base_hint, playback_note=note)
-
     def _refresh_quality_hint(self) -> None:
         """Rebuild now-playing format line including the active audio layer."""
         track = self._current_track
         if track is None:
             return
-        self._quality_hint = self._resolve_quality_hint(track)
+        if track.id.startswith("tidal:"):
+            base_hint = self._tidal_quality_hint_for_track(track.id)
+        elif track.id.startswith("qobuz:"):
+            base_hint = self._qobuz_quality_hint_for_track(track.id)
+        else:
+            metadata = self._store.get_file_metadata(track.id)
+            base_hint = LibraryStore.quality_hint(metadata)
+        self._quality_hint = format_playback_status(
+            base_hint, playback_note=self._playback_note
+        )
 
     def _qobuz_quality_hint_for_track(self, track_id: str) -> str:
         if (
@@ -2805,6 +4024,8 @@ class PlayerService:
             self._volume_mode() == "software" and not self._device_volume
         )
 
+    def _no_volume_control(self) -> bool:
+        return self._volume_mode() == "fixed"
 
     def _output_using_fallback(self) -> bool:
         configured = self._config_manager.config.output_sink_id
@@ -2935,10 +4156,18 @@ class PlayerService:
         )
         playback_note = self._playback_note_for_source(path_info, source)
         release_id = self._release_id_for_playback(track)
-        quality_hint = self._resolve_quality_hint(
-            track,
-            format_label=source.format_label,
-            playback_note=playback_note,
+        format_label = source.format_label
+        if format_label is not None:
+            base_hint = format_label
+        elif track.source.value == "tidal":
+            base_hint = self._tidal_quality_hint_for_track(track.id)
+        elif track.source.value == "qobuz":
+            base_hint = self._qobuz_quality_hint_for_track(track.id)
+        else:
+            metadata = self._store.get_file_metadata(track.id)
+            base_hint = LibraryStore.quality_hint(metadata)
+        quality_hint = format_playback_status(
+            base_hint, playback_note=playback_note
         )
         return _PreparedTrackLoad(
             generation=generation,
@@ -3494,8 +4723,8 @@ class PlayerService:
         if track.source.value != "qobuz":
             self._qobuz_playback_format_track_id = None
             self._qobuz_playback_format_label = None
-        # Format-cache side effects stay here; hint text resolves below.
         if format_label is not None:
+            base_hint = format_label
             if track.source.value == "tidal":
                 self._tidal_playback_format_track_id = track.id
                 self._tidal_playback_format_label = format_label
@@ -3505,18 +4734,21 @@ class PlayerService:
         elif track.source.value == "tidal":
             self._tidal_playback_format_track_id = None
             self._tidal_playback_format_label = None
+            base_hint = self._tidal_quality_hint_for_track(track.id)
         elif track.source.value == "qobuz":
             self._qobuz_playback_format_track_id = None
             self._qobuz_playback_format_label = None
+            base_hint = self._qobuz_quality_hint_for_track(track.id)
+        else:
+            metadata = self._store.get_file_metadata(track.id)
+            base_hint = LibraryStore.quality_hint(metadata)
         if playback_note is not None:
             self._playback_note = playback_note
         if quality_hint is not None:
             self._quality_hint = quality_hint
         else:
-            self._quality_hint = self._resolve_quality_hint(
-                track,
-                format_label=format_label,
-                playback_note=self._playback_note,
+            self._quality_hint = format_playback_status(
+                base_hint, playback_note=self._playback_note
             )
         self._duration_sec = None
         if reset_position:

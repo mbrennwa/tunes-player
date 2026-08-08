@@ -1,4 +1,4 @@
-"""Load album art into Gtk.Picture from source-agnostic art_uri."""
+"""Load album art into Gtk.Image from source-agnostic art_uri."""
 
 from __future__ import annotations
 
@@ -19,12 +19,50 @@ FALLBACK_ICON = "audio-x-generic-symbolic"
 
 
 class ArtLoader:
-    """Resolve art_uri values into scaled Gtk.Picture content."""
+    """Resolve art_uri values into scaled Gtk.Image / Gtk.Picture content."""
 
     def __init__(self, data_dir: Path) -> None:
         self._data_dir = data_dir
         self._generation: dict[int, int] = {}
         self._next_generation = 0
+
+    def set_image(
+        self,
+        image: Gtk.Image,
+        art_uri: str | None,
+        *,
+        pixel_size: int,
+        fallback_icon: str = FALLBACK_ICON,
+    ) -> None:
+        generation = self._next_generation
+        self._next_generation += 1
+        widget_id = id(image)
+        self._generation[widget_id] = generation
+
+        if not art_uri:
+            self._apply_fallback_image(image, pixel_size, fallback_icon, widget_id, generation)
+            return
+
+        kind, payload = parse_art_uri(art_uri)
+        if kind == "local":
+            path = find_cached_art_path(self._data_dir, payload)
+            if path is None:
+                self._apply_fallback_image(image, pixel_size, fallback_icon, widget_id, generation)
+                return
+            threading.Thread(
+                target=self._load_file_image,
+                args=(path, image, pixel_size, widget_id, generation, fallback_icon),
+                daemon=True,
+            ).start()
+            return
+        if kind == "http":
+            threading.Thread(
+                target=self._load_http_image,
+                args=(payload, image, pixel_size, widget_id, generation, fallback_icon),
+                daemon=True,
+            ).start()
+            return
+        self._apply_fallback_image(image, pixel_size, fallback_icon, widget_id, generation)
 
     def set_picture(
         self,
@@ -72,6 +110,23 @@ class ArtLoader:
     def _is_current(self, widget_id: int, generation: int) -> bool:
         return self._generation.get(widget_id) == generation
 
+    def _apply_fallback_image(
+        self,
+        image: Gtk.Image,
+        pixel_size: int,
+        fallback_icon: str,
+        widget_id: int,
+        generation: int,
+    ) -> None:
+        def apply() -> None:
+            if not self._is_current(widget_id, generation):
+                return
+            image.clear()
+            image.set_from_icon_name(fallback_icon)
+            image.set_pixel_size(pixel_size)
+
+        GLib.idle_add(apply)
+
     @staticmethod
     def _fallback_paintable(icon_name: str, *, size: int) -> Gdk.Paintable | None:
         display = Gdk.Display.get_default()
@@ -103,6 +158,29 @@ class ArtLoader:
 
         GLib.idle_add(apply)
 
+    def _load_file_image(
+        self,
+        path: Path,
+        image: Gtk.Image,
+        pixel_size: int,
+        widget_id: int,
+        generation: int,
+        fallback_icon: str,
+    ) -> None:
+        pixbuf = self._pixbuf_from_file(path, pixel_size)
+        if pixbuf is None:
+            self._apply_fallback_image(image, pixel_size, fallback_icon, widget_id, generation)
+            return
+        GLib.idle_add(
+            self._apply_pixbuf_image,
+            image,
+            pixbuf,
+            pixel_size,
+            widget_id,
+            generation,
+            fallback_icon,
+        )
+
     def _load_file_picture(
         self,
         path: Path,
@@ -126,6 +204,29 @@ class ArtLoader:
             generation,
             fallback_icon,
             pixel_size,
+        )
+
+    def _load_http_image(
+        self,
+        url: str,
+        image: Gtk.Image,
+        pixel_size: int,
+        widget_id: int,
+        generation: int,
+        fallback_icon: str,
+    ) -> None:
+        pixbuf = self._pixbuf_from_http(url, pixel_size)
+        if pixbuf is None:
+            self._apply_fallback_image(image, pixel_size, fallback_icon, widget_id, generation)
+            return
+        GLib.idle_add(
+            self._apply_pixbuf_image,
+            image,
+            pixbuf,
+            pixel_size,
+            widget_id,
+            generation,
+            fallback_icon,
         )
 
     def _load_http_picture(
@@ -184,6 +285,27 @@ class ArtLoader:
             )
         except (OSError, ValueError, GLib.Error):
             return None
+
+    def _apply_pixbuf_image(
+        self,
+        image: Gtk.Image,
+        pixbuf: GdkPixbuf.Pixbuf,
+        pixel_size: int,
+        widget_id: int,
+        generation: int,
+        fallback_icon: str,
+    ) -> bool:
+        if not self._is_current(widget_id, generation):
+            return False
+        try:
+            texture = Gdk.Texture.new_for_pixbuf(pixbuf)
+        except (AttributeError, TypeError, GLib.Error):
+            self._apply_fallback_image(image, pixel_size, fallback_icon, widget_id, generation)
+            return False
+        image.clear()
+        image.set_from_paintable(texture)
+        image.set_size_request(pixel_size, pixel_size)
+        return False
 
     def _apply_pixbuf_picture(
         self,

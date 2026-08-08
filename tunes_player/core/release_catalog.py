@@ -5,10 +5,28 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from tunes_player.core.release_quality import (
-    _normalize_sample_rate_hz,
-    parse_qobuz_technical_spec,
+from tunes_player.core.release_quality import _normalize_sample_rate_hz
+
+_TECH_SPEC_RE = re.compile(
+    r"(\d+)\s*(?:bit|-bit).*?(\d+(?:\.\d+)?)\s*khz",
+    re.IGNORECASE,
 )
+
+def _parse_technical_spec(spec: object) -> tuple[int | None, int | None]:
+    if not isinstance(spec, str) or not spec.strip():
+        return None, None
+    match = _TECH_SPEC_RE.search(spec)
+    if match is None:
+        return None, None
+    try:
+        depth = int(match.group(1))
+    except (TypeError, ValueError):
+        depth = None
+    rate_hz = _normalize_sample_rate_hz(float(match.group(2)))
+    return (
+        depth if depth and depth > 0 else None,
+        rate_hz if rate_hz > 0 else None,
+    )
 
 def _best_qobuz_rate_depth(
     *,
@@ -36,7 +54,7 @@ def _qobuz_peak_rate_depth_from_dict(item: dict[str, Any]) -> tuple[int | None, 
     if parsed_rate > 0:
         rate_hz = parsed_rate
     if depth is None or rate_hz is None:
-        spec_depth, spec_rate = parse_qobuz_technical_spec(
+        spec_depth, spec_rate = _parse_technical_spec(
             item.get("maximum_technical_specifications"),
         )
         if depth is None:

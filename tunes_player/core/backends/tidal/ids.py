@@ -11,6 +11,10 @@ def album_id(tidal_album_id: int | str) -> str:
     return f"tidal:album:{tidal_album_id}"
 
 
+def artist_id(tidal_artist_id: int | str) -> str:
+    return f"tidal:artist:{tidal_artist_id}"
+
+
 def parse_prefixed_id(value: str, kind: str) -> int | None:
     prefix = f"tidal:{kind}:"
     if not value.startswith(prefix):

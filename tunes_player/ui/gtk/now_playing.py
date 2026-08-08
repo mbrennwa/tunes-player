@@ -389,7 +389,7 @@ class NowPlayingBar(Gtk.Box):
         _scroll_type: Gtk.ScrollType,
         value: float,
     ) -> bool:
-        if self._updating_volume or not self._service.volume_control_enabled():
+        if self._updating_volume or not self._service.volume_adjustable():
             return False
         # Drag flag suppresses inbound slider sync; device-volume applies are
         # coalesced off-thread in PlayerService (see #106). Ignore stack
@@ -405,7 +405,7 @@ class NowPlayingBar(Gtk.Box):
 
     def _clear_volume_drag(self) -> bool:
         self._volume_drag_clear_id = None
-        if self._service.volume_control_enabled():
+        if self._service.volume_adjustable():
             # Flush final level + emit volume_changed for MPRIS / UI listeners.
             self._service.set_volume(self._volume.get_value(), notify=True)
         self._service.end_volume_gesture()
@@ -600,11 +600,11 @@ def _handle_media_key(keyval: int, service: PlayerService) -> bool:
         service.pause()
         return True
     if keyval == _KEY_VOLUME_UP:
-        if service.volume_control_enabled():
+        if service.volume_adjustable():
             service.adjust_volume(0.05)
         return True
     if keyval == _KEY_VOLUME_DOWN:
-        if service.volume_control_enabled():
+        if service.volume_adjustable():
             service.adjust_volume(-0.05)
         return True
     return False
