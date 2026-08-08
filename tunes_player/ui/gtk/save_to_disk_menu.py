@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -145,21 +146,50 @@ def begin_save_release(
     parent_window: Gtk.Window | None,
 ) -> None:
     tile_tier = parse_quality_tier_suffix(release_id) or ""
-    tracks = service.get_release_tracks(
-        release_id,
-        playback_preference=playback_preference_for_tier(tile_tier),
-    )
-    streaming = [t for t in tracks if is_streaming_source(t.source)]
-    if not streaming:
-        if toast_overlay is not None:
-            show_error_toast(toast_overlay, "No streaming tracks to save.")
-        return
-    begin_save_tracks(
-        service,
-        tracks=streaming,
-        toast_overlay=toast_overlay,
-        parent_window=parent_window,
-    )
+    preference = playback_preference_for_tier(tile_tier)
+
+    def work() -> None:
+        from tunes_player.core.backends.qobuz import QobuzUnavailableError
+        from tunes_player.core.backends.tidal import TidalUnavailableError
+
+        try:
+            tracks = service.get_release_tracks(
+                release_id,
+                playback_preference=preference,
+            )
+        except (TidalUnavailableError, QobuzUnavailableError) as exc:
+            message = str(exc)
+
+            def show_unavailable() -> bool:
+                if toast_overlay is not None:
+                    show_error_toast(toast_overlay, message)
+                return False
+
+            GLib.idle_add(show_unavailable)
+            return
+
+        streaming = [t for t in tracks if is_streaming_source(t.source)]
+
+        def continue_save() -> bool:
+            if not streaming:
+                if toast_overlay is not None:
+                    show_error_toast(toast_overlay, "No streaming tracks to save.")
+                return False
+            begin_save_tracks(
+                service,
+                tracks=streaming,
+                toast_overlay=toast_overlay,
+                parent_window=parent_window,
+            )
+            return False
+
+        GLib.idle_add(continue_save)
+
+    threading.Thread(
+        target=work,
+        daemon=True,
+        name="tunes-save-release-tracks",
+    ).start()
 
 
 def begin_save_tracks(
