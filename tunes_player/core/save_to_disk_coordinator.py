@@ -112,10 +112,6 @@ class SaveToDiskCoordinator:
         thread = self._download_thread
         return thread is not None and thread.is_alive()
 
-    def is_cancel_requested(self) -> bool:
-        """True after cancel of the active job, until the worker exits."""
-        return self._download_cancel.is_set()
-
     def has_download_activity(self) -> bool:
         """True when a job is running or queued."""
         with self._download_lock:
