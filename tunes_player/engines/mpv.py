@@ -256,13 +256,17 @@ class MpvEngine:
 
             self._loaded_uri = uri
             self._track_end_signaled = False
-            self._seed_playback_position(max(0.0, start_sec))
+            resume_sec = max(0.0, start_sec)
+            self._seed_playback_position(resume_sec)
             self._duration_sec = None
             self._last_position_update_at = time.monotonic()
 
-            self._player.play(uri)
-            if start_sec > 0:
-                self._player.time_pos = start_sec
+            # File-local start= resumes mid-track reliably; play()+time_pos races
+            # demux readiness (#173).
+            if resume_sec > 0:
+                self._player.loadfile(uri, "replace", start=resume_sec)
+            else:
+                self._player.play(uri)
             self._player.pause = False
             self._playing = True
         finally:
@@ -270,7 +274,7 @@ class MpvEngine:
 
         self.refresh_playback_path_info()
         self._emit("playback_path_changed")
-        self._notify_track_started()
+        self._notify_track_started(start_sec=max(0.0, start_sec))
         self._emit("duration_changed")
         self._emit("playing_changed")
 
@@ -674,13 +678,13 @@ class MpvEngine:
     def _touch_position_clock(self) -> None:
         self._last_position_update_at = time.monotonic()
 
-    def _notify_track_started(self) -> None:
+    def _notify_track_started(self, *, start_sec: float = 0.0) -> None:
         uri = self._loaded_uri
         if uri is None or uri == self._last_track_started_uri:
             return
         self._last_track_started_uri = uri
         self._track_end_signaled = False
-        self._seed_playback_position(0.0)
+        self._seed_playback_position(max(0.0, start_sec))
         self._duration_sec = None
         self._emit("track_started")
 

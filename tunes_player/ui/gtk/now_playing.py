@@ -564,6 +564,13 @@ class NowPlayingBar(Gtk.Box):
 
         reported_sec = max(0.0, min(reported_sec, duration_sec))
         now = time.monotonic()
+        # Same-track rewind (device rebuild, seek, recovery) — #173.
+        if reported_sec < self._shown_sec - 0.5:
+            self._shown_sec = reported_sec
+            self._shown_anchor_sec = reported_sec
+            self._shown_anchor_at = now if is_playing and not position_stalled else None
+            if position_stalled or not is_playing:
+                return self._shown_sec
         if position_stalled:
             # Honest UI when audio/time-pos soft-stalls (#67): do not wall-clock
             # extrapolate past the last reported engine position.
@@ -622,7 +629,11 @@ class NowPlayingBar(Gtk.Box):
             is_playing=state.is_playing,
             position_stalled=state.position_stalled,
         )
-        self._set_progress_fraction(position_sec / duration)
+        current_scale_sec = self._progress.get_value() * duration
+        allow_decrease = position_sec < current_scale_sec - 0.25
+        self._set_progress_fraction(
+            position_sec / duration, allow_decrease=allow_decrease
+        )
         self._update_seek_labels(position_sec, duration)
         return True
 
