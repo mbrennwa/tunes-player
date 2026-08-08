@@ -120,12 +120,6 @@ def discover_output_volume_control_for_endpoint(
         return None
     return discover_output_volume_control(card, device=device, verify=verify)
 
-def alsa_mixer_available_for_endpoint(endpoint_id: str) -> bool:
-    return discover_output_volume_control_for_endpoint(endpoint_id, verify=True) is not None
-
-def alsa_mixer_available(card: int) -> bool:
-    return discover_output_volume_control(card, verify=True) is not None
-
 def alsa_mixer_adjustable_for_endpoint(endpoint_id: str) -> bool:
     return (
         discover_output_volume_control_for_endpoint(endpoint_id, verify=True)
