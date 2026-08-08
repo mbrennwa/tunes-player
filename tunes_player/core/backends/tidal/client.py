@@ -12,9 +12,10 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal, TypeVar
 
 TidalRailFilter = Literal["all", "new_releases", "recommendations"]
+_T = TypeVar("_T")
 
 from tunes_player.core.backends.playable import PlayableSource
 from tunes_player.core.backends.tidal import convert, ids as tidal_ids
@@ -72,7 +73,10 @@ def _quiet_tidalapi_missing_object_warnings():
         session_log.setLevel(previous)
 
 _STREAM_CACHE_TTL_SEC = 120
-_STREAM_RETRY_ATTEMPTS = 4
+_ALBUM_TRACKS_CACHE_TTL_SEC = 120
+_RATE_LIMIT_RETRY_ATTEMPTS = 4
+_STREAM_RETRY_ATTEMPTS = _RATE_LIMIT_RETRY_ATTEMPTS
+_RATE_LIMIT_MESSAGE = "TIDAL rate limit reached. Wait a minute, then try again."
 _NEW_RELEASE_TITLE_HINTS = (
     "new",
     "neu",
@@ -199,6 +203,39 @@ def _is_object_not_found(exc: BaseException) -> bool:
     return isinstance(exc, ObjectNotFound)
 
 
+def _call_with_rate_limit_retry(
+    operation: Callable[[], _T],
+    *,
+    label: str,
+) -> _T:
+    """Retry ``operation`` on TIDAL 429, then raise ``TidalUnavailableError``."""
+    from tidalapi.exceptions import TooManyRequests
+
+    last_rate_limit: TooManyRequests | None = None
+    for attempt in range(_RATE_LIMIT_RETRY_ATTEMPTS):
+        try:
+            return operation()
+        except TooManyRequests as exc:
+            last_rate_limit = exc
+            if attempt + 1 >= _RATE_LIMIT_RETRY_ATTEMPTS:
+                break
+            if exc.retry_after > 0:
+                wait_sec = float(exc.retry_after)
+            else:
+                wait_sec = min(2.0**attempt, 30.0)
+            log.warning(
+                "TIDAL rate limited for %s (attempt %s/%s), retry in %.0fs",
+                label,
+                attempt + 1,
+                _RATE_LIMIT_RETRY_ATTEMPTS,
+                wait_sec,
+            )
+            time.sleep(wait_sec)
+    if last_rate_limit is not None:
+        raise TidalUnavailableError(_RATE_LIMIT_MESSAGE) from last_rate_limit
+    raise RuntimeError("unreachable")
+
+
 def tidalapi_available() -> bool:
     try:
         import tidalapi  # noqa: F401
@@ -221,6 +258,7 @@ class TidalClient:
         self._oauth_error: str | None = None
         self._hi_res_entitled: bool | None = None
         self._stream_cache: dict[tuple[int, str], tuple[dict[str, Any], float]] = {}
+        self._album_tracks_cache: dict[str, tuple[list[Track], float]] = {}
         self._missing_album_ids: set[str] = set()
         self._session_lock = threading.RLock()
 
@@ -708,18 +746,25 @@ class TidalClient:
         if album is None:
             return None
         try:
-            tracks = list(album.tracks())
+            raw_tracks = _call_with_rate_limit_retry(
+                lambda: list(album.tracks()),
+                label=f"album {numeric} tracks",
+            )
         except Exception as exc:
             if _is_object_not_found(exc):
                 self._missing_album_ids.add(numeric)
                 return None
             raise
-        duration = sum(float(t.duration or 0) for t in tracks)
+        converted = [
+            convert.track_from_tidal(session, item, album=album) for item in raw_tracks
+        ]
+        self._store_album_tracks_cache(numeric, converted)
+        duration = sum(float(t.duration or 0) for t in raw_tracks)
         release = convert.release_from_tidal(
             session,
             album,
-            owned_track_count=len(tracks),
-            tracks=tracks,
+            owned_track_count=len(raw_tracks),
+            tracks=raw_tracks,
         )
         if duration:
             from dataclasses import replace
@@ -731,12 +776,18 @@ class TidalClient:
         numeric = tidal_ids.parse_prefixed_id(release_id, "album")
         if numeric is None:
             return []
+        cached = self._album_tracks_cache_get(numeric)
+        if cached is not None:
+            return list(cached)
         session = self._require_login()
         album = self._album_or_none(session, numeric)
         if album is None:
             return []
         try:
-            items = list(album.tracks())
+            items = _call_with_rate_limit_retry(
+                lambda: list(album.tracks()),
+                label=f"album {numeric} tracks",
+            )
         except Exception as exc:
             if _is_object_not_found(exc):
                 self._missing_album_ids.add(numeric)
@@ -745,14 +796,34 @@ class TidalClient:
         tracks: list[Track] = []
         for item in items:
             tracks.append(convert.track_from_tidal(session, item, album=album))
+        self._store_album_tracks_cache(numeric, tracks)
         return tracks
+
+    def _album_tracks_cache_get(self, numeric: str) -> list[Track] | None:
+        entry = self._album_tracks_cache.get(numeric)
+        if entry is None:
+            return None
+        tracks, expires_at = entry
+        if time.monotonic() >= expires_at:
+            self._album_tracks_cache.pop(numeric, None)
+            return None
+        return tracks
+
+    def _store_album_tracks_cache(self, numeric: str, tracks: list[Track]) -> None:
+        self._album_tracks_cache[numeric] = (
+            list(tracks),
+            time.monotonic() + _ALBUM_TRACKS_CACHE_TTL_SEC,
+        )
 
     def _album_or_none(self, session: tidalapi.Session, numeric: str) -> Any | None:
         if numeric in self._missing_album_ids:
             return None
         with _quiet_tidalapi_missing_object_warnings():
             try:
-                album = session.album(numeric)
+                album = _call_with_rate_limit_retry(
+                    lambda: session.album(numeric),
+                    label=f"album {numeric}",
+                )
             except Exception as exc:
                 if _is_object_not_found(exc):
                     self._missing_album_ids.add(numeric)
@@ -918,8 +989,6 @@ class TidalClient:
         track_id: int,
         audio_quality: str,
     ) -> dict[str, Any]:
-        from tidalapi.exceptions import TooManyRequests
-
         params = {
             "playbackmode": "STREAM",
             "audioquality": audio_quality,
@@ -927,36 +996,19 @@ class TidalClient:
             "deviceType": "BROWSER",
             "platform": "WEB",
         }
-        last_rate_limit: TooManyRequests | None = None
-        for attempt in range(_STREAM_RETRY_ATTEMPTS):
-            try:
-                response = session.request.request(
-                    "GET",
-                    f"tracks/{track_id}/playbackinfopostpaywall",
-                    params,
-                )
-                return response.json()
-            except TooManyRequests as exc:
-                last_rate_limit = exc
-                if attempt + 1 >= _STREAM_RETRY_ATTEMPTS:
-                    break
-                if exc.retry_after > 0:
-                    wait_sec = float(exc.retry_after)
-                else:
-                    wait_sec = min(2.0**attempt, 30.0)
-                log.warning(
-                    "TIDAL rate limited for track %s (attempt %s/%s), retry in %.0fs",
-                    track_id,
-                    attempt + 1,
-                    _STREAM_RETRY_ATTEMPTS,
-                    wait_sec,
-                )
-                time.sleep(wait_sec)
-        if last_rate_limit is not None:
-            raise TidalUnavailableError(
-                "TIDAL rate limit reached. Wait a minute, then try again."
-            ) from last_rate_limit
-        raise RuntimeError("unreachable")
+
+        def fetch() -> dict[str, Any]:
+            response = session.request.request(
+                "GET",
+                f"tracks/{track_id}/playbackinfopostpaywall",
+                params,
+            )
+            return response.json()
+
+        return _call_with_rate_limit_retry(
+            fetch,
+            label=f"track {track_id}",
+        )
 
     def _playback_uri_from_manifest(
         self,

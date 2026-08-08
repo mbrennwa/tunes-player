@@ -657,17 +657,11 @@ class PlayerService:
         if resolved_id.startswith("tidal:"):
             if not self._tidal.is_logged_in():
                 return []
-            try:
-                return self._tidal.get_release_tracks(resolved_id)
-            except TidalUnavailableError:
-                return []
+            return self._tidal.get_release_tracks(resolved_id)
         if resolved_id.startswith("qobuz:"):
             if not self._qobuz.is_logged_in():
                 return []
-            try:
-                return self._qobuz.get_release_tracks(resolved_id)
-            except QobuzUnavailableError:
-                return []
+            return self._qobuz.get_release_tracks(resolved_id)
         return self._store.get_release_tracks(resolved_id)
 
     def search(self, query: str, *, artists_only: bool = False) -> SearchResults:
@@ -1571,7 +1565,11 @@ class PlayerService:
                 return
             release_id = self._store.release_id_for_track(track_id)
             if release_id is not None:
-                tracks = self.get_release_tracks(release_id)
+                try:
+                    tracks = self.get_release_tracks(release_id)
+                except (TidalUnavailableError, QobuzUnavailableError) as exc:
+                    self._report_error(str(exc), exc=exc)
+                    return
                 start_index = next(
                     (index for index, item in enumerate(tracks) if item.id == track_id),
                     0,
@@ -1654,10 +1652,14 @@ class PlayerService:
                 summaries=self._release_summaries,
             )
             preference = playback_preference_for_tier(tier)
-            tracks = self.get_release_tracks(
-                release_id,
-                playback_preference=preference,
-            )
+            try:
+                tracks = self.get_release_tracks(
+                    release_id,
+                    playback_preference=preference,
+                )
+            except (TidalUnavailableError, QobuzUnavailableError) as exc:
+                self._report_error(str(exc), exc=exc)
+                return
             if not tracks:
 
                 def apply_empty() -> None:

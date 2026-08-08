@@ -11,6 +11,8 @@ gi.require_version("Gtk", "4.0")
 
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
+from tunes_player.core.backends.qobuz import QobuzUnavailableError
+from tunes_player.core.backends.tidal import TidalUnavailableError
 from tunes_player.core.models import Release, ReleaseCompleteness, Source, Track
 from tunes_player.core.release_quality import (
     catalog_quality_label_for_release,
@@ -494,10 +496,13 @@ class ReleaseDetailView(Gtk.Box):
         header.append(header_row)
 
         tile_tier = release.quality_tier or parse_quality_tier_suffix(release.id) or ""
-        tracks = service.get_release_tracks(
-            release.id,
-            playback_preference=playback_preference_for_tier(tile_tier),
-        )
+        try:
+            tracks = service.get_release_tracks(
+                release.id,
+                playback_preference=playback_preference_for_tier(tile_tier),
+            )
+        except (TidalUnavailableError, QobuzUnavailableError):
+            tracks = []
         show_artists = tracks_have_mixed_artists(tracks)
 
         art_frame = _square_art_with_play(

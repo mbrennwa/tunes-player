@@ -1642,23 +1642,40 @@ class TunesWindow(Adw.ApplicationWindow):
         self._open_release(release_id)
 
     def _open_release(self, release_id: str) -> None:
-        release = self._service.get_release(release_id)
-        if release is None:
-            return
-        detail = ReleaseDetailView(
-            service=self._service,
-            release=release,
-            art_loader=self._art_loader,
-            on_artist_search=self._search_for_artist,
-        )
-        page = Adw.NavigationPage(
-            title=escape_markup(release.title),
-            child=detail,
-            tag=release_id,
-        )
-        self._pop_to_root()
-        self._main_nav.push(page)
-        self._sync_header_with_nav()
+        def work() -> None:
+            release = self._service.get_release(release_id)
+
+            def apply() -> bool:
+                if release is None:
+                    if release_id.startswith(("tidal:", "qobuz:")):
+                        show_error_toast(
+                            self._toast_overlay,
+                            "Could not load this release. Wait a minute, then try again.",
+                        )
+                    return False
+                detail = ReleaseDetailView(
+                    service=self._service,
+                    release=release,
+                    art_loader=self._art_loader,
+                    on_artist_search=self._search_for_artist,
+                )
+                page = Adw.NavigationPage(
+                    title=escape_markup(release.title),
+                    child=detail,
+                    tag=release_id,
+                )
+                self._pop_to_root()
+                self._main_nav.push(page)
+                self._sync_header_with_nav()
+                return False
+
+            GLib.idle_add(apply)
+
+        threading.Thread(
+            target=work,
+            daemon=True,
+            name="tunes-open-release",
+        ).start()
 
     def _clear_selection_history(self) -> None:
         self._selection_stack.clear()
