@@ -236,7 +236,7 @@ class FolderAutoMonitorServiceTests(unittest.TestCase):
     def test_start_scan_closes_store_write_connection(self) -> None:
         process = MagicMock()
         with patch(
-            "tunes_player.core.services.create_scan_process",
+            "tunes_player.core.library_scan.create_scan_process",
             return_value=(process, MagicMock()),
         ):
             from tunes_player.core.services import _ScanJob
@@ -347,7 +347,7 @@ class FolderScanResumeServiceTests(unittest.TestCase):
         self._config.set_folder_scan_checkpoint(self._folder, checkpoint)
         process = MagicMock()
         with patch(
-            "tunes_player.core.services.create_scan_process",
+            "tunes_player.core.library_scan.create_scan_process",
             return_value=(process, MagicMock()),
         ) as create_scan:
             self._service._start_scan_job(
