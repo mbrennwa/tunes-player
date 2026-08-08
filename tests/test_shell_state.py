@@ -40,6 +40,7 @@ from tunes_player.core.shell_state import (
     parse_shell_state,
     prune_enabled_genres,
     prune_enabled_labels,
+    orphan_enabled_filter_values,
     labels_in_selection,
     cached_releases_have_quality_tiers,
     prune_enabled_quality_tiers,
@@ -606,15 +607,31 @@ class TestQualityFilter(unittest.TestCase):
         self.assertEqual(pruned, frozenset({QUALITY_FILTER_CD}))
 
 
+class TestOrphanEnabledFilterValues(unittest.TestCase):
+    def test_sorted_casefold_orphans_only(self) -> None:
+        self.assertEqual(
+            orphan_enabled_filter_values(
+                frozenset({"Rock", "Jazz", "Ambient"}),
+                ("Jazz", "Classical"),
+            ),
+            ("Ambient", "Rock"),
+        )
+
+    def test_empty_when_all_available(self) -> None:
+        self.assertEqual(
+            orphan_enabled_filter_values(frozenset({"Jazz"}), ("Jazz", "Rock")),
+            (),
+        )
+
+
 class TestFilterPruneAcrossSelectionChange(unittest.TestCase):
     """Mock two catalog caches (view A → view B), as GTK sync does on selection change.
 
-    Sibling chips (quality/type) on the *same* cache do not change genres_in_selection;
-    only a new cached selection does. That is why UI smoke for genre prune needs a
-    different preset/search, not toggling Compressed on the same view.
+    Sibling chips (quality/type) on the *same* cache do not change genres_in_selection.
+    After #149 Step 2, genre/label stay sticky; orphans are listed separately in the UI.
     """
 
-    def test_genre_enabled_cleared_when_missing_from_new_selection(self) -> None:
+    def test_genre_sticky_with_orphans_on_new_selection(self) -> None:
         view_a = [
             _release("a1", Source.LOCAL, genre="Rock"),
             _release("a2", Source.LOCAL, genre="Jazz"),
@@ -627,7 +644,9 @@ class TestFilterPruneAcrossSelectionChange(unittest.TestCase):
         self.assertIn("Rock", genres_in_selection(view_a))
         available_b = genres_in_selection(view_b)
         self.assertNotIn("Rock", available_b)
-        self.assertEqual(prune_enabled_genres(enabled, available_b), frozenset())
+        # Sticky: keep enabled; UI shows Rock under "Not in this view".
+        self.assertEqual(enabled, frozenset({"Rock"}))
+        self.assertEqual(orphan_enabled_filter_values(enabled, available_b), ("Rock",))
 
     def test_sibling_quality_chip_does_not_change_genre_catalog(self) -> None:
         cached = [
@@ -647,11 +666,11 @@ class TestFilterPruneAcrossSelectionChange(unittest.TestCase):
         before = genres_in_selection(cached)
         visible = apply_quality_filter(cached, frozenset({QUALITY_FILTER_COMPRESSED}))
         self.assertEqual([r.id for r in visible], ["r2"])
-        # Genre menu/prune still see the full cached selection, not post-chip rows.
+        # Genre menu still sees the full cached selection, not post-chip rows.
         self.assertEqual(genres_in_selection(cached), before)
         self.assertIn("Rock", before)
 
-    def test_label_enabled_cleared_when_missing_from_new_selection(self) -> None:
+    def test_label_sticky_with_orphans_on_new_selection(self) -> None:
         view_a = [_release("a1", Source.LOCAL), _release("a2", Source.LOCAL)]
         view_b = [_release("b1", Source.LOCAL), _release("b2", Source.LOCAL)]
         labels_a = {
@@ -666,7 +685,8 @@ class TestFilterPruneAcrossSelectionChange(unittest.TestCase):
         self.assertIn("buy", labels_in_selection(view_a, labels_a))
         available_b = labels_in_selection(view_b, labels_b)
         self.assertNotIn("buy", available_b)
-        self.assertEqual(prune_enabled_labels(enabled, available_b), frozenset())
+        self.assertEqual(enabled, frozenset({"buy"}))
+        self.assertEqual(orphan_enabled_filter_values(enabled, available_b), ("buy",))
 
     def test_source_pruned_when_no_longer_configured(self) -> None:
         enabled = frozenset({Source.LOCAL, Source.TIDAL})
