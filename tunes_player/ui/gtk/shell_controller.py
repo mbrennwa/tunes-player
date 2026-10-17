@@ -116,13 +116,13 @@ def empty_grid_message(
         days = service.config.config.new_music_within_days
         return (
             f"Nothing new in the last {days} days.\n"
-            "Add music folders or sign in to TIDAL or Qobuz in Settings → Sources."
+            "Add music folders or sign in to Qobuz or TIDAL in Settings → Sources."
         )
 
     if state.base == ShellBase.SUGGESTION:
         return (
             "Play music to build suggestions from your library, or sign in to "
-            "TIDAL or Qobuz in Settings → Sources."
+            "Qobuz or TIDAL in Settings → Sources."
         )
 
     if state.base == ShellBase.LABELLED:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from tunes_player.core.models import ReleaseCompleteness, ReleaseType
 
-# Normalized keys from Vorbis RELEASETYPE, MusicBrainz album type, TIDAL, Qobuz, etc.
+# Normalized keys from Vorbis RELEASETYPE, MusicBrainz album type, Qobuz, TIDAL, etc.
 _TYPE_ALIASES: dict[str, ReleaseType] = {
     "album": ReleaseType.ALBUM,
     "lp": ReleaseType.ALBUM,

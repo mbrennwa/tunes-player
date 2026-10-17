@@ -34,7 +34,7 @@ _FOLDER_WATCH_LABEL = "Watch folder"
 _QOBUZ_CRED_AUTOSAVE_MS = 500
 _UNRECOGNIZED_SYNC_TOAST_SEC = 8
 _APP_DESCRIPTION = (
-    "Search, discover, and play music from local files, Qobuz, and Tidal"
+    "Search, discover, and play music from local files, Qobuz, and TIDAL"
 )
 _PROJECT_HOMEPAGE = "https://github.com/mbrennwa/tunes-player"
 _ISSUE_TRACKER_URL = "https://github.com/mbrennwa/tunes-player/issues"
@@ -207,7 +207,6 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._tidal_status_row.add_suffix(btn_box)
         tidal_group = Adw.PreferencesGroup(title="TIDAL")
         tidal_group.add(self._tidal_status_row)
-        sources_page.add(tidal_group)
 
         qobuz_group = Adw.PreferencesGroup(title="Qobuz")
         cfg = service.config.config
@@ -233,6 +232,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self._qobuz_status_row.add_suffix(qobuz_btn_box)
         qobuz_group.add(self._qobuz_status_row)
         sources_page.add(qobuz_group)
+        sources_page.add(tidal_group)
 
         self._qobuz_autosave_id: int = 0
         self._qobuz_sign_in_dialog: Adw.Dialog | None = None

@@ -3490,7 +3490,7 @@ class PlayerService:
         self._last_recorded_at_ns = now_ns
 
     def release_id_for_track(self, track: Track) -> str | None:
-        """Resolve the catalog release id for a track (local, TIDAL, or Qobuz)."""
+        """Resolve the catalog release id for a track (local, Qobuz, or TIDAL)."""
         return self._release_id_for_playback(track)
 
     def _release_id_for_playback(self, track: Track) -> str | None:

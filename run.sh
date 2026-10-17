@@ -72,7 +72,7 @@ install_desktop_integration() {
 [Desktop Entry]
 Type=Application
 Name=Tunes
-Comment=Music player for local files and streaming (TIDAL, Qobuz)
+Comment=Music player for local files and streaming (Qobuz, TIDAL)
 Icon=$icon_png
 StartupWMClass=tunes.player
 TryExec=$tunes_bin

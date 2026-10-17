@@ -24,9 +24,9 @@ lives on GitHub Issues.
   soft gain.
 - **Media keys** — play/pause, skip, volume, mute from keyboard and OS (see
   [Media keys](#media-keys-requirement)).
-- Integrate **streaming** (Tidal, Deezer, Qobuz) via provider-specific APIs
+- Integrate **streaming** (Deezer, Qobuz, TIDAL) via provider-specific APIs
   (official developer paths where available; see [Streaming](#streaming)).
-  **TIDAL** and **Qobuz** are implemented; **Deezer** and **Spotify** are not.
+  **Qobuz** and **TIDAL** are implemented; **Deezer** and **Spotify** are not.
 - Present sources as **one searchable library** (see [Unified catalog](#unified-catalog)).
 - **Simple** Libadwaita GUI; native GNOME look (not Qt on Linux).
 
@@ -129,7 +129,7 @@ will work for Qt signals later).
 - **Local** art is backed by the `album_art` SQLite table and on-disk cache under
   `{data_dir}/art/`; URIs use the `tunes://art/local/…` scheme. `art_updated` events
   mean local cache rows changed — refresh via `PlayerService.refresh_local_release_art_uris()`.
-- **Streaming** art is an HTTPS URL set when the catalog row is fetched (TIDAL/Qobuz APIs).
+- **Streaming** art is an HTTPS URL set when the catalog row is fetched (Qobuz/TIDAL APIs).
   It lives on the in-memory `Release` object (and shell cache payload), not in
   `LibraryStore`. UI must not re-resolve streaming covers through the local store.
 
@@ -221,7 +221,7 @@ and simpler than Roon.
 ```text
 ┌ Header: back · (title) · Settings menu ────────────────────────┐
 ├ Search… · New Releases · Suggest Music ────────────────────────────┤
-├ [All] [Local] [TIDAL] [Qobuz]  (only if multiple sources) ─────┤
+├ [All] [Local] [Qobuz] [TIDAL]  (only if multiple sources) ─────┤
 ├ Main pane: release grid → release detail (single NavigationView) ┤
 ├─────────────────────────────────────────────────────────────────┤
 │ Now Playing bar: art · title · transport · volume · queue       │
@@ -258,7 +258,7 @@ lyrics, streaming source badges in browse views.
 | Page | Contents |
 |------|----------|
 | **Application** | New Releases cutoff (days); **Downloads folder** for Save to disk (not a library Source unless the user adds it under Local files); Labels sync |
-| **Sources** | **Local files:** music folders, scan library. **Streaming:** TIDAL sign-in/out (OAuth via browser); Qobuz App ID/Secret, save credentials, email/password sign-in/out |
+| **Sources** | **Local files:** music folders, scan library. **Streaming:** Qobuz App ID/Secret, save credentials, email/password sign-in/out; TIDAL sign-in/out (OAuth via browser) |
 | **Audio** | Output device dropdown (PipeWire/Pulse sinks, bit-perfect potential labels); allow software-volume fallback when no sink control |
 | **About** | App name/description, version, license; website and issue tracker links; open diagnostics log file |
 
@@ -275,7 +275,7 @@ files live in **core/backends/** and `platformdirs` config/data dirs. Settings U
 - **New Releases / Suggest Music:** merged selections from local + signed-in services.
 - **Search:** federated release results (local first, then streaming append).
 - **Release detail / playback:** same views for `local:…`, `tidal:…`, `qobuz:…` IDs.
-- **Now Playing:** quality hint (e.g. FLAC metadata, “TIDAL”, “QOBUZ”) plus **playback
+- **Now Playing:** quality hint (e.g. FLAC metadata, “Qobuz”, “TIDAL”) plus **playback
   path** (`ALSA bit-perfect`, resample notes, `via PipeWire`). The path line is
   **authoritative from the engine** (negotiated mpv/ALSA state), not only pre-load
   inference in `PlayerService`.
@@ -365,7 +365,7 @@ PipeWire sink for the same device.
 
 - **Bit-perfect + software volume are incompatible** — lowering level inside the
   player changes samples. Volume must move to the **device or sink**.
-- **Streaming** (Tidal/Deezer/Qobuz) may already be lossy or transcoded; “bit-perfect” means
+- **Streaming** (Deezer/Qobuz/TIDAL) may already be lossy or transcoded; “bit-perfect” means
   **no additional processing in Tunes**, not that the stream is hi-res MQA/bitstream.
 - **Local FLAC/WAV** is the primary bit-perfect use case for v1 (ALSA hw only).
 
@@ -509,8 +509,8 @@ UI never polls mpv properties directly.
 
 “One music store” evolves in phases:
 
-1. **Federated search (today):** one search box; results tagged by source (Local, TIDAL,
-   Qobuz). **`PlayerService.search()`** queries the local store first, then appends
+1. **Federated search (today):** one search box; results tagged by source (Local, Qobuz,
+   TIDAL). **`PlayerService.search()`** queries the local store first, then appends
    signed-in streaming backends. Query semantics (`core/search_query.py`): whitespace
    tokens are **AND** (all must match, order irrelevant); `"quoted phrases"` are
    contiguous. Local search intersects per-term `LIKE` hits; streaming APIs get a
@@ -536,7 +536,7 @@ to the local file (match on normalized artist/title or MBID).
 
 Tunes should not copy any one provider’s “home” page. Instead, the UI presents a set
 of generic **Home rails** (sections) populated by multiple **providers** (Local,
-Tidal, Deezer, Qobuz).
+Deezer, Qobuz, TIDAL).
 
 ### Rails (v1 shape)
 
@@ -554,14 +554,14 @@ Each provider can implement any subset:
 Backends are concrete clients (`TidalClient`, `QobuzClient`, `LibraryStore`) called from
 **PlayerService**, not a shared protocol yet. Typical methods:
 
-| Concern | Local (`LibraryStore`) | TIDAL / Qobuz clients |
+| Concern | Local (`LibraryStore`) | Qobuz / TIDAL clients |
 |---------|------------------------|------------------------|
 | Search | `search_releases()` | `search_releases()` |
 | Browse | `list_releases()`, `get_release()`, `get_release_tracks()` | same |
 | Play | `resolve_local_track()` via `resolve_track()` | `resolve_playable()`, `queue_for_track()` |
 | New Releases | `list_recently_added_items()` | `list_new_release_items()` |
 | Suggestions | `list_continue_listening_entries()`, `list_rediscover_items()` | `list_suggestion_items()`, `list_similar_items()` (TIDAL) |
-| Auth | — | OAuth (TIDAL) or credentials + login (Qobuz) |
+| Auth | — | credentials + login (Qobuz) or OAuth (TIDAL) |
 
 Items use core `Release` / `Track` models and opaque IDs.
 
@@ -596,14 +596,14 @@ Favorites / star ratings are not implemented yet.
 merges:
 
 - Local releases added within **New Releases cutoff** days (Settings → Application; default 90).
-- TIDAL new-release rails (when signed in; filtered by the same cutoff).
 - Qobuz featured new/recent releases (when signed in; filtered by cutoff).
+- TIDAL new-release rails (when signed in; filtered by the same cutoff).
 
 Deduped by `release.id`, sorted by `added_ns`, capped at 300.
 
 **Suggest Music** — flat release grid (same widget). `PlayerService.list_suggestion_items()`
-collects TIDAL track radio (when playing TIDAL), **continue listening** (`play_history`),
-TIDAL / Qobuz editorial catalogs, and local **rediscover**, then dedupes by `release.id`.
+collects **continue listening** (`play_history`), Qobuz / TIDAL editorial catalogs,
+TIDAL track radio (when playing TIDAL), and local **rediscover**, then dedupes by `release.id`.
 
 **Sort order** (higher `added_ns` first): all **local** releases, then streaming by source
 name — **Qobuz**, **TIDAL**. Within each group, recent plays or catalog order apply.
@@ -661,7 +661,7 @@ on quit — they are not persisted. The next app start auto-resumes interrupted 
 (album-atomic); partial albums are not left in the downloads tree. Single-track jobs
 promote immediately on success. See issues #68, #70, #81, and #83.
 
-**TIDAL** and **Qobuz** backends are implemented in `core/backends/` with OAuth or
+**Qobuz** and **TIDAL** backends are implemented in `core/backends/` with OAuth or
 account login, federated search, stream URL resolution at play time, and New Releases /
 Suggestions feeds.
 
@@ -686,8 +686,8 @@ for lossless streaming — plan per provider:
 
 | Provider | Access model | In Tunes |
 |----------|--------------|----------|
-| **Tidal** | Official developer platform; OAuth via `tidalapi` | Implemented (`core/backends/tidal/`) |
 | **Qobuz** | JSON API; user-supplied app credentials | Implemented (`core/backends/qobuz/`) |
+| **TIDAL** | Official developer platform; OAuth via `tidalapi` | Implemented (`core/backends/tidal/`) |
 | **Deezer** | Documented developer API (previews only); partnership TBD | Not implemented |
 | **Spotify** | Web API + SDK/Connect (no direct stream URLs) | Not implemented |
 
@@ -700,8 +700,8 @@ changing the backend API shape.
 ```text
 tunes_player/core/backends/
   playable.py, resolve.py, local.py
-  tidal/       # TidalClient — oauth, search, streams, home feeds (tidalapi)
   qobuz/       # QobuzClient — config credentials, session, signed stream URLs
+  tidal/       # TidalClient — oauth, search, streams, home feeds (tidalapi)
   deezer/      # (not implemented)
   spotify/     # (not implemented)
 ```
@@ -714,8 +714,8 @@ rate limit as playback. Playback stream URLs are still resolved only at play tim
 
 ### Auth and credentials
 
-- **Tidal:** OAuth via developer registration; tokens in config (see `platformdirs`).
 - **Qobuz:** see [Qobuz credentials](#qobuz-credentials).
+- **TIDAL:** OAuth via developer registration; tokens in config (see `platformdirs`).
 
 #### Qobuz credentials
 
@@ -751,10 +751,10 @@ update) replace app id/secret; session tokens are separate.
 
 | Provider | Dependency | License note |
 |----------|------------|--------------|
-| Tidal | `tidalapi` | LGPL-3.0 — OK inside GPL app |
 | Deezer | TBD (REST/client) | Confirm before linking |
-| Spotify | TBD (SDK/Connect) | Confirm before linking |
 | Qobuz | in-tree client (urllib) | No third-party SDK linked |
+| Spotify | TBD (SDK/Connect) | Confirm before linking |
+| TIDAL | `tidalapi` | LGPL-3.0 — OK inside GPL app |
 
 See [License rationale](#license-rationale).
 

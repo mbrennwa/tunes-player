@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Tunes
-Comment=Music player for local files and streaming (Qobuz, Tidal)
+Comment=Music player for local files and streaming (Qobuz, TIDAL)
 Exec=tunes-player
 Icon=tunes-player
 Terminal=false
