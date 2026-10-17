@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from tunes_player.core.backends.qobuz import ids as qobuz_ids
 from tunes_player.core.backends.qobuz.client import (
@@ -122,6 +123,189 @@ class TestQobuzListSuggestionItems(unittest.TestCase):
 
             self.assertEqual(len(items), 1)
             self.assertEqual(items[0].release.id, "qobuz:album:99")
+
+    def test_keeps_first_seen_order_and_decreasing_rank(self) -> None:
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = _logged_in_client(Path(tmp))
+            albums = {
+                "editor-picks": [_album("1", "First"), _album("2", "Second")],
+                "most-featured": [_album("2", "Second again"), _album("3", "Third")],
+            }
+
+            def fake_api_get(endpoint: str, params: dict | None = None, **kwargs: object):
+                self.assertEqual(endpoint, "album/getFeatured")
+                feature_type = str((params or {}).get("type"))
+                return {"albums": {"items": albums.get(feature_type, [])}}
+
+            with patch.object(client, "_api_get", side_effect=fake_api_get):
+                items = client.list_suggestion_items(limit=50)
+
+            self.assertEqual(
+                [item.release.id for item in items],
+                ["qobuz:album:1", "qobuz:album:2", "qobuz:album:3"],
+            )
+            ranks = [item.added_ns for item in items]
+            self.assertEqual(ranks, sorted(ranks, reverse=True))
+            self.assertEqual(len(set(ranks)), len(ranks))
+
+
+class TestQobuzListNewReleaseItems(unittest.TestCase):
+    def test_drops_old_albums_and_sorts_newest_first(self) -> None:
+        import tempfile
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import patch
+
+        now = datetime.now(timezone.utc)
+        newest = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        older = (now - timedelta(days=10)).strftime("%Y-%m-%d")
+        stale = (now - timedelta(days=40)).strftime("%Y-%m-%d")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = _logged_in_client(Path(tmp))
+            pages = {
+                "new-releases": [
+                    _album("old", "Older", release_date=older),
+                    _album("stale", "Stale", release_date=stale),
+                ],
+                "recent-releases": [_album("new", "Newest", release_date=newest)],
+            }
+
+            def fake_api_get(endpoint: str, params: dict | None = None, **kwargs: object):
+                self.assertEqual(endpoint, "album/getFeatured")
+                feature_type = str((params or {}).get("type"))
+                return {"albums": {"items": pages.get(feature_type, [])}}
+
+            with patch.object(client, "_api_get", side_effect=fake_api_get):
+                items = client.list_new_release_items(limit=50, within_days=30)
+
+            self.assertEqual(
+                [item.release.id for item in items],
+                ["qobuz:album:new", "qobuz:album:old"],
+            )
+
+    def test_stale_full_page_does_not_request_next_offset(self) -> None:
+        import tempfile
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import patch
+
+        stale = (datetime.now(timezone.utc) - timedelta(days=40)).strftime("%Y-%m-%d")
+        page = [_album(str(index), "Old", release_date=stale) for index in range(100)]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = _logged_in_client(Path(tmp))
+            calls: list[tuple[object, object]] = []
+
+            def fake_api_get(endpoint: str, params: dict | None = None, **kwargs: object):
+                params = params or {}
+                calls.append((params.get("type"), params.get("offset")))
+                if params.get("type") == "new-releases" and params.get("offset") == 0:
+                    return {"albums": {"items": page}}
+                return {"albums": {"items": []}}
+
+            with patch.object(client, "_api_get", side_effect=fake_api_get):
+                items = client.list_new_release_items(limit=50, within_days=30)
+
+            self.assertEqual(items, [])
+            self.assertIn(("new-releases", 0), calls)
+            self.assertNotIn(("new-releases", 100), calls)
+            self.assertIn(("recent-releases", 0), calls)
+
+    def test_recent_duplicate_still_requests_next_page(self) -> None:
+        import tempfile
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import patch
+
+        recent = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+        first_page = [_album("1", "Same", release_date=recent) for _ in range(100)]
+        next_page = [_album("2", "Next", release_date=recent)]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = _logged_in_client(Path(tmp))
+            calls: list[tuple[object, object]] = []
+
+            def fake_api_get(endpoint: str, params: dict | None = None, **kwargs: object):
+                params = params or {}
+                calls.append((params.get("type"), params.get("offset")))
+                if params.get("type") == "new-releases" and params.get("offset") == 0:
+                    return {"albums": {"items": first_page}}
+                if params.get("type") == "new-releases" and params.get("offset") == 100:
+                    return {"albums": {"items": next_page}}
+                return {"albums": {"items": []}}
+
+            with patch.object(client, "_api_get", side_effect=fake_api_get):
+                items = client.list_new_release_items(limit=10, within_days=30)
+
+            self.assertIn(("new-releases", 100), calls)
+            self.assertEqual(
+                [item.release.id for item in items],
+                ["qobuz:album:1", "qobuz:album:2"],
+            )
+
+
+class TestQobuzFeaturedRailErrors(unittest.TestCase):
+    def test_unavailable_propagates(self) -> None:
+        import tempfile
+        from unittest.mock import patch
+
+        from tunes_player.core.backends.qobuz.client import QobuzUnavailableError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = _logged_in_client(Path(tmp))
+            with patch.object(
+                client,
+                "_api_get",
+                side_effect=QobuzUnavailableError("down"),
+            ):
+                with self.assertRaises(QobuzUnavailableError):
+                    client.list_new_release_items()
+                with self.assertRaises(QobuzUnavailableError):
+                    client.list_suggestion_items()
+
+    def test_other_errors_return_empty(self) -> None:
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = _logged_in_client(Path(tmp))
+            with patch.object(client, "_api_get", side_effect=RuntimeError("boom")):
+                with self.assertLogs(
+                    "tunes_player.core.backends.qobuz.client",
+                    level="ERROR",
+                ) as new_release_logs:
+                    self.assertEqual(client.list_new_release_items(), [])
+                with self.assertLogs(
+                    "tunes_player.core.backends.qobuz.client",
+                    level="ERROR",
+                ) as suggestion_logs:
+                    self.assertEqual(client.list_suggestion_items(), [])
+
+            self.assertTrue(
+                any("Failed to load Qobuz new releases" in line for line in new_release_logs.output)
+            )
+            self.assertTrue(
+                any("Failed to load Qobuz suggestions" in line for line in suggestion_logs.output)
+            )
+
+
+def _logged_in_client(directory: Path) -> QobuzClient:
+    client = QobuzClient(directory / "qobuz.json", app_id="1", app_secret="secret")
+    client._user_auth_token = "token"  # noqa: SLF001
+    return client
+
+
+def _album(album_id: str, title: str, *, release_date: str | None = None) -> dict[str, object]:
+    album: dict[str, object] = {
+        "id": album_id,
+        "title": title,
+        "artist": {"name": "Band"},
+        "tracks_count": 1,
+    }
+    if release_date is not None:
+        album["release_date_stream"] = release_date
+    return album
 
 
 class TestQobuzGetReleaseSummary(unittest.TestCase):

@@ -7,6 +7,7 @@ import json
 import logging
 import time
 import urllib.error
+from collections.abc import Callable
 from datetime import datetime, timezone
 import urllib.parse
 import urllib.request
@@ -224,6 +225,61 @@ class QobuzClient:
                 releases.append(release)
         return releases[:limit]
 
+    def _collect_featured_albums(
+        self,
+        feature_types: tuple[str, ...],
+        *,
+        limit: int,
+        accept: Callable[[dict[str, Any]], bool] | None = None,
+        stop_rail_if_page_rejects_all: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Page ``album/getFeatured`` and return unique album dicts in walk order.
+
+        ``accept`` runs before dedupe. A page counts as accepted when any dict
+        passes it, including one later dropped as a duplicate. ``accept`` of
+        ``None`` accepts every dict.
+        """
+        page_size = 100
+        collected: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for feature_type in feature_types:
+            offset = 0
+            while len(collected) < limit:
+                data = self._api_get(
+                    "album/getFeatured",
+                    {
+                        "type": feature_type,
+                        "limit": min(page_size, limit - len(collected)),
+                        "offset": offset,
+                    },
+                )
+                albums = data.get("albums") if isinstance(data, dict) else None
+                if not isinstance(albums, dict):
+                    break
+                batch = albums.get("items") or []
+                if not batch:
+                    break
+                page_accepted = False
+                for raw in batch:
+                    if not isinstance(raw, dict):
+                        continue
+                    if accept is not None and not accept(raw):
+                        continue
+                    page_accepted = True
+                    release = convert.release_stub_from_qobuz(raw)
+                    if release.id in seen:
+                        continue
+                    seen.add(release.id)
+                    collected.append(raw)
+                    if len(collected) >= limit:
+                        break
+                if stop_rail_if_page_rejects_all and not page_accepted:
+                    break
+                if len(batch) < page_size:
+                    break
+                offset += page_size
+        return collected
+
     def list_new_release_items(
         self,
         *,
@@ -234,52 +290,25 @@ class QobuzClient:
         if not self.is_logged_in():
             return []
         cutoff_ns = time.time_ns() - int(within_days * 86_400 * 1_000_000_000)
-        items: list[RecentlyAddedItem] = []
-        seen: set[str] = set()
-        page_size = 100
         try:
-            for feature_type in _NEW_RELEASE_FEATURE_TYPES:
-                offset = 0
-                while len(items) < limit:
-                    data = self._api_get(
-                        "album/getFeatured",
-                        {
-                            "type": feature_type,
-                            "limit": min(page_size, limit - len(items)),
-                            "offset": offset,
-                        },
-                    )
-                    albums = data.get("albums") if isinstance(data, dict) else None
-                    if not isinstance(albums, dict):
-                        break
-                    batch = albums.get("items") or []
-                    if not batch:
-                        break
-                    batch_has_recent = False
-                    for raw in batch:
-                        if not isinstance(raw, dict):
-                            continue
-                        added_ns = _album_added_ns(raw)
-                        if added_ns < cutoff_ns:
-                            continue
-                        batch_has_recent = True
-                        release = convert.release_stub_from_qobuz(raw)
-                        if release.id in seen:
-                            continue
-                        seen.add(release.id)
-                        items.append(RecentlyAddedItem(added_ns=added_ns, release=release))
-                        if len(items) >= limit:
-                            break
-                    if not batch_has_recent:
-                        break
-                    if len(batch) < page_size:
-                        break
-                    offset += page_size
+            albums = self._collect_featured_albums(
+                _NEW_RELEASE_FEATURE_TYPES,
+                limit=limit,
+                accept=lambda raw: _album_added_ns(raw) >= cutoff_ns,
+                stop_rail_if_page_rejects_all=True,
+            )
         except QobuzUnavailableError:
             raise
         except Exception:
             log.exception("Failed to load Qobuz new releases")
             return []
+        items = [
+            RecentlyAddedItem(
+                added_ns=_album_added_ns(raw),
+                release=convert.release_stub_from_qobuz(raw),
+            )
+            for raw in albums
+        ]
         items.sort(key=lambda item: item.added_ns, reverse=True)
         return items[:limit]
 
@@ -291,51 +320,24 @@ class QobuzClient:
         """Albums from Qobuz editorial / featured rails (not new releases)."""
         if not self.is_logged_in():
             return []
-        items: list[RecentlyAddedItem] = []
-        seen: set[str] = set()
         rank_base = time.time_ns()
-        rank = 0
-        page_size = 100
         try:
-            for feature_type in _SUGGESTION_FEATURE_TYPES:
-                offset = 0
-                while len(items) < limit:
-                    data = self._api_get(
-                        "album/getFeatured",
-                        {
-                            "type": feature_type,
-                            "limit": min(page_size, limit - len(items)),
-                            "offset": offset,
-                        },
-                    )
-                    albums = data.get("albums") if isinstance(data, dict) else None
-                    if not isinstance(albums, dict):
-                        break
-                    batch = albums.get("items") or []
-                    if not batch:
-                        break
-                    for raw in batch:
-                        if not isinstance(raw, dict):
-                            continue
-                        release = convert.release_stub_from_qobuz(raw)
-                        if release.id in seen:
-                            continue
-                        seen.add(release.id)
-                        items.append(
-                            RecentlyAddedItem(added_ns=rank_base - rank, release=release),
-                        )
-                        rank += 1
-                        if len(items) >= limit:
-                            break
-                    if len(batch) < page_size:
-                        break
-                    offset += page_size
+            albums = self._collect_featured_albums(
+                _SUGGESTION_FEATURE_TYPES,
+                limit=limit,
+            )
         except QobuzUnavailableError:
             raise
         except Exception:
             log.exception("Failed to load Qobuz suggestions")
             return []
-        return items[:limit]
+        return [
+            RecentlyAddedItem(
+                added_ns=rank_base - index,
+                release=convert.release_stub_from_qobuz(raw),
+            )
+            for index, raw in enumerate(albums)
+        ]
 
     def release_id_for_track(self, track_id: str) -> str | None:
         numeric = qobuz_ids.parse_prefixed_id(track_id, "track")
