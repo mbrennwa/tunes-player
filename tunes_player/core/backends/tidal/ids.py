@@ -1,4 +1,4 @@
-"""Opaque Tidal entity IDs used in core models."""
+"""Opaque TIDAL entity IDs used in core models."""
 
 from __future__ import annotations
 

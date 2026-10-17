@@ -31,7 +31,7 @@ SUGGESTIONS_SIMILAR_LIMIT = 24
 SUGGESTIONS_SIMILAR_TIMEOUT_SEC = 8.0
 SUGGESTIONS_RECENT_GENRE_DAYS = 30
 
-# Merged suggestions sort: local first, then streaming by source name (Qobuz, Tidal).
+# Merged suggestions sort: local first, then streaming by source name (Qobuz, TIDAL).
 _SUGGESTION_SUB_SCALE = 10**15
 _SUGGESTION_LOCAL_BASE = 3 * 10**18
 _SUGGESTION_SOURCE_STEP = 10**16

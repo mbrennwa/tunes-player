@@ -753,7 +753,7 @@ class SaveToDiskCoordinator:
         if not (
             track_id.startswith("tidal:") or track_id.startswith("qobuz:")
         ):
-            raise SaveToDiskError("Only TIDAL and Qobuz tracks can be saved.")
+            raise SaveToDiskError("Only Qobuz and TIDAL tracks can be saved.")
         try:
             source = resolve_track(
                 self._get_store(),

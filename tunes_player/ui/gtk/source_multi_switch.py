@@ -17,7 +17,7 @@ EnabledSourcesChanged = Callable[[frozenset[Source]], None]
 # Compact labels for the source filter row only.
 _CHIP_LABELS: dict[Source, str] = {
     Source.LOCAL: "Local",
-    Source.TIDAL: "Tidal",
+    Source.TIDAL: "TIDAL",
     Source.QOBUZ: "Qobuz",
 }
 
