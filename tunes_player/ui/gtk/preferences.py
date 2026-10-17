@@ -34,7 +34,7 @@ _FOLDER_WATCH_LABEL = "Watch folder"
 _QOBUZ_CRED_AUTOSAVE_MS = 500
 _UNRECOGNIZED_SYNC_TOAST_SEC = 8
 _APP_DESCRIPTION = (
-    "Music player for local files and streaming (TIDAL, Qobuz; Linux/GNOME first)"
+    "Search, discover, and play music from local files, Qobuz, and Tidal"
 )
 _PROJECT_HOMEPAGE = "https://github.com/mbrennwa/tunes-player"
 _ISSUE_TRACKER_URL = "https://github.com/mbrennwa/tunes-player/issues"
