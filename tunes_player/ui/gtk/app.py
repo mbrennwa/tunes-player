@@ -1892,7 +1892,8 @@ def run() -> int:
                 heading="Download in progress",
                 body=(
                     "Tunes is still saving music to disk. Quitting stops the "
-                    "transfer for now; it will resume when Tunes starts again."
+                    "transfer for now; it and any queued downloads will resume "
+                    "when Tunes starts again."
                 ),
             )
             dialog.add_response("stay", "Stay")

@@ -2130,7 +2130,8 @@ class PlayerService:
     def pause_save_to_disk_for_quit(self) -> None:
         """Stop the active download and persist it for resume on next start.
 
-        In-memory queued jobs are dropped (not persisted across quit).
+        Queued jobs keep their on-disk ``queued`` manifests and are restored on the
+        next start.
         """
         self._save_to_disk.pause_save_to_disk_for_quit()
 
@@ -2161,7 +2162,10 @@ class PlayerService:
         )
 
     def resume_interrupted_save_to_disk(self) -> bool:
-        """Resume the first interrupted download job, if any. Returns True if started."""
+        """Restore persisted download jobs (interrupted, queued, failed) and start the first.
+
+        Returns True if a job was started.
+        """
         return self._save_to_disk.resume_interrupted_save_to_disk()
 
     def subscribe(self, callback: EventCallback) -> Unsubscribe:

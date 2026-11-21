@@ -637,8 +637,9 @@ format allowed by the current shell quality filter (same `PlaybackPreference` ce
 playback).
 
 **Concurrency (#68):** at most **two** tracks download simultaneously within a job.
-Only **one job** runs at a time; further Save-to-disk actions are **queued in memory**
-and start when the active job finishes (or is cancelled).
+Only **one job** runs at a time; further Save-to-disk actions are **queued** (each queued
+job is also mirrored on disk as a `queued` manifest, see Quit / resume) and start when
+the active job finishes (or is cancelled).
 
 **Downloads menu (#83):** a header button left of Settings opens a Firefox-style popover
 listing **Ongoing** (active job + progress/cancel), **Upcoming** (queued jobs, removable),
@@ -654,9 +655,15 @@ anyway proceeds and still uses `unique_destination` (no overwrite).
 
 **Quit / resume (Firefox-like, #70):** closing or quitting while a job is active shows a
 Stay / Quit confirm. Quit stops the transfer and persists a `manifest.json` in the job
-dir (track ids, destination, completed indices). **Queued (upcoming) jobs are dropped**
-on quit — they are not persisted. The next app start auto-resumes interrupted disk jobs
-(job-level: skip fully staged tracks; re-fetch the in-flight track).
+dir (track ids, destination, completed indices, `enqueued_at`). **Queued (upcoming)
+jobs are persisted too (#182):** a job waiting behind the active one gets a `queued`
+manifest in its own job dir as soon as it is enqueued (removed again if the row is
+cancelled), so the queue survives quit and crash. The next app start restores all
+resumable jobs and runs them in this order: the interrupted/in-progress job first
+(job-level: skip fully staged tracks; re-fetch the in-flight track), then `queued`
+jobs in enqueue order, then `failed` jobs (oldest first). Order within a group uses
+`enqueued_at` (file mtime for manifests that predate it). The Completed history is not
+persisted.
 **Multi-track jobs** promote into Downloads only when every track stages successfully
 (album-atomic); partial albums are not left in the downloads tree. Single-track jobs
 promote immediately on success. See issues #68, #70, #81, and #83.
