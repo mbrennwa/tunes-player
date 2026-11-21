@@ -6,6 +6,7 @@ from tunes_player.core.volume import (
     BitPerfectPotential,
     VolumeEndpoint,
     is_alsa_endpoint_id,
+    is_mpd_endpoint_id,
 )
 
 _BIT_PERFECT_SUFFIX = " · bit perfect"
@@ -39,6 +40,8 @@ def classify_sink_potential(*, name: str, description: str) -> BitPerfectPotenti
 
 def endpoint_dropdown_label(endpoint: VolumeEndpoint) -> str:
     """Short label for Settings dropdowns (keeps Adw row layout readable)."""
+    if is_mpd_endpoint_id(endpoint.id):
+        return f"{endpoint.name} (network MPD)"
     if is_alsa_endpoint_id(endpoint.id):
         return f"{endpoint.description}{_BIT_PERFECT_SUFFIX}"
     return endpoint.description

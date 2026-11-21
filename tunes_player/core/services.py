@@ -43,6 +43,8 @@ from tunes_player.core.save_to_disk import (
 from tunes_player.core.save_to_disk_coordinator import SaveToDiskCoordinator
 from tunes_player.core.shell_state import refresh_local_release_art_uris
 from tunes_player.core.playback.engine import EngineEvent, PlaybackEngine
+from tunes_player.core.audio_device_messages import remote_mpd_error_message
+from tunes_player.core.playback.remote_file_server import RemoteFileServer
 from tunes_player.core.playback.health_monitor import (
     PlaybackHealthMonitor,
     create_playback_health_monitor,
@@ -76,6 +78,12 @@ from tunes_player.core.volume import (
     debug_volume_trace,
     derive_volume_mode,
     is_alsa_endpoint_id,
+    is_mpd_endpoint_id,
+)
+from tunes_player.core.remote_output import (
+    RemoteMpdOutput,
+    RemoteTargetError,
+    normalize_remote_output,
 )
 from tunes_player.core.volume_apply import VolumeApplyCoordinator
 
@@ -276,6 +284,8 @@ class PlayerService:
         self._playlist_meta: list[Track] = []
         self._playlist_build_generation = 0
         self._playlist_prepared: dict[str, _PreparedTrackLoad] = {}
+        self._remote_files: RemoteFileServer | None = None
+        self._remote_files_lock = threading.Lock()
         self._playlist_playback_preference: PlaybackPreference | None = None
         self._current_track: Track | None = None
         self._current_release_id: str | None = None
@@ -1898,22 +1908,142 @@ class PlayerService:
             return
         self.set_volume(self._volume + delta)
 
+    # --- Remote MPD outputs (#60) ---------------------------------------
+
+    def active_remote_output(self) -> RemoteMpdOutput | None:
+        """The selected network MPD output, or None when playing locally."""
+        cfg = self._config_manager.config
+        if not cfg.remote_output_id:
+            return None
+        for output in cfg.remote_outputs:
+            if output.id == cfg.remote_output_id:
+                return output
+        return None
+
+    def remote_output_active(self) -> bool:
+        return self.active_remote_output() is not None
+
+    def active_output_id(self) -> str | None:
+        """Id of the selected output entry (remote ``mpd:`` id or local sink id)."""
+        remote = self.active_remote_output()
+        if remote is not None:
+            return remote.id
+        return self._config_manager.config.output_sink_id
+
+    def add_remote_output(
+        self, name: str, host: str, port: int | str = 6600
+    ) -> RemoteMpdOutput | None:
+        """Validate and persist a network MPD output; None for unusable input."""
+        output = normalize_remote_output(name, host, port)
+        if output is None:
+            return None
+        if self._config_manager.add_remote_output(output):
+            self._config_manager.save()
+        return output
+
+    def remove_remote_output(self, output_id: str) -> None:
+        was_active = self._config_manager.config.remote_output_id == output_id
+        if not self._config_manager.remove_remote_output(output_id):
+            return
+        self._config_manager.save()
+        if was_active:
+            self._leave_remote_output()
+
+    def _select_remote_output(self, endpoint_id: str) -> None:
+        cfg = self._config_manager.config
+        if all(item.id != endpoint_id for item in cfg.remote_outputs):
+            return
+        if cfg.remote_output_id == endpoint_id:
+            return
+        self._release_exclusive_session()
+        cfg.remote_output_id = endpoint_id
+        self._config_manager.save()
+        self._reset_output_dependent_state()
+        self._rebuild_engine_for_output_change()
+        self._apply_engine_volume_policy()
+        self._emit("playback_changed", "volume_changed")
+
+    def _leave_remote_output(self) -> None:
+        """Return to the saved local sink after the remote output is deselected."""
+        self._config_manager.config.remote_output_id = None
+        self._config_manager.save()
+        self._reset_output_dependent_state()
+        self._rebuild_engine_for_output_change()
+        self._apply_engine_volume_policy()
+        self._emit("playback_changed", "volume_changed")
+
     def set_output_sink(self, endpoint_id: str) -> None:
+        if is_mpd_endpoint_id(endpoint_id):
+            self._select_remote_output(endpoint_id)
+            return
         if self._volume_controller is None:
             return
         self._release_exclusive_session()
+        self._config_manager.config.remote_output_id = None
         self._volume_controller.set_active_endpoint(endpoint_id)
         self._config_manager.config.output_sink_id = endpoint_id
         self._config_manager.save()
         self._config_manager.config.volume_control_mode = None
         self._config_manager.save()
+        self._reset_output_dependent_state()
         self._rebuild_engine_for_output_change()
         self._apply_engine_volume_policy()
         self._emit("playback_changed")
 
+    def _reset_output_dependent_state(self) -> None:
+        """Drop state computed for the previous output.
+
+        Prepared queue entries carry an output profile and a playback target
+        (a local path or a file-server URL), so they are stale after any output
+        change. The file server only lives while a remote output needs it.
+        """
+        self._playlist_build_generation += 1
+        self._playlist_prepared = {}
+        self._stop_remote_file_server()
+
+    def _stop_remote_file_server(self) -> None:
+        with self._remote_files_lock:
+            server = self._remote_files
+            self._remote_files = None
+        if server is not None:
+            server.stop()
+
+    def _remote_file_server_for(self, remote: RemoteMpdOutput) -> RemoteFileServer:
+        with self._remote_files_lock:
+            server = self._remote_files
+            if server is None:
+                server = RemoteFileServer()
+                self._remote_files = server
+            try:
+                server.serve_to(remote.host, remote.port)
+            except OSError as exc:
+                raise RemoteTargetError(
+                    f"Could not share local files with MPD '{remote.name}': {exc}"
+                ) from exc
+            return server
+
+    def _playback_preference_for_track(self, track_id: str) -> PlaybackPreference | None:
+        """Playback ceiling for one track on the active output.
+
+        A remote MPD can open plain URLs but not TIDAL's hi-res DASH manifests
+        (a local ``.mpd`` file), so TIDAL is capped to the lossless URL tier there.
+        """
+        preference = self._playlist_playback_preference
+        if not track_id.startswith("tidal:") or not self.remote_output_active():
+            return preference
+        from tunes_player.core.release_quality import (
+            QUALITY_FILTER_CD,
+            QUALITY_FILTER_HI_RES,
+        )
+
+        if preference is None or preference.max_tier == QUALITY_FILTER_HI_RES:
+            return PlaybackPreference(QUALITY_FILTER_CD)
+        return preference
+
     def list_output_sinks(self) -> list[VolumeEndpoint]:
+        remote = [item.to_endpoint() for item in self._config_manager.config.remote_outputs]
         if self._volume_controller is None:
-            return []
+            return remote
         normalize = getattr(
             self._volume_controller, "normalize_output_sink_config", None
         )
@@ -1925,7 +2055,7 @@ class PlayerService:
                 from tunes_player.core.audio_device_messages import OUTPUT_UNAVAILABLE
 
                 self._report_error(OUTPUT_UNAVAILABLE)
-        return self._volume_controller.list_endpoints()
+        return [*self._volume_controller.list_endpoints(), *remote]
 
     def get_linux_audio_stack_info(self) -> object:
         """Return LinuxAudioStackInfo on Linux, else None."""
@@ -2003,7 +2133,8 @@ class PlayerService:
 
     def _publish_playback_health_sample(self) -> None:
         monitor = self._playback_health_monitor
-        if monitor is None:
+        if monitor is None or self.remote_output_active():
+            # The health monitor samples local mpv/AO properties only.
             return
         engine = self._engine
         if engine is None or not self._playback_intended:
@@ -2075,6 +2206,7 @@ class PlayerService:
         self._tidal.save_session()
         self._library_scan.prepare_shutdown()
         self._release_exclusive_session()
+        self._stop_remote_file_server()
         engine = self._engine
         self._engine = None
         while True:
@@ -2178,6 +2310,8 @@ class PlayerService:
         return unsubscribe
 
     def _has_device_volume(self, *, verify_alsa: bool = False) -> bool:
+        if self.remote_output_active():
+            return False
         controller = self._volume_controller
         if controller is None or not controller.available():
             return False
@@ -2192,6 +2326,9 @@ class PlayerService:
         return controller.uses_device_volume
 
     def _active_endpoint_id(self) -> str | None:
+        remote = self.active_remote_output()
+        if remote is not None:
+            return remote.id
         if self._volume_controller is None:
             return None
         return self._volume_controller.get_active_endpoint_id()
@@ -2223,9 +2360,29 @@ class PlayerService:
             None if source is None else source.stream_metadata
         )
 
+    def _remote_playback_profile(
+        self, remote: RemoteMpdOutput
+    ) -> tuple[PlaybackOutputProfile, PlaybackPathInfo]:
+        """Profile for a remote MPD: no local ALSA/exclusive handling applies.
+
+        MPD decodes on its own host, so Tunes makes no bit-perfect claim.
+        """
+        profile = PlaybackOutputProfile(
+            direct_alsa=False,
+            use_exclusive=False,
+            allow_resample=False,
+        )
+        return profile, PlaybackPathInfo(
+            bit_perfect_playback=False,
+            playback_note=f"via MPD ({remote.name})",
+        )
+
     def _compute_playback_profile_for_track(
         self, track: Track, *, source: PlayableSource | None = None
     ) -> tuple[PlaybackOutputProfile, PlaybackPathInfo]:
+        remote = self.active_remote_output()
+        if remote is not None:
+            return self._remote_playback_profile(remote)
         file_meta = self._file_meta_for_playback_profile(track, source=source)
         profile, path_info = compute_output_profile(
             file_meta=file_meta,
@@ -2240,6 +2397,9 @@ class PlayerService:
     def _compute_playback_profile_for_current(
         self,
     ) -> tuple[PlaybackOutputProfile, PlaybackPathInfo]:
+        remote = self.active_remote_output()
+        if remote is not None:
+            return self._remote_playback_profile(remote)
         track = self._current_track
         if track is None:
             profile, path_info = compute_output_profile(
@@ -2313,7 +2473,28 @@ class PlayerService:
         return self._mpv_audio_device()
 
     def _playback_target_for_engine(self, source: PlayableSource) -> str:
-        return source.playback_target
+        remote = self.active_remote_output()
+        if remote is None:
+            return source.playback_target
+        return self._remote_playback_target(remote, source)
+
+    def _remote_playback_target(
+        self, remote: RemoteMpdOutput, source: PlayableSource
+    ) -> str:
+        """URI a remote MPD can open for ``source``.
+
+        Local files are served over HTTP from this host; stream URLs pass through.
+        """
+        if not source.uri.startswith("file://"):
+            return source.playback_target
+        path = Path(source.playback_target)
+        if path.suffix.lower() == ".mpd":
+            raise RemoteTargetError(
+                "This TIDAL quality uses a DASH manifest, which a network MPD "
+                "cannot play. Choose a lower TIDAL quality for this output."
+            )
+        server = self._remote_file_server_for(remote)
+        return server.url_for(path)
 
     def _set_playback_input_class_for_source(self, source: PlayableSource | None) -> None:
         from tunes_player.core.playback.buffer_policy import InputClass, classify_playback_uri
@@ -2705,7 +2886,7 @@ class PlayerService:
             track.id,
             tidal=self._tidal,
             qobuz=self._qobuz,
-            playback_preference=self._playlist_playback_preference,
+            playback_preference=self._playback_preference_for_track(track.id),
         )
         if source is None:
             return
@@ -2727,12 +2908,21 @@ class PlayerService:
         )
         self._reset_playback_position(pos)
         self._configure_engine_playback_path(engine, track, source=source)
-        playback_target = self._playback_target_for_engine(source)
-        engine.load(
-            playback_target,
-            start_sec=pos,
-            output_profile=profile,
-        )
+        try:
+            playback_target = self._playback_target_for_engine(source)
+            engine.load(
+                playback_target,
+                start_sec=pos,
+                output_profile=profile,
+            )
+        except Exception as exc:
+            # e.g. a remote MPD that is unreachable or busy: keep the app alive
+            # and tell the user instead of failing inside the settings callback.
+            log.warning("Could not start playback on the new output", exc_info=True)
+            self._playback_intended = False
+            self._is_playing = False
+            self._report_error(self._output_error_message(exc))
+            return
         if not playing:
             engine.pause()
         self._playback_intended = playing
@@ -2772,7 +2962,7 @@ class PlayerService:
                 track.id,
                 tidal=self._tidal,
                 qobuz=self._qobuz,
-                playback_preference=self._playlist_playback_preference,
+                playback_preference=self._playback_preference_for_track(track.id),
             )
         except Exception as exc:
             self._report_error(str(exc), exc=exc)
@@ -2838,6 +3028,9 @@ class PlayerService:
         )
 
     def _volume_mode(self) -> VolumeMode:
+        if self.remote_output_active():
+            # The level is set on the remote endpoint; Tunes never touches it.
+            return "fixed"
         if self._config_manager.config.volume_control_mode == "fixed":
             return "fixed"
         return self._auto_volume_mode()
@@ -2852,6 +3045,8 @@ class PlayerService:
         )
 
     def _output_using_fallback(self) -> bool:
+        if self.remote_output_active():
+            return False
         configured = self._config_manager.config.output_sink_id
         if not configured or self._volume_controller is None:
             return False
@@ -2909,6 +3104,13 @@ class PlayerService:
             profile, path_info = self._compute_playback_profile_for_current()
             self._output_profile = profile
             self._apply_path_info(path_info)
+            remote = self.active_remote_output()
+            if remote is not None:
+                self._engine = create_playback_engine(
+                    remote_output=remote,
+                    on_event=self._on_engine_event,
+                )
+                return self._engine
             self._engine = create_playback_engine(
                 unity_gain=self._unity_gain_profile(),
                 volume=self._mpv_volume_level(),
@@ -2950,7 +3152,7 @@ class PlayerService:
                 track.id,
                 tidal=self._tidal,
                 qobuz=self._qobuz,
-                playback_preference=self._playlist_playback_preference,
+                playback_preference=self._playback_preference_for_track(track.id),
             )
         except Exception as exc:
             return _PreparedTrackLoad(
@@ -2972,7 +3174,15 @@ class PlayerService:
                 resume=resume,
                 error=error,
             )
-        playback_target = self._playback_target_for_engine(source)
+        try:
+            playback_target = self._playback_target_for_engine(source)
+        except RemoteTargetError as exc:
+            return _PreparedTrackLoad(
+                generation=generation,
+                track=track,
+                resume=resume,
+                error=str(exc),
+            )
 
         self._remember_stream_metadata(source)
         profile, path_info = self._compute_playback_profile_for_track(
@@ -3680,6 +3890,17 @@ class PlayerService:
                 self._release_exclusive_session()
                 self._acquire_exclusive_session_if_needed(profile)
             engine = self._engine
+            remote = self.active_remote_output()
+            if remote is not None:
+                self._sync_duration_from_engine()
+                self._sync_playback_position_from_engine()
+                self._is_playing = False
+                self._report_error(
+                    remote_mpd_error_message(
+                        remote.name, getattr(engine, "last_error", None)
+                    )
+                )
+                return
             release = getattr(engine, "release_alsa_device_contention", None)
             if callable(release):
                 release()
@@ -3710,6 +3931,12 @@ class PlayerService:
         elif event == "playback_path_changed":
             self._sync_playback_path_from_engine()
             self._emit("playback_changed")
+
+    def _output_error_message(self, exc: BaseException) -> str:
+        remote = self.active_remote_output()
+        if remote is not None:
+            return remote_mpd_error_message(remote.name, str(exc))
+        return str(exc)
 
     def _report_error(self, message: str, *, exc: BaseException | None = None) -> None:
         self._engine_error = message
