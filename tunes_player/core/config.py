@@ -16,6 +16,11 @@ from tunes_player.core.home import (
     NEW_MUSIC_LOCAL_WITHIN_DAYS_MAX,
     NEW_MUSIC_LOCAL_WITHIN_DAYS_MIN,
 )
+from tunes_player.core.remote_output import (
+    RemoteMpdOutput,
+    parse_remote_outputs,
+    remote_outputs_to_json,
+)
 from tunes_player.core.shell_state import ShellState, parse_shell_state
 
 APP_NAME = "tunes-player"
@@ -122,6 +127,10 @@ class AppConfig:
     # Last fully processed file path from an interrupted full scan (sorted order).
     music_folder_scan_checkpoint: dict[str, str] = field(default_factory=dict)
     output_sink_id: str | None = None
+    # Network MPD outputs the user added; ``remote_output_id`` (mpd:host:port) is the
+    # active one, or None for local playback via ``output_sink_id`` (#60).
+    remote_outputs: list[RemoteMpdOutput] = field(default_factory=list)
+    remote_output_id: str | None = None
     allow_software_volume_fallback: bool = True
     # None = volume control on (hardware when available, else software); fixed = off.
     volume_control_mode: str | None = None
@@ -222,6 +231,10 @@ class ConfigManager:
         )
         app_id = raw.get("qobuz_app_id")
         app_secret = raw.get("qobuz_app_secret")
+        remote_outputs = parse_remote_outputs(raw.get("remote_outputs", []))
+        remote_output_id = raw.get("remote_output_id") or None
+        if remote_output_id not in {item.id for item in remote_outputs}:
+            remote_output_id = None
         volume_control_mode = raw.get("volume_control_mode")
         if volume_control_mode not in {None, "hardware", "software", "fixed"}:
             volume_control_mode = None
@@ -265,6 +278,8 @@ class ConfigManager:
             music_folder_last_scan_kind=last_scan_kind,
             music_folder_scan_checkpoint=scan_checkpoint,
             output_sink_id=raw.get("output_sink_id") or None,
+            remote_outputs=remote_outputs,
+            remote_output_id=remote_output_id,
             allow_software_volume_fallback=bool(
                 raw.get("allow_software_volume_fallback", True)
             ),
@@ -304,6 +319,8 @@ class ConfigManager:
             "music_folder_last_scan_kind": dict(self._config.music_folder_last_scan_kind),
             "music_folder_scan_checkpoint": dict(self._config.music_folder_scan_checkpoint),
             "output_sink_id": self._config.output_sink_id,
+            "remote_outputs": remote_outputs_to_json(self._config.remote_outputs),
+            "remote_output_id": self._config.remote_output_id,
             "allow_software_volume_fallback": self._config.allow_software_volume_fallback,
             "volume_control_mode": self._config.volume_control_mode,
             "exclusive_device_access": self._config.exclusive_device_access,
@@ -324,6 +341,29 @@ class ConfigManager:
     @property
     def config(self) -> AppConfig:
         return self._config
+
+    def add_remote_output(self, output: RemoteMpdOutput) -> bool:
+        """Add or rename a remote MPD output; False when nothing changed."""
+        outputs = self._config.remote_outputs
+        for index, existing in enumerate(outputs):
+            if existing.id == output.id:
+                if existing == output:
+                    return False
+                outputs[index] = output
+                return True
+        outputs.append(output)
+        return True
+
+    def remove_remote_output(self, output_id: str) -> bool:
+        """Remove a remote output; clears the active selection if it was active."""
+        outputs = self._config.remote_outputs
+        kept = [item for item in outputs if item.id != output_id]
+        if len(kept) == len(outputs):
+            return False
+        self._config.remote_outputs = kept
+        if self._config.remote_output_id == output_id:
+            self._config.remote_output_id = None
+        return True
 
     def _canonical_folder_path(self, folder: str) -> str | None:
         target = _normalize_folder_path(folder)

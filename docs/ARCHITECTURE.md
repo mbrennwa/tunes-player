@@ -81,7 +81,8 @@ tunes_player/
 │   ├── services.py    # PlayerService facade for all UIs
 │   ├── config.py      # ConfigManager, AppConfig (platformdirs)
 │   ├── home.py        # New Releases / Suggestions item types and merge limits
-│   ├── volume.py      # VolumeController protocol
+│   ├── volume.py      # VolumeController protocol, endpoint id helpers (pw:, alsa:, mpd:)
+│   ├── remote_output.py # Remote MPD output definitions (name, host, port)
 │   ├── backends/
 │   │   ├── playable.py, resolve.py, local.py
 │   │   ├── tidal/     # client (tidalapi), convert, ids
@@ -90,10 +91,13 @@ tunes_player/
 │   └── playback/
 │       ├── engine.py     # PlaybackEngine protocol
 │       ├── mpv_cli.py    # mpv CLI/property helpers (base_audio_options, …)
-│       └── mpv_events.py # end-file reason helpers
+│       ├── mpv_events.py # end-file reason helpers
+│       ├── mpd_client.py # minimal MPD protocol client
+│       └── remote_file_server.py # HTTP server handing local files to a remote MPD
 ├── engines/
 │   ├── factory.py         # create_playback_engine()
-│   └── mpv.py             # MpvEngine — in-process libmpv
+│   ├── mpv.py             # MpvEngine — in-process libmpv
+│   └── mpd.py             # MpdEngine — drives a remote MPD server
 ├── platform/
 │   └── linux/         # MPRIS, PipeWire/Pulse volume (audio.py)
 └── ui/
@@ -428,8 +432,71 @@ preferences) so users know bit-perfect status is intact.
 **Today:** local PipeWire/Pulse sink selection and volume, plus direct ALSA hw devices
 (`platform/linux/audio.py`, Settings → Audio → Output device). See [Volume control](#volume-control-requirement).
 
-Networked output (UPnP/DLNA renderers, AES67/Dante, and related options) is not
-implemented. Design notes are in [GitHub issue #60](https://github.com/mbrennwa/tunes-player/issues/60).
+**Also today:** a **network MPD** output (see [Remote MPD endpoints](#remote-mpd-endpoints)).
+It is a different kind of output: the remote host decodes, so no local sink, volume
+or bit-perfect handling applies.
+
+Other networked output (UPnP/DLNA renderers, AES67/Dante) is not implemented. Design
+notes are in [GitHub issue #60](https://github.com/mbrennwa/tunes-player/issues/60).
+
+### Remote MPD endpoints
+
+A **remote MPD** output changes *who decodes*. Tunes remains the library and queue
+owner and sends MPD a URI plus transport commands; MPD decodes and outputs on its own
+host. Everything behind MPD (ALSA routing, DSP, sample-rate handling, mixer) is
+configured **outside Tunes** by the user or the device. Tunes treats MPD as a black box.
+
+```text
+Tunes (library, queue, UI)            Remote host
+──────────────────────────            ───────────────────────────
+MpdEngine ── TCP commands/status ───► MPD ──► (user-configured output chain)
+Tunes file server ◄── HTTP fetch ──── MPD   (local library files)
+Tidal / Qobuz URLs ◄──────────────── MPD   (fetched by MPD directly)
+```
+
+**In Tunes**
+
+- Settings → Audio → **Network outputs**: add an output by name, host and port (no
+  discovery in v1). It then appears in the Output device list as *name (network MPD)*.
+- `MpdEngine` (`engines/mpd.py`) implements `PlaybackEngine`. It keeps a **single-entry
+  MPD queue** (Tunes owns the queue, one track at a time, replace loads like
+  `MpvEngine`) and mirrors MPD state back as the usual engine events by polling
+  `status`. A natural end of track is MPD going to `stop` without an error.
+- **Volume is fixed** (the existing `fixed` volume mode): the slider, volume keys and
+  MPRIS volume do nothing for a remote output. Set the level on the endpoint.
+- **No bit-perfect claim.** The playback note reads "via MPD (name)".
+- The mpv-only machinery (output profile, exclusive device access, ALSA recovery, the
+  playback health monitor) is skipped while a remote output is active.
+- Local library files are served to MPD as `http://` URLs by a short-lived server on the
+  Tunes host (`core/playback/remote_file_server.py`): registered files only, each
+  behind an unguessable token, HTTP `Range` supported, bound to the interface that
+  reaches the MPD host. Tidal and Qobuz URLs are passed straight through.
+- TIDAL is capped to the lossless URL tier on a remote output: hi-res TIDAL uses a
+  DASH manifest (a local `.mpd` file), which a network MPD cannot open.
+- The saved remote selection is kept while the host is unreachable (it is not silently
+  replaced by a local sink); the user sees an error instead.
+
+**What the endpoint must provide** (all configured outside Tunes)
+
+- **Reachability both ways.** Tunes must reach MPD's port (default 6600), and MPD must
+  reach the Tunes host over HTTP to fetch local files (check the firewall).
+- **A single-owner output must be released when idle.** If other players share the
+  output device, MPD must close it when paused or stopped. If the device is busy, MPD
+  stays in `pause` and reports the reason in `status.error`; Tunes shows this as an
+  "output is busy" message. MPD does not retry on its own: press play again.
+- **Format and rate conversion happens on the endpoint** when the downstream chain
+  only accepts a fixed format or rate: either in MPD (for example `soxr` resampler with
+  `allowed_formats`, `auto_resample "no"`) or in ALSA. Tunes sends the original stream.
+- **MPD's own mixer** should be `none` when the level is controlled elsewhere.
+
+**Notes kept open**
+
+1. *Bit-perfect and sample rate.* A downstream chain that only accepts a fixed rate
+   means conversion before it. If that chain later follows the source rate, the
+   endpoint-side conversion can go away and MPD can receive native rates.
+2. *Volume.* Level control on the endpoint (for example through a DSP's own API) is
+   deferred; it needs a decision on remote access and authentication.
+3. *Busy handling.* A busy output is a normal, user-visible case, not a fault.
 
 ### Media keys (requirement)
 
@@ -814,7 +881,7 @@ implemented. These are design targets — progress is tracked on GitHub Issues.
 | **Catalog** | Heuristic merge, MusicBrainz/ISRC dedup, unified playlists, prefer-local playback ([Unified catalog](#unified-catalog)) |
 | **Control** | Linux inbound stack/system volume watch (#104) done; other platforms / richer device knobs as needed ([External control interface](#external-control-interface-requirement)) |
 | **Streaming** | Deezer and Spotify backends when supported playback APIs exist ([Streaming](#streaming)) |
-| **Output** | Networked endpoints ([#60](https://github.com/mbrennwa/tunes-player/issues/60)) |
+| **Output** | Remote MPD output done ([Remote MPD endpoints](#remote-mpd-endpoints)); UPnP/DLNA and AES67/Dante parked ([#60](https://github.com/mbrennwa/tunes-player/issues/60)) |
 | **Platform** | Qt UI for macOS/Windows; WASAPI/CoreAudio bit-perfect parity ([Bit-perfect playback](#bit-perfect-playback-requirement)) |
 | **Discover** | Last.fm scrobbling and similar-artist recommendations (opt-in; see [Home content](#home-content-local--streaming)) |
 

@@ -72,6 +72,33 @@ def pipewire_name_from_endpoint_id(endpoint_id: str) -> str | None:
     return endpoint_id[3:]
 
 
+def mpd_endpoint_id(host: str, port: int) -> str:
+    """Stable config id for a remote MPD output (``mpd:host:port``)."""
+    return f"mpd:{host}:{port}"
+
+
+def is_mpd_endpoint_id(endpoint_id: str | None) -> bool:
+    return bool(endpoint_id and endpoint_id.startswith("mpd:"))
+
+
+def mpd_host_port_from_endpoint_id(endpoint_id: str | None) -> tuple[str, int] | None:
+    """Return ``(host, port)`` for an ``mpd:`` id, or None when malformed."""
+    if not is_mpd_endpoint_id(endpoint_id):
+        return None
+    assert endpoint_id is not None
+    rest = endpoint_id[4:]
+    host, sep, port_text = rest.rpartition(":")
+    if not sep or not host:
+        return None
+    try:
+        port = int(port_text)
+    except ValueError:
+        return None
+    if not 1 <= port <= 65535:
+        return None
+    return host, port
+
+
 @dataclass(frozen=True, slots=True)
 class VolumeEndpoint:
     id: str

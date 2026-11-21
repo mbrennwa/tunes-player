@@ -18,3 +18,19 @@ DIRECT_ALSA_STALLED = (
     "Audio output stalled on this ALSA device. "
     "Enable Exclusive device access, or choose the PipeWire output to share."
 )
+
+
+def remote_mpd_error_message(name: str, detail: str | None) -> str:
+    """User-facing text for an MPD error (busy output, unreachable host, ...)."""
+    text = (detail or "").strip()
+    lowered = text.casefold()
+    if "busy" in lowered:
+        return (
+            f"The audio output of MPD '{name}' is busy (in use by another player). "
+            "Stop the other player, then press play again."
+        )
+    if "lost connection" in lowered or "connect" in lowered:
+        return text
+    if text:
+        return f"MPD '{name}' could not play: {text}"
+    return f"MPD '{name}' could not play."

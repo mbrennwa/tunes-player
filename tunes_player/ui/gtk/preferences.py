@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import threading
+
 import gi
 
 gi.require_version("Adw", "1")
@@ -23,6 +25,8 @@ from tunes_player.core.labels_sync import (
     unrecognized_sync_folder_advisory,
 )
 from tunes_player.core.logging_config import diagnostics_log_path
+from tunes_player.core.playback.mpd_client import MpdError, probe_mpd
+from tunes_player.core.remote_output import DEFAULT_MPD_PORT, normalize_remote_output
 from tunes_player.core.services import PlayerService
 from tunes_player.ui.gtk.save_to_disk_menu import (
     choose_download_folder,
@@ -108,10 +112,28 @@ class PreferencesWindow(Adw.PreferencesWindow):
             "notify::active", self._on_volume_control_changed
         )
         audio.add(self._volume_control_row)
+
+        self._network_group = Adw.PreferencesGroup(
+            title="Network outputs",
+            description=(
+                "Play to an MPD server on your network. The server decodes and "
+                "outputs the audio; set its volume and output on that device."
+            ),
+        )
+        self._network_rows: list[Adw.ActionRow] = []
+        self._network_add_row = Adw.ActionRow(title="Add network MPD output…")
+        add_network_button = Gtk.Button(icon_name="list-add-symbolic")
+        add_network_button.set_valign(Gtk.Align.CENTER)
+        add_network_button.connect("clicked", self._on_add_network_output_clicked)
+        self._network_add_row.add_suffix(add_network_button)
+        self._network_add_row.set_activatable_widget(add_network_button)
+        self._network_group.add(self._network_add_row)
+        self._reload_network_outputs()
         self._reload_output_sinks()
 
         audio_page = Adw.PreferencesPage(title="Audio", icon_name="audio-speakers-symbolic")
         audio_page.add(audio)
+        audio_page.add(self._network_group)
 
         application_group = Adw.PreferencesGroup(title="New Releases")
         days = service.config.config.new_music_within_days
@@ -674,6 +696,9 @@ class PreferencesWindow(Adw.PreferencesWindow):
             self._audio_group.set_description(None)
 
     def _output_row_subtitle(self) -> str:
+        remote = self._service.active_remote_output()
+        if remote is not None:
+            return f"Playing on {remote.name} ({remote.address})"
         state = self._service.get_playback_state()
         if state.output_using_fallback:
             return "Saved device unavailable — using fallback"
@@ -684,7 +709,12 @@ class PreferencesWindow(Adw.PreferencesWindow):
         if row is None:
             return
         state = self._service.get_playback_state()
-        row.set_subtitle(_VOLUME_MODE_SUBTITLES[state.volume_mode])
+        remote = self._service.remote_output_active()
+        row.set_sensitive(not remote)
+        if remote:
+            row.set_subtitle("Volume is set on the network output")
+        else:
+            row.set_subtitle(_VOLUME_MODE_SUBTITLES[state.volume_mode])
         self._updating_volume_control = True
         try:
             row.handler_block_by_func(self._on_volume_control_changed)
@@ -696,6 +726,11 @@ class PreferencesWindow(Adw.PreferencesWindow):
     def _sync_exclusive_row(self) -> None:
         row = getattr(self, "_exclusive_row", None)
         if row is None:
+            return
+        if self._service.remote_output_active():
+            # Keep the saved setting: it applies again on local outputs.
+            row.set_sensitive(False)
+            row.set_subtitle("Not used with a network output")
             return
         supported = self._service.exclusive_access_supported()
         row.set_sensitive(supported)
@@ -737,7 +772,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
             names = [endpoint_dropdown_label(endpoint) for endpoint in endpoints]
             self._output_dropdown.set_model(Gtk.StringList.new(names))
 
-            active_id = self._service.config.config.output_sink_id
+            active_id = self._service.active_output_id()
             selected = 0
             for index, endpoint in enumerate(endpoints):
                 if endpoint.id == active_id or (
@@ -753,6 +788,119 @@ class PreferencesWindow(Adw.PreferencesWindow):
             self._output_dropdown.handler_unblock_by_func(self._on_output_changed)
             self._updating_output_dropdown = False
 
+    def _reload_network_outputs(self) -> None:
+        for row in self._network_rows:
+            self._network_group.remove(row)
+        self._network_rows.clear()
+        for output in self._service.config.config.remote_outputs:
+            row = Adw.ActionRow(
+                title=escape_markup(output.name),
+                subtitle=escape_markup(output.address),
+            )
+            remove = Gtk.Button(icon_name="user-trash-symbolic")
+            remove.set_valign(Gtk.Align.CENTER)
+            remove.add_css_class("flat")
+            remove.set_tooltip_text("Remove this network output")
+            remove.connect("clicked", self._on_remove_network_output_clicked, output.id)
+            row.add_suffix(remove)
+            self._network_group.add(row)
+            self._network_rows.append(row)
+
+    def _on_remove_network_output_clicked(self, _button: Gtk.Button, output_id: str) -> None:
+        self._service.remove_remote_output(output_id)
+        self._reload_network_outputs()
+        self._reload_output_sinks()
+
+    def _on_add_network_output_clicked(self, *_args: object) -> None:
+        dialog = Adw.AlertDialog(
+            heading="Add network MPD output",
+            body=(
+                "Enter the address of an MPD server. It must be able to reach this "
+                "computer over the network to play your local files."
+            ),
+        )
+        name_row = Adw.EntryRow(title="Name")
+        host_row = Adw.EntryRow(title="Host")
+        port_row = Adw.EntryRow(title="Port")
+        port_row.set_text(str(DEFAULT_MPD_PORT))
+        entries = Gtk.ListBox()
+        entries.set_selection_mode(Gtk.SelectionMode.NONE)
+        entries.add_css_class("boxed-list")
+        for row in (name_row, host_row, port_row):
+            entries.append(row)
+        test_button = Gtk.Button(label="Test connection")
+        test_button.set_halign(Gtk.Align.START)
+        status = Gtk.Label(xalign=0, wrap=True)
+        status.add_css_class("dim-label")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.append(entries)
+        box.append(test_button)
+        box.append(status)
+        dialog.set_extra_child(box)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("add", "Add")
+        dialog.set_response_appearance("add", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_response_enabled("add", False)
+        dialog.set_default_response("add")
+        dialog.set_close_response("cancel")
+
+        def parsed():
+            return normalize_remote_output(
+                name_row.get_text(), host_row.get_text(), port_row.get_text()
+            )
+
+        def on_changed(*_a: object) -> None:
+            valid = parsed() is not None
+            dialog.set_response_enabled("add", valid)
+            test_button.set_sensitive(valid)
+            status.set_text("")
+
+        test_button.set_sensitive(False)
+        for row in (name_row, host_row, port_row):
+            row.connect("changed", on_changed)
+
+        def on_test(*_a: object) -> None:
+            output = parsed()
+            if output is None:
+                return
+            status.set_text("Testing…")
+            test_button.set_sensitive(False)
+
+            def worker() -> None:
+                try:
+                    version = probe_mpd(output.host, output.port)
+                    message = f"Connected (MPD {version})."
+                except MpdError as exc:
+                    message = str(exc)
+
+                def done() -> bool:
+                    status.set_text(message)
+                    test_button.set_sensitive(True)
+                    return False
+
+                GLib.idle_add(done)
+
+            threading.Thread(target=worker, name="tunes-mpd-probe", daemon=True).start()
+
+        test_button.connect("clicked", on_test)
+
+        def on_response(_dialog: Adw.AlertDialog, response: str) -> None:
+            if response != "add":
+                return
+            output = self._service.add_remote_output(
+                name_row.get_text(), host_row.get_text(), port_row.get_text()
+            )
+            if output is None:
+                return
+            self._reload_network_outputs()
+            self._reload_output_sinks()
+            self.add_toast(
+                Adw.Toast.new(f"Added {output.name}. Choose it under Output device.")
+            )
+
+        dialog.connect("response", on_response)
+        dialog.present(self)
+
     def _on_output_changed(self, dropdown: Gtk.DropDown, *_args: object) -> None:
         if self._updating_output_dropdown:
             return
@@ -761,7 +909,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         if index < 0 or index >= len(endpoints):
             return
         endpoint = endpoints[index]
-        if endpoint.id == self._service.config.config.output_sink_id:
+        if endpoint.id == self._service.active_output_id():
             return
         self._service.set_output_sink(endpoint.id)
         self._output_row.set_subtitle(self._output_row_subtitle())

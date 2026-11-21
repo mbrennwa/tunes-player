@@ -1,4 +1,4 @@
-"""Playback engine factory — in-process libmpv (#46)."""
+"""Playback engine factory — in-process libmpv (#46) or remote MPD (#60)."""
 
 from __future__ import annotations
 
@@ -6,9 +6,11 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from tunes_player.core.playback.engine import EngineEvent
+from tunes_player.engines.mpd import MpdEngine
 from tunes_player.engines.mpv import MpvEngine
 
 if TYPE_CHECKING:
+    from tunes_player.core.remote_output import RemoteMpdOutput
     from tunes_player.core.playback.output_profile import PlaybackOutputProfile
 
 EngineCallback = Callable[[EngineEvent], None]
@@ -23,7 +25,17 @@ def create_playback_engine(
     output_profile: PlaybackOutputProfile | None = None,
     on_event: EngineCallback | None = None,
     endpoint_id: str | None = None,
-) -> MpvEngine:
+    remote_output: RemoteMpdOutput | None = None,
+) -> MpvEngine | MpdEngine:
+    if remote_output is not None:
+        # Remote MPD decodes and outputs on its own host: none of the local
+        # sink, volume or profile arguments apply.
+        return MpdEngine(
+            remote_output.host,
+            remote_output.port,
+            name=remote_output.name,
+            on_event=on_event,
+        )
     return MpvEngine(
         unity_gain=unity_gain,
         volume=volume,
