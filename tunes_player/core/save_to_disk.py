@@ -32,10 +32,15 @@ _MANIFEST_VERSION = 1
 _COMMON_AUDIO_EXTS = (".flac", ".mp3", ".m4a", ".aac", ".ogg", ".wav", ".aiff")
 # Max concurrent track downloads within a single Save-to-disk job.
 MAX_SAVE_CONCURRENCY = 2
+STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
 STATUS_INTERRUPTED = "interrupted"
 STATUS_FAILED = "failed"
 STATUS_COMPLETED = "completed"
+# Manifest states that are restored into the download queue on the next start.
+RESUMABLE_STATUSES = frozenset(
+    {STATUS_QUEUED, STATUS_RUNNING, STATUS_INTERRUPTED, STATUS_FAILED}
+)
 
 
 class SaveToDiskError(Exception):
@@ -67,7 +72,11 @@ class ExistingLocalMatch:
 
 @dataclass(frozen=True, slots=True)
 class PendingDownloadJob:
-    """In-memory queued Save-to-disk job (not persisted across quit)."""
+    """Queued Save-to-disk job waiting for the active job to finish.
+
+    The deque entry is in memory only, but each job is mirrored on disk as a
+    ``queued`` manifest in ``existing_job_dir`` so the queue survives quit and crash.
+    """
 
     job_id: str
     dest_dir: str
@@ -75,6 +84,8 @@ class PendingDownloadJob:
     tracks: tuple[Track, ...]
     label: str
     enqueued_at: float
+    existing_job_dir: Path | None = None
+    completed_indices: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +146,8 @@ class DownloadJobManifest:
     tracks: list[dict[str, Any]]
     completed_indices: list[int]
     status: str
+    # Wall-clock enqueue time; orders restored jobs. 0.0 = unknown (old manifest).
+    enqueued_at: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -145,6 +158,7 @@ class DownloadJobManifest:
             "tracks": list(self.tracks),
             "completed_indices": list(self.completed_indices),
             "status": self.status,
+            "enqueued_at": self.enqueued_at,
         }
 
     @classmethod
@@ -159,6 +173,7 @@ class DownloadJobManifest:
                 int(i) for i in data.get("completed_indices") or []
             ],
             status=str(data.get("status") or STATUS_INTERRUPTED),
+            enqueued_at=float(data.get("enqueued_at") or 0.0),
         )
 
 
@@ -221,14 +236,34 @@ def load_job_manifest(job_dir: Path) -> DownloadJobManifest | None:
     if not isinstance(data, dict) or "job_id" not in data or "dest_dir" not in data:
         return None
     try:
-        return DownloadJobManifest.from_dict(data)
+        manifest = DownloadJobManifest.from_dict(data)
     except (KeyError, TypeError, ValueError):
         log.debug("Invalid download job manifest %s", path, exc_info=True)
         return None
+    if manifest.enqueued_at <= 0.0:
+        # Manifest written before enqueue times were recorded: use file mtime.
+        try:
+            manifest.enqueued_at = path.stat().st_mtime
+        except OSError:
+            pass
+    return manifest
+
+
+def _restore_rank(status: str) -> int:
+    """Restore priority: in-progress job, then queued jobs, then failed jobs."""
+    if status == STATUS_QUEUED:
+        return 1
+    if status == STATUS_FAILED:
+        return 2
+    return 0
 
 
 def list_interrupted_jobs(data_dir: Path) -> list[tuple[Path, DownloadJobManifest]]:
-    """Return (job_dir, manifest) for interrupted (resumable) download jobs."""
+    """Return (job_dir, manifest) for resumable download jobs in restore order.
+
+    Order: the job that was in progress (``interrupted`` / ``running``), then
+    ``queued`` jobs, then ``failed`` jobs; within each group oldest enqueue first.
+    """
     root = download_cache_dir(data_dir)
     if not root.is_dir():
         return []
@@ -240,13 +275,20 @@ def list_interrupted_jobs(data_dir: Path) -> list[tuple[Path, DownloadJobManifes
             manifest = load_job_manifest(child)
             if manifest is None:
                 continue
-            if manifest.status not in {STATUS_INTERRUPTED, STATUS_RUNNING, STATUS_FAILED}:
+            if manifest.status not in RESUMABLE_STATUSES:
                 continue
             if not manifest.track_ids:
                 continue
             found.append((child, manifest))
     except OSError:
         log.exception("Failed listing interrupted download jobs under %s", root)
+    found.sort(
+        key=lambda item: (
+            _restore_rank(item[1].status),
+            item[1].enqueued_at,
+            item[0].name,
+        )
+    )
     return found
 
 
@@ -282,11 +324,7 @@ def cleanup_download_cache(data_dir: Path) -> int:
             if not child.is_dir():
                 continue
             manifest = load_job_manifest(child)
-            if manifest is not None and manifest.status in {
-                STATUS_INTERRUPTED,
-                STATUS_RUNNING,
-                STATUS_FAILED,
-            }:
+            if manifest is not None and manifest.status in RESUMABLE_STATUSES:
                 try:
                     resumable_dirs.add(child.resolve())
                 except OSError:

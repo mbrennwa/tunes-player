@@ -15,7 +15,9 @@ from tunes_player.core.library.store import FileMetadata
 from tunes_player.core.models import Release, Source, Track
 from tunes_player.core.save_to_disk import (
     MAX_SAVE_CONCURRENCY,
+    STATUS_FAILED,
     STATUS_INTERRUPTED,
+    STATUS_QUEUED,
     DownloadJobManifest,
     ExistingLocalMatch,
     SaveCancelled,
@@ -31,6 +33,7 @@ from tunes_player.core.save_to_disk import (
     is_mpd_uri,
     is_writable_dir,
     list_interrupted_jobs,
+    load_job_manifest,
     music_folder_for_path,
     promote_part_to_destination,
     remux_mpd,
@@ -55,6 +58,39 @@ def _track(**kwargs: object) -> Track:
     }
     values.update(kwargs)
     return Track(**values)  # type: ignore[arg-type]
+
+
+def _write_job_manifest(
+    cache_root: Path,
+    job_id: str,
+    dest: Path,
+    *,
+    status: str,
+    enqueued_at: float,
+    track_no: int,
+) -> Path:
+    """Persist a one-track job manifest as the app would leave it on disk."""
+    job_dir = cache_root / job_id
+    job_dir.mkdir(parents=True)
+    track = _track(
+        id=f"tidal:{track_no}",
+        title=f"T{track_no}",
+        release_title=f"Album {job_id}",
+    )
+    save_job_manifest(
+        job_dir,
+        DownloadJobManifest(
+            version=1,
+            job_id=job_id,
+            dest_dir=str(dest.resolve()),
+            track_ids=[track.id],
+            tracks=[serialize_track(track)],
+            completed_indices=[],
+            status=status,
+            enqueued_at=enqueued_at,
+        ),
+    )
+    return job_dir
 
 
 class TestExistingLocalMatch(unittest.TestCase):
@@ -264,6 +300,70 @@ class TestSaveToDiskHelpers(unittest.TestCase):
             jobs = list_interrupted_jobs(data)
             self.assertEqual(len(jobs), 1)
             self.assertEqual(jobs[0][1].job_id, "abc123")
+
+    def test_cleanup_spares_queued_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            cache = data / "download-cache"
+            job_dir = _write_job_manifest(
+                cache,
+                "queuedjob",
+                data / "downloads",
+                status=STATUS_QUEUED,
+                enqueued_at=1.0,
+                track_no=1,
+            )
+            cleanup_download_cache(data)
+            self.assertTrue((job_dir / "manifest.json").is_file())
+            self.assertEqual(len(list_interrupted_jobs(data)), 1)
+
+    def test_list_interrupted_jobs_restore_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            cache = data / "download-cache"
+            dest = data / "downloads"
+            # Directory names deliberately disagree with enqueue order.
+            for job_id, status, enqueued_at, no in (
+                ("a-failed", STATUS_FAILED, 10.0, 1),
+                ("b-queued-late", STATUS_QUEUED, 300.0, 2),
+                ("c-queued-early", STATUS_QUEUED, 200.0, 3),
+                ("d-interrupted", STATUS_INTERRUPTED, 500.0, 4),
+                ("e-failed-late", STATUS_FAILED, 20.0, 5),
+            ):
+                _write_job_manifest(
+                    cache, job_id, dest, status=status, enqueued_at=enqueued_at, track_no=no
+                )
+            order = [m.job_id for _d, m in list_interrupted_jobs(data)]
+            self.assertEqual(
+                order,
+                [
+                    "d-interrupted",
+                    "c-queued-early",
+                    "b-queued-late",
+                    "a-failed",
+                    "e-failed-late",
+                ],
+            )
+
+    def test_manifest_without_enqueued_at_uses_file_mtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            job_dir = _write_job_manifest(
+                data / "download-cache",
+                "legacy",
+                data / "downloads",
+                status=STATUS_INTERRUPTED,
+                enqueued_at=0.0,
+                track_no=1,
+            )
+            manifest = load_job_manifest(job_dir)
+            assert manifest is not None
+            self.assertGreater(manifest.enqueued_at, 0.0)
+            self.assertAlmostEqual(
+                manifest.enqueued_at,
+                (job_dir / "manifest.json").stat().st_mtime,
+                places=3,
+            )
 
     def test_staging_part_path_suffix(self) -> None:
         path = staging_part_path(Path("/cache"), "job", 3, ".flac")
@@ -773,6 +873,9 @@ class TestPlayerServiceSaveHook(unittest.TestCase):
                     jobs = list_interrupted_jobs(root)
                     self.assertEqual(len(jobs), 1)
                     self.assertEqual(jobs[0][1].completed_indices, [1])
+                    # Quitting must not turn a failed job into an "interrupted" one.
+                    service.pause_save_to_disk_for_quit()
+                    self.assertEqual(list_interrupted_jobs(root)[0][1].status, STATUS_FAILED)
                 finally:
                     service.shutdown()
 
@@ -1118,7 +1221,7 @@ class TestPlayerServiceSaveHook(unittest.TestCase):
                 finally:
                     service.shutdown()
 
-    def test_quit_clears_pending_and_persists_active(self) -> None:
+    def test_quit_persists_active_and_queued(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             dest = root / "downloads"
@@ -1150,15 +1253,136 @@ class TestPlayerServiceSaveHook(unittest.TestCase):
                         dest_dir=str(dest),
                     )
                     self.assertEqual(len(service.download_jobs().pending), 1)
+                    active_id = service.download_jobs().active.job_id  # type: ignore[union-attr]
+                    queued_id = service.download_jobs().pending[0].job_id
                     service.pause_save_to_disk_for_quit()
                     snap = service.download_jobs()
+                    # In-memory queue is cleared, but both jobs stay on disk.
                     self.assertEqual(snap.pending, ())
                     self.assertFalse(service.is_saving_to_disk())
                     jobs = list_interrupted_jobs(root)
-                    self.assertEqual(len(jobs), 1)
-                    self.assertEqual(jobs[0][1].status, STATUS_INTERRUPTED)
+                    self.assertEqual(
+                        [(m.job_id, m.status) for _d, m in jobs],
+                        [(active_id, STATUS_INTERRUPTED), (queued_id, STATUS_QUEUED)],
+                    )
                     self.assertTrue(cache.is_dir())
                     self.assertEqual(list(dest.rglob("*.flac")), [])
+                finally:
+                    service.shutdown()
+
+    def _blocking_download(self, started: threading.Event):
+        def slow_download(url, part, cancel_event=None):
+            started.set()
+            while cancel_event is None or not cancel_event.is_set():
+                time.sleep(0.02)
+            raise SaveCancelled()
+
+        return slow_download
+
+    def test_queued_job_mirrored_on_disk_until_cancelled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "downloads"
+            dest.mkdir()
+            service, cache = self._make_service(root, dest=dest)
+            started = threading.Event()
+            with mock.patch(
+                "tunes_player.core.save_to_disk_coordinator.download_https",
+                side_effect=self._blocking_download(started),
+            ):
+                try:
+                    service.start_save_to_disk(
+                        tracks=[_track(id="tidal:1", title="A1", release_title="A")],
+                        dest_dir=str(dest),
+                    )
+                    self.assertTrue(started.wait(timeout=5))
+                    service.start_save_to_disk(
+                        tracks=[_track(id="tidal:2", title="B1", release_title="B")],
+                        dest_dir=str(dest),
+                    )
+                    queued_id = service.download_jobs().pending[0].job_id
+                    # Persisted at enqueue time (no quit involved): survives a crash.
+                    manifest = load_job_manifest(cache / queued_id)
+                    assert manifest is not None
+                    self.assertEqual(manifest.status, STATUS_QUEUED)
+                    self.assertEqual(manifest.track_ids, ["tidal:2"])
+                    self.assertGreater(manifest.enqueued_at, 0.0)
+                    self.assertIn(
+                        queued_id, [m.job_id for _d, m in list_interrupted_jobs(root)]
+                    )
+                    service.cancel_save_to_disk(queued_id)
+                    self.assertFalse((cache / queued_id).exists())
+                    self.assertNotIn(
+                        queued_id, [m.job_id for _d, m in list_interrupted_jobs(root)]
+                    )
+                finally:
+                    service.shutdown()
+
+    def test_resume_restores_queue_in_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "downloads"
+            dest.mkdir()
+            service, cache = self._make_service(root, dest=dest)
+            for job_id, status, enqueued_at, no in (
+                ("jobfailed", STATUS_FAILED, 50.0, 4),
+                ("jobq1", STATUS_QUEUED, 200.0, 2),
+                ("jobq2", STATUS_QUEUED, 100.0, 3),
+                ("jobactive", STATUS_INTERRUPTED, 300.0, 1),
+            ):
+                _write_job_manifest(
+                    cache, job_id, dest, status=status, enqueued_at=enqueued_at, track_no=no
+                )
+            started = threading.Event()
+            with mock.patch(
+                "tunes_player.core.save_to_disk_coordinator.download_https",
+                side_effect=self._blocking_download(started),
+            ):
+                try:
+                    self.assertTrue(service.resume_interrupted_save_to_disk())
+                    self.assertTrue(started.wait(timeout=5))
+                    snap = service.download_jobs()
+                    assert snap.active is not None
+                    self.assertEqual(snap.active.job_id, "jobactive")
+                    self.assertEqual(
+                        [j.job_id for j in snap.pending],
+                        ["jobq2", "jobq1", "jobfailed"],
+                    )
+                finally:
+                    service.shutdown()
+
+    def test_resume_skips_unwritable_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "downloads"
+            dest.mkdir()
+            service, cache = self._make_service(root, dest=dest)
+            # A destination below a regular file can never be created or written.
+            blocker = root / "not-a-dir"
+            blocker.write_text("x")
+            _write_job_manifest(
+                cache,
+                "gone",
+                blocker / "downloads",
+                status=STATUS_INTERRUPTED,
+                enqueued_at=1.0,
+                track_no=1,
+            )
+            _write_job_manifest(
+                cache, "ok", dest, status=STATUS_QUEUED, enqueued_at=2.0, track_no=2
+            )
+            started = threading.Event()
+            with mock.patch(
+                "tunes_player.core.save_to_disk_coordinator.download_https",
+                side_effect=self._blocking_download(started),
+            ):
+                try:
+                    self.assertTrue(service.resume_interrupted_save_to_disk())
+                    self.assertTrue(started.wait(timeout=5))
+                    snap = service.download_jobs()
+                    assert snap.active is not None
+                    self.assertEqual(snap.active.job_id, "ok")
+                    self.assertEqual(snap.pending, ())
                 finally:
                     service.shutdown()
 

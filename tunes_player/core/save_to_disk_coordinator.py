@@ -9,6 +9,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import TypeAlias
 
@@ -24,6 +25,7 @@ from tunes_player.core.save_to_disk import (
     STATUS_COMPLETED,
     STATUS_FAILED,
     STATUS_INTERRUPTED,
+    STATUS_QUEUED,
     STATUS_RUNNING,
     CompletedDownload,
     DownloadJobInfo,
@@ -182,6 +184,9 @@ class SaveToDiskCoordinator:
                 for index, job in enumerate(self._download_pending):
                     if job.job_id == job_id:
                         del self._download_pending[index]
+                        if job.existing_job_dir is not None:
+                            # Drop the on-disk mirror so it is not restored.
+                            discard_download_job(job.existing_job_dir)
                         self._emit("download_queued")
                         return
                 manifest = self._download_active_manifest
@@ -199,7 +204,8 @@ class SaveToDiskCoordinator:
     def pause_save_to_disk_for_quit(self) -> None:
         """Stop the active download and persist it for resume on next start.
 
-        In-memory queued jobs are dropped (not persisted across quit).
+        Queued jobs are only cleared from memory; their ``queued`` manifests stay on
+        disk and are restored on the next start.
         """
         with self._download_lock:
             self._download_pending.clear()
@@ -220,7 +226,8 @@ class SaveToDiskCoordinator:
             job_dir = self._download_active_job_dir
         if manifest is None or job_dir is None:
             return
-        if manifest.status == STATUS_COMPLETED:
+        if manifest.status in {STATUS_COMPLETED, STATUS_FAILED}:
+            # A job that already failed stays failed (restored after queued jobs).
             return
         manifest.status = STATUS_INTERRUPTED
         try:
@@ -284,7 +291,7 @@ class SaveToDiskCoordinator:
         )
         with self._download_lock:
             if self.is_saving_to_disk():
-                self._download_pending.append(job)
+                self._download_pending.append(self._persist_queued_job(job))
                 self._emit("download_queued")
                 return
             self._begin_download_job_locked(
@@ -296,25 +303,73 @@ class SaveToDiskCoordinator:
                 completed_indices=[],
                 resumed=False,
                 label=job.label,
+                enqueued_at=job.enqueued_at,
             )
         self._emit("download_started")
 
+    def _persist_queued_job(self, job: PendingDownloadJob) -> PendingDownloadJob:
+        """Mirror a queued job on disk so it survives quit and crash.
+
+        On failure the job is still queued in memory (it just won't survive a restart).
+        """
+        job_dir = download_cache_dir(self._config_manager.data_dir) / job.job_id
+        manifest = DownloadJobManifest(
+            version=1,
+            job_id=job.job_id,
+            dest_dir=job.dest_dir,
+            track_ids=list(job.track_ids),
+            tracks=[serialize_track(t) for t in job.tracks],
+            completed_indices=[],
+            status=STATUS_QUEUED,
+            enqueued_at=job.enqueued_at,
+        )
+        try:
+            save_job_manifest(job_dir, manifest)
+        except OSError:
+            log.exception("Failed persisting queued download job %s", job.job_id)
+            return job
+        return replace(job, existing_job_dir=job_dir)
+
     def resume_interrupted_save_to_disk(self) -> bool:
-        """Resume the first interrupted download job, if any. Returns True if started."""
+        """Restore persisted download jobs and start the first one.
+
+        Order: the interrupted job (keeping its completed tracks), then queued jobs in
+        their original order, then failed jobs. The first job starts now; the rest
+        wait in the pending queue. Returns True if a job was started.
+        """
         with self._download_lock:
             if self.is_saving_to_disk():
                 return False
-        jobs = list_interrupted_jobs(self._config_manager.data_dir)
-        if not jobs:
+        restored: list[PendingDownloadJob] = []
+        for job_dir, manifest in list_interrupted_jobs(self._config_manager.data_dir):
+            if not is_writable_dir(Path(manifest.dest_dir)):
+                log.warning(
+                    "Skipping resume of download job %s; dest not writable: %s",
+                    manifest.job_id,
+                    manifest.dest_dir,
+                )
+                continue
+            restored.append(self._pending_job_from_manifest(job_dir, manifest))
+        if not restored:
             return False
-        job_dir, manifest = jobs[0]
-        if not is_writable_dir(Path(manifest.dest_dir)):
-            log.warning(
-                "Skipping resume of download job %s; dest not writable: %s",
-                manifest.job_id,
-                manifest.dest_dir,
-            )
-            return False
+        with self._download_lock:
+            if self.is_saving_to_disk():
+                return False
+            queued_ids = {job.job_id for job in self._download_pending}
+            for job in restored:
+                if job.job_id not in queued_ids:
+                    self._download_pending.append(job)
+            self._download_skip_drain = False
+        self._drain_download_queue()
+        self._emit("download_resumed")
+        return True
+
+    @staticmethod
+    def _pending_job_from_manifest(
+        job_dir: Path,
+        manifest: DownloadJobManifest,
+    ) -> PendingDownloadJob:
+        """Rebuild a queue entry from a persisted job manifest."""
         by_id = {
             t["id"]: deserialize_track(t)
             for t in manifest.tracks
@@ -335,25 +390,19 @@ class SaveToDiskCoordinator:
                     else Source.LOCAL,
                 ),
             )
-        completed = sorted({int(i) for i in manifest.completed_indices if int(i) > 0})
-        label = download_job_label(
-            [by_id[tid] for tid in manifest.track_ids if tid in by_id]
+        tracks = tuple(by_id[tid] for tid in manifest.track_ids)
+        return PendingDownloadJob(
+            job_id=manifest.job_id,
+            dest_dir=str(Path(manifest.dest_dir).resolve()),
+            track_ids=tuple(manifest.track_ids),
+            tracks=tracks,
+            label=download_job_label(tracks),
+            enqueued_at=manifest.enqueued_at,
+            existing_job_dir=job_dir,
+            completed_indices=tuple(
+                sorted({int(i) for i in manifest.completed_indices if int(i) > 0})
+            ),
         )
-        with self._download_lock:
-            if self.is_saving_to_disk():
-                return False
-            self._begin_download_job_locked(
-                track_ids=list(manifest.track_ids),
-                dest_dir=str(Path(manifest.dest_dir).resolve()),
-                tracks_by_id=by_id,
-                job_id=manifest.job_id,
-                existing_job_dir=job_dir,
-                completed_indices=completed,
-                resumed=True,
-                label=label,
-            )
-        self._emit("download_resumed")
-        return True
 
     def _begin_download_job_locked(
         self,
@@ -366,6 +415,7 @@ class SaveToDiskCoordinator:
         completed_indices: list[int],
         resumed: bool,
         label: str,
+        enqueued_at: float,
     ) -> None:
         """Start the download worker. Caller must hold ``_download_lock``."""
         self._download_cancel = threading.Event()
@@ -385,6 +435,7 @@ class SaveToDiskCoordinator:
                 existing_job_dir,
                 completed_indices,
                 resumed,
+                enqueued_at,
             ),
             name="tunes-save-to-disk",
             daemon=True,
@@ -429,10 +480,11 @@ class SaveToDiskCoordinator:
                 dest_dir=job.dest_dir,
                 tracks_by_id={t.id: t for t in job.tracks},
                 job_id=job.job_id,
-                existing_job_dir=None,
-                completed_indices=[],
-                resumed=False,
+                existing_job_dir=job.existing_job_dir,
+                completed_indices=list(job.completed_indices),
+                resumed=bool(job.completed_indices),
                 label=job.label,
+                enqueued_at=job.enqueued_at,
             )
         self._emit("download_started")
 
@@ -445,6 +497,7 @@ class SaveToDiskCoordinator:
         existing_job_dir: Path | None,
         completed_indices: list[int],
         resumed: bool,
+        enqueued_at: float,
     ) -> None:
         del resumed  # reserved for logging / UI differentiation
         cache_root = download_cache_dir(self._config_manager.data_dir)
@@ -475,6 +528,7 @@ class SaveToDiskCoordinator:
             ],
             completed_indices=sorted(completed),
             status=STATUS_RUNNING,
+            enqueued_at=enqueued_at,
         )
         with self._download_lock:
             self._download_active_job_dir = job_dir
