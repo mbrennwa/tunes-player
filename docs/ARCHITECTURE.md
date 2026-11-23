@@ -445,6 +445,7 @@ A **remote MPD** output changes *who decodes*. Tunes remains the library and que
 owner and sends MPD a URI plus transport commands; MPD decodes and outputs on its own
 host. Everything behind MPD (ALSA routing, DSP, sample-rate handling, mixer) is
 configured **outside Tunes** by the user or the device. Tunes treats MPD as a black box.
+How to write that MPD configuration is in [remote-mpd.md](remote-mpd.md).
 
 ```text
 Tunes (library, queue, UI)            Remote host
@@ -484,9 +485,12 @@ Tidal / Qobuz URLs ◄──────────────── MPD   (fe
   output device, MPD must close it when paused or stopped. If the device is busy, MPD
   stays in `pause` and reports the reason in `status.error`; Tunes shows this as an
   "output is busy" message. MPD does not retry on its own: press play again.
-- **Format and rate conversion happens on the endpoint** when the downstream chain
-  only accepts a fixed format or rate: either in MPD (for example `soxr` resampler with
-  `allowed_formats`, `auto_resample "no"`) or in ALSA. Tunes sends the original stream.
+- **Format and rate conversion happens on the endpoint.** Tunes sends the original
+  stream. A DAC that accepts the file's rate gets `allowed_formats "*:32:2"` so MPD
+  pads the bit depth and does not resample. A downstream chain locked to one rate
+  gets that single format, and MPD's resampler converts to it. A list of concrete
+  rates is not a menu of rates: an entry is used only on an exact match, and
+  otherwise MPD falls back to the first entry. See [remote-mpd.md](remote-mpd.md).
 - **MPD's own mixer** should be `none` when the level is controlled elsewhere.
 
 **Notes kept open**
