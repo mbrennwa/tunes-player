@@ -25,7 +25,7 @@
 - **Bit-perfect playback** — Tunes passes the original music data from the source to the playback device
 - Hardware volume on the **sound device** where possible, software volume control inside the app as a fallback
 - The app **shows honestly** whether playback is bit-perfect or not
-- **Network MPD** — play through an MPD server on another computer. Tunes keeps the queue; that server decodes and plays. Add it in **Settings → Audio → Network outputs**. Volume and the sound device are set up on the server. See [docs/remote-mpd.md](docs/remote-mpd.md).
+- **Play over the network** — send music to a remote music system. [How to connect it](docs/remote-mpd.md).
 
 ## Install
 
